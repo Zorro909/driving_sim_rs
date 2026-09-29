@@ -1,0 +1,16 @@
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.477455262,"turnover_seconds":0.678329738,"total_seconds":1.1557849999999998,"digest":"a2a2d40df5a7b882"}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.573877333,"turnover_seconds":0.662846331,"total_seconds":1.236723664,"digest":"e666b3e48f615336"}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.521415187,"turnover_seconds":0.657470146,"total_seconds":1.178885333,"digest":"93a894728ec166ac"}
+ALL OK
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.402918068,"turnover_seconds":0.65220946,"total_seconds":1.055127528,"digest":"a2a2d40df5a7b882"}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.567170624,"turnover_seconds":0.663940486,"total_seconds":1.23111111,"digest":"e666b3e48f615336"}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.507569172,"turnover_seconds":0.667591388,"total_seconds":1.17516056,"digest":"93a894728ec166ac"}
+ALL OK
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.401643874,"turnover_seconds":0.677847671,"total_seconds":1.079491545,"digest":"a2a2d40df5a7b882"}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.561797509,"turnover_seconds":0.664654202,"total_seconds":1.2264517110000002,"digest":"e666b3e48f615336"}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.502639514,"turnover_seconds":0.650345179,"total_seconds":1.152984693,"digest":"93a894728ec166ac"}
+ALL OK
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.398706758,"turnover_seconds":0.667032381,"total_seconds":1.065739139,"digest":"a2a2d40df5a7b882"}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.575043778,"turnover_seconds":0.657056288,"total_seconds":1.232100066,"digest":"e666b3e48f615336"}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.511557761,"turnover_seconds":0.655325856,"total_seconds":1.166883617,"digest":"93a894728ec166ac"}
+ALL OK

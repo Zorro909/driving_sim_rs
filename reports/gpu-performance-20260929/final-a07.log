@@ -1,0 +1,17 @@
+  schedules            15300 checked        0 flagged       0 mismatches  OK
+  graph reuse            919 checked        0 flagged       0 mismatches  OK
+  2048 cars, eliminate_on_wall true, eliminate_when_idle false:
+    gen 0: 390/390 ticks, 0 active at the end, 0 lapped; cpu 0.12 s, gpu 0.09 s; 0 mismatching agents
+    turnover 0.06 s (x2)
+    gen 1: 906/906 ticks, 0 active at the end, 0 lapped; cpu 0.19 s, gpu 0.15 s; 0 mismatching agents
+  2048 cars, eliminate_on_wall false, eliminate_when_idle true:
+    gen 0: 6006/6006 ticks, 382 active at the end, 1680 lapped; cpu 2.06 s, gpu 1.33 s; 0 mismatching agents
+    turnover 0.06 s (x2)
+    gen 1: 6006/6006 ticks, 386 active at the end, 1828 lapped; cpu 2.14 s, gpu 1.33 s; 0 mismatching agents
+  window               16384 checked        0 flagged       0 mismatches  OK
+  2048 cars, eliminate_on_wall true, eliminate_when_idle true:
+    gen 0: 390/390 ticks, 0 active at the end, 0 lapped; cpu 0.11 s, gpu 0.07 s; 0 mismatching agents
+    turnover 0.05 s (x2)
+    gen 1: 516/516 ticks, 0 active at the end, 0 lapped; cpu 0.13 s, gpu 0.10 s; 0 mismatching agents
+  window                8192 checked        0 flagged       0 mismatches  OK
+ALL OK

@@ -757,6 +757,8 @@ pub struct GpuSim<'a> {
     /// Caller-chosen tag of the uploaded networks (e.g. the generation), so
     /// unchanged networks are not uploaded again.
     pub network_tag: Option<u64>,
+    network_count: usize,
+    parameter_buffer: Vec<f64>,
 }
 
 /// Arguments of `altd_gpu_sim_window` (gpu/sim/altd_gpu.hip).
@@ -795,7 +797,7 @@ impl<'a> GpuSim<'a> {
         assert!(sensors.len() <= MAX_SENSORS);
         let handle = unsafe { create(world.handle(), vehicle, sensors.as_ptr(), sensors.len() as u32, capacity as u32) };
         assert!(!handle.is_null(), "altd_gpu_sim_create failed");
-        GpuSim { gpu, handle, sensor_count: sensors.len(), cars: 0, network_tag: None }
+        GpuSim { gpu, handle, sensor_count: sensors.len(), cars: 0, network_tag: None, network_count: 0, parameter_buffer: Vec::new() }
     }
 
     pub fn upload(&mut self, cars: &[GpuCar], agents: Option<&[GpuAgent]>) {
@@ -844,6 +846,47 @@ impl<'a> GpuSim<'a> {
         assert_eq!(params.len() % size, 0);
         let status = unsafe { f(self.handle, widths.len() as u32, widths.as_ptr(), (params.len() / size) as u32, params.as_ptr(), control_src.as_ptr()) };
         check(status, "networks");
+        self.network_count = params.len() / size;
+    }
+
+    pub fn network_count(&self) -> usize { self.network_count }
+
+    pub(crate) fn take_parameter_buffer(&mut self) -> Vec<f64> { std::mem::take(&mut self.parameter_buffer) }
+    pub(crate) fn return_parameter_buffer(&mut self, buffer: Vec<f64>) { self.parameter_buffer = buffer; }
+
+    /// Reuse a flat upload buffer, filling disjoint networks in parallel.
+    pub fn upload_networks(&mut self, networks: &[crate::network::Network], control_src: [i32; 5]) -> Result<(), String> {
+        self.upload_network_refs(&networks.iter().collect::<Vec<_>>(), control_src)
+    }
+
+    pub fn upload_agent_networks(&mut self, agents: &[crate::training::TrainingAgent], control_src: [i32; 5]) -> Result<(), String> {
+        self.upload_network_refs(&agents.iter().map(|a| &a.network).collect::<Vec<_>>(), control_src)
+    }
+
+    fn upload_network_refs(&mut self, networks: &[&crate::network::Network], control_src: [i32; 5]) -> Result<(), String> {
+        use rayon::prelude::*;
+        let first = networks.first().ok_or("no networks")?;
+        let size = crate::network::parameter_count(&first.shape);
+        if networks.iter().any(|n| n.shape != first.shape || n.params.len() != size) {
+            return Err("networks of different shapes or invalid parameter counts".into());
+        }
+        let mut profile = crate::training_profile::Profile::new("network_upload");
+        let mut params = std::mem::take(&mut self.parameter_buffer);
+        params.resize(networks.len().checked_mul(size).ok_or("network parameter count overflow")?, 0.0);
+        params.par_chunks_mut(size).zip(networks.par_iter()).for_each(|(out, network)| out.copy_from_slice(&network.params));
+        profile.mark("pack");
+        self.networks(&first.shape, &params, control_src);
+        profile.mark("upload");
+        self.parameter_buffer = params;
+        Ok(())
+    }
+
+    /// Exact population novelty for the currently uploaded networks.
+    pub fn novelty(&self) -> Vec<f64> {
+        let f: unsafe extern "C" fn(*mut c_void, u32, *mut f64) -> i32 = self.gpu.symbol("altd_gpu_sim_novelty");
+        let mut out = vec![0.0; self.network_count];
+        check(unsafe { f(self.handle, self.network_count as u32, out.as_mut_ptr()) }, "population novelty");
+        out
     }
 
     /// Sensors and network forward for the cars in `mask` (sets their controls).

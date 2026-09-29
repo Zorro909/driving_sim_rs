@@ -350,7 +350,9 @@ fn cross(parents: &[&Network], count: usize, algorithm: &str, rng: &mut impl Dec
     }
     assert!(!parents.is_empty(), "selection produced no parents");
     if algorithm == "none" {
-        return (0..count).map(|i| parents[i % parents.len()].clone()).collect();
+        // No random decisions are needed; each child's copy is independent.
+        // Indexed collection retains the parent order of the serial path.
+        return (0..count).into_par_iter().map(|i| parents[i % parents.len()].clone()).collect();
     }
     (0..count)
         .map(|_| {
@@ -372,10 +374,16 @@ fn cross(parents: &[&Network], count: usize, algorithm: &str, rng: &mut impl Dec
 
 /// `reproduce(agents, settings, rng)` without user-controlled agents.
 pub fn reproduce(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom) -> Generation {
+    reproduce_with_scratch(agents, settings, rng, &mut Vec::new())
+}
+
+pub(crate) fn reproduce_with_scratch(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom, normals: &mut Vec<f64>) -> Generation {
+    let mut profile = crate::training_profile::Profile::new("reproduce_python");
     if agents.is_empty() {
         return Generation { networks: Vec::new(), preserved_count: 0, rewards: Vec::new() };
     }
     let scores = reward_values(agents, &settings.rewards);
+    profile.mark("rewards");
     let selected = select(agents, &scores, settings, rng);
     let size = match settings.preserve_parents.as_str() {
         "off" => 0,
@@ -385,7 +393,9 @@ pub fn reproduce(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut
     };
     let preserved: Vec<Network> =
         ranked(&scores).into_iter().take(size.min(settings.population)).map(|i| agents[i].network.clone()).collect();
+    profile.mark("selection");
     let children = cross(&selected, settings.population.saturating_sub(preserved.len()), &settings.crossover, rng);
+    profile.mark("crossover");
     let preserved_count = preserved.len();
     let mut networks = preserved;
     // Children draw their mutation noise one after another from the shared
@@ -401,7 +411,8 @@ pub fn reproduce(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut
             start
         })
         .collect();
-    let normals = rng.standard_normals(draws);
+    rng.standard_normals_into(draws, normals);
+    profile.mark("normal_draws");
     let mutated: Vec<Network> = children
         .into_par_iter()
         .zip(offsets)
@@ -416,23 +427,29 @@ pub fn reproduce(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut
         })
         .collect();
     networks.extend(mutated);
+    profile.mark("mutation");
     Generation { networks, preserved_count, rewards: scores }
 }
 
 /// Reproduction using the original game's independent decision/normal streams.
 pub fn reproduce_game(agents:&[AgentResult],settings:&EvolutionSettings,rng:&mut crate::game_random::GameRandom)->Generation {
+    let mut profile = crate::training_profile::Profile::new("reproduce_game");
     if agents.is_empty(){return Generation{networks:Vec::new(),preserved_count:0,rewards:Vec::new()};}
     let scores=reward_values(agents,&settings.rewards);
+    profile.mark("rewards");
     let selected=select(agents,&scores,settings,rng);
     let size=match settings.preserve_parents.as_str(){"off"=>0,"on_selection_size"=>settings.selection_size,"on_custom"=>settings.preserve_parents_size,other=>panic!("unknown parent preservation mode: {other}")};
     let mut networks:Vec<_>=ranked(&scores).into_iter().take(size.min(settings.population)).map(|i|agents[i].network.clone()).collect();
     let preserved_count=networks.len();
+    profile.mark("selection");
     let children=cross(&selected,settings.population.saturating_sub(preserved_count),&settings.crossover,rng);
+    profile.mark("crossover");
     for child in children {
         let rate=settings.mutation_rate*if settings.adaptive_mutation {mutation_factor(&child,"xavier")}else{1.0};
         let mut child=child.mutate_xavier_game(rate,rng);
         if settings.weight_decay==1.0 {child.params.fill(0.0);}else{child=weight_decay(child,settings.weight_decay);}
         networks.push(child);
     }
+    profile.mark("mutation");
     Generation{networks,preserved_count,rewards:scores}
 }

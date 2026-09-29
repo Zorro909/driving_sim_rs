@@ -1,0 +1,24 @@
+altd_train_profile {"stage":"install","seconds":[["mean",0.02517541],["vehicles",0.013917889],["agents_and_novelty",0.135968295],["passive_reset",0.013110443]]}
+altd_train_profile {"stage":"network_upload","seconds":[["pack",0.039945696],["upload",0.021882894]]}
+altd_train_profile {"stage":"gpu_window","seconds":[["networks",0.062981955],["export_state",0.059754609],["upload_state",0.005375136],["window",0.319372584],["download_state",0.004192261],["import_state",0.004749939]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.167907666],["transform",0.080460148]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.002797558],["selection",0.001183345],["crossover",0.032779296],["normal_draws",0.248462434],["mutation",0.025511488]]}
+altd_train_profile {"stage":"network_upload","seconds":[["pack",0.024683662],["upload",0.015414303]]}
+altd_train_profile {"stage":"install","seconds":[["mean",2e-8],["vehicles",0.015516662],["agents_and_novelty",0.028519866],["passive_reset",0.025522798]]}
+altd_train_profile {"stage":"gpu_turnover","seconds":[["reproduce",0.337672893],["networks",0.040766112],["novelty",0.024177324],["install",0.07325433]]}
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.464104471,"turnover_seconds":0.48021517,"total_seconds":0.9443196410000001,"digest":"a2a2d40df5a7b882"}
+altd_train_profile {"stage":"gpu_window","seconds":[["export_state",0.049200275],["upload_state",0.005094568],["window",0.485901675],["download_state",0.004178912],["import_state",0.004299731]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.166658681],["transform",0.077307532]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.003307495],["selection",0.001234785],["crossover",0.016175999],["normal_draws",0.244110303],["mutation",0.026204525]]}
+altd_train_profile {"stage":"network_upload","seconds":[["pack",0.024916081],["upload",0.015474033]]}
+altd_train_profile {"stage":"install","seconds":[["mean",2e-8],["vehicles",0.0114344],["agents_and_novelty",0.027956128],["passive_reset",0.017358844]]}
+altd_train_profile {"stage":"gpu_turnover","seconds":[["reproduce",0.314670474],["networks",0.041033151],["novelty",0.023561606],["install",0.059793389]]}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.555039053,"turnover_seconds":0.443097102,"total_seconds":0.9981361550000001,"digest":"e666b3e48f615336"}
+altd_train_profile {"stage":"gpu_window","seconds":[["export_state",0.049075586],["upload_state",0.004922388],["window",0.425973308],["download_state",0.004183191],["import_state",0.003709604]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.176252599],["transform",0.081830822]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.003404986],["selection",0.001345034],["crossover",0.016380838],["normal_draws",0.258201261],["mutation",0.02511063]]}
+altd_train_profile {"stage":"network_upload","seconds":[["pack",0.024843592],["upload",0.015495492]]}
+altd_train_profile {"stage":"install","seconds":[["mean",3e-8],["vehicles",0.010935693],["agents_and_novelty",0.028506395],["passive_reset",0.01817768]]}
+altd_train_profile {"stage":"gpu_turnover","seconds":[["reproduce",0.328821592],["networks",0.040997641],["novelty",0.023186478],["install",0.060316007]]}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.495430444,"turnover_seconds":0.457587199,"total_seconds":0.953017643,"digest":"93a894728ec166ac"}
+ALL OK

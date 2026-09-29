@@ -711,7 +711,7 @@ fn check_window(gpu: &Gpu, networks: usize, ticks: u64, generations: usize, conf
             if generation + 1 < generations {
                 let t = Instant::now();
                 cpu.next_generation();
-                on_gpu.next_generation();
+                on_gpu.next_generation_gpu(&mut sim).unwrap();
                 println!("    turnover {:.2} s (x2)", t.elapsed().as_secs_f64());
                 compare_runners(&gw, &world, &cpu, &on_gpu, &mut tally, &format!("install {}", generation + 1));
             }
@@ -741,6 +741,228 @@ fn bench_window(gpu: &Gpu, networks: usize, ticks: u64, eliminate: bool) -> bool
         println!("  turnover (cpu) {:.2} s", t.elapsed().as_secs_f64());
     }
     true
+}
+
+/// Repeat identical generations, including network packing, transfers and state
+/// import in the timing. Resetting the fixture and hashing results are untimed.
+fn bench_fixed(gpu: &Gpu) -> bool {
+    let number = |name: &str, default: usize| -> usize {
+        std::env::var(name).map(|v| v.parse().expect(name)).unwrap_or(default)
+    };
+    let networks = number("ALTD_GPU_BENCH_CARS", 8192);
+    let ticks = number("ALTD_GPU_BENCH_TICKS", 5400) as u64;
+    let samples = number("ALTD_GPU_BENCH_SAMPLES", 3);
+    let warmups = number("ALTD_GPU_BENCH_WARMUPS", 1);
+    let eliminate = number("ALTD_GPU_BENCH_ELIMINATE", 1) != 0;
+    assert!(networks > 0 && ticks > 0 && samples > 0);
+    let mut runner = b06_runner(networks);
+    runner.eliminate_on_wall = eliminate;
+    runner.eliminate_when_idle = eliminate;
+    let world = runner.world.clone();
+    let gw = GpuWorld::new(gpu, &world);
+    let mut sim = runner.gpu_sim(&gw, networks).unwrap();
+    let initial_cars: Vec<_> = runner.agents.iter().map(|a| a.car.gpu_export(&world.vehicle, &gw.arrays.surfaces).unwrap()).collect();
+    let initial_agents: Vec<_> = runner.agents.iter().map(|a| gpu_sim::agent_export(a).unwrap()).collect();
+    let mut expected = None;
+    for sample in 0..warmups + samples {
+        runner.tick = 0;
+        runner.batch_index = 0;
+        runner.agents.par_iter_mut().zip(&initial_cars).zip(&initial_agents).for_each(|((a, c), g)| {
+            a.car.gpu_import(c, &gw.arrays.surfaces).unwrap();
+            gpu_sim::agent_import(g, a);
+        });
+        // A real new generation uploads networks, even when their shape is unchanged.
+        sim.network_tag = None;
+        let start = Instant::now();
+        let executed = runner.advance_generation_gpu(&mut sim, &gw, ticks).unwrap();
+        let seconds = start.elapsed().as_secs_f64();
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (runner.tick, runner.batch_index).hash(&mut hash);
+        for a in &runner.agents {
+            car_text(&a.car.gpu_export(&world.vehicle, &gw.arrays.surfaces).unwrap()).hash(&mut hash);
+            agent_text(&gpu_sim::agent_export(a).unwrap()).hash(&mut hash);
+        }
+        let digest = format!("{:016x}", hash.finish());
+        if let Some(ref previous) = expected { assert_eq!(previous, &digest, "repeated generation differs"); }
+        expected = Some(digest.clone());
+        println!("{}", serde_json::json!({
+            "benchmark": "fixed_generation", "cars": networks, "ticks": executed,
+            "eliminate": eliminate, "sample": sample, "warmup": sample < warmups,
+            "seconds": seconds, "digest": digest,
+            "active": runner.agents.iter().filter(|a| a.car.active).count(),
+        }));
+    }
+    true
+}
+
+/// Consecutive generations, including reproduction, reset and network upload.
+fn bench_training(gpu: &Gpu) -> bool {
+    use std::hash::{Hash, Hasher};
+    let number = |name: &str, default: usize| -> usize {
+        std::env::var(name).map(|v| v.parse().expect(name)).unwrap_or(default)
+    };
+    let count = number("ALTD_GPU_BENCH_CARS", 32768);
+    let generations = number("ALTD_GPU_BENCH_GENERATIONS", 3);
+    let ticks = number("ALTD_GPU_BENCH_TICKS", 5400) as u64;
+    let mut runner = b06_runner(count);
+    runner.eliminate_on_wall = true;
+    runner.eliminate_when_idle = true;
+    let world = runner.world.clone();
+    let gw = GpuWorld::new(gpu, &world);
+    let mut sim = runner.gpu_sim(&gw, count).unwrap();
+    for generation in 0..generations {
+        let start = Instant::now();
+        let executed = runner.advance_generation_gpu(&mut sim, &gw, ticks).unwrap();
+        let simulate = start.elapsed().as_secs_f64();
+        let start = Instant::now();
+        if std::env::var("ALTD_GPU_BENCH_CPU_TURNOVER").is_ok_and(|v| v == "1") {
+            runner.next_generation();
+        } else {
+            runner.next_generation_gpu(&mut sim).unwrap();
+        }
+        let turnover = start.elapsed().as_secs_f64();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        runner.rng.to_json().to_string().hash(&mut hash);
+        for a in &runner.agents {
+            for p in &a.network.params { p.to_bits().hash(&mut hash); }
+            car_text(&a.car.gpu_export(&world.vehicle, &gw.arrays.surfaces).unwrap()).hash(&mut hash);
+            agent_text(&gpu_sim::agent_export(a).unwrap()).hash(&mut hash);
+        }
+        println!("{}", serde_json::json!({"benchmark":"training", "cars":count, "generation":generation,
+            "ticks":executed, "simulate_seconds":simulate, "turnover_seconds":turnover,
+            "total_seconds":simulate+turnover, "digest":format!("{:016x}",hash.finish())}));
+    }
+    true
+}
+
+/// Partial windows exercise batch wrapping, graph re-use, list parity, and
+/// populations that do not fill a wave or divide evenly into eight batches.
+fn check_schedules(gpu: &Gpu) -> bool {
+    let mut tally = Tally::default();
+    for networks in [1, 17, 65, 257] {
+        for (batch_count, stats_phase, batch_index) in [(1, 0, 0), (2, 1, 7), (3, 5, 3), (4, 0, 6), (8, 5, 7)] {
+            let mut cpu = b06_runner(networks);
+            let mut on_gpu = b06_runner(networks);
+            for r in [&mut cpu, &mut on_gpu] {
+                r.batch_count = batch_count;
+                r.stats_phase = stats_phase;
+                r.batch_index = batch_index;
+                r.eliminate_on_wall = true;
+                r.eliminate_when_idle = true;
+            }
+            let world = cpu.world.clone();
+            let gw = GpuWorld::new(gpu, &world);
+            let mut sim = cpu.gpu_sim(&gw, networks).unwrap();
+            for ticks in [1, 5, 6, 7, 23, 24, 25, 49, 600] {
+                let c = cpu.advance(ticks, true);
+                let g = on_gpu.advance_window_gpu(&mut sim, &gw, ticks, true, None).unwrap();
+                assert_eq!(c, g);
+                compare_runners(&gw, &world, &cpu, &on_gpu, &mut tally,
+                    &format!("n={networks} batches={batch_count} phase={stats_phase} window={ticks}"));
+            }
+        }
+    }
+    tally.report("schedules")
+}
+
+fn check_graph_reuse(gpu: &Gpu) -> bool {
+    let fixture = b06_runner(257);
+    let world = fixture.world.clone();
+    let gw = GpuWorld::new(gpu, &world);
+    let mut sim = fixture.gpu_sim(&gw, 257).unwrap();
+    let mut tally = Tally::default();
+    for (case, (count, hidden)) in [(257, 16), (257, 16), (17, 16), (65, 3), (65, 8), (1, 8), (257, 16)].into_iter().enumerate() {
+        let mut cpu = b06_runner(count);
+        let mut on_gpu = b06_runner(count);
+        for runner in [&mut cpu, &mut on_gpu] {
+            for agent in &mut runner.agents {
+                let shape = vec![agent.network.shape[0], hidden, *agent.network.shape.last().unwrap()];
+                let params = (0..network::parameter_count(&shape))
+                    .map(|i| (((i + case) % 17) as f64 - 8.0) * 0.03125).collect();
+                agent.network = network::Network::from_vector(&shape, params);
+            }
+        }
+        sim.network_tag = None;
+        // The first two cases reuse the same graph with different weights and
+        // window lengths, including a remainder outside the captured period.
+        let ticks = if case == 1 { 145 } else { 120 };
+        cpu.advance(ticks, false);
+        on_gpu.advance_window_gpu(&mut sim, &gw, ticks, false, None).unwrap();
+        compare_runners(&gw, &world, &cpu, &on_gpu, &mut tally, &format!("reuse case {case}"));
+    }
+    tally.report("graph reuse")
+}
+
+fn check_novelty(gpu: &Gpu) -> bool {
+    let fixture = b06_runner(257);
+    let world = fixture.world.clone();
+    let gw = GpuWorld::new(gpu, &world);
+    let mut sim = fixture.gpu_sim(&gw, 257).unwrap();
+    let mut tally = Tally::default();
+    for count in [1, 17, 65, 257] {
+        for hidden in [1, 3, 16] {
+            let shape = [fixture.agents[0].network.shape[0], hidden, 5];
+            let networks: Vec<_> = (0..count).map(|i| {
+                let params = (0..network::parameter_count(&shape)).map(|j| {
+                    ((i * 13 + j * 17) % 97) as f64 * 0.125 - 6.0
+                }).collect();
+                network::Network::from_vector(&shape, params)
+            }).collect();
+            sim.upload_networks(&networks, [-1; 5]).unwrap();
+            let got = sim.novelty();
+            let mean: Vec<f64> = (0..networks[0].params.len()).map(|j|
+                networks.iter().fold(0.0, |a, n| a + n.params[j]) / count as f64).collect();
+            for (i, n) in networks.iter().enumerate() {
+                let expected = n.params.iter().zip(&mean).map(|(a, b)| double_math::pow(a-b, 2.0)).fold(0.0, |a,b| a+b).sqrt();
+                tally.record(0, expected.to_bits() == got[i].to_bits(), || format!("novelty n={count} width={hidden} car={i}: {expected:?} / {:?}", got[i]));
+            }
+        }
+    }
+    tally.report("novelty")
+}
+
+fn check_turnover(gpu: &Gpu) -> bool {
+    let mut tally = Tally::default();
+    for game_rng in [false, true] {
+        for (c, crossover) in ["none", "single_point", "uniform"].into_iter().enumerate() {
+            for (s, selection) in ["best", "tournament", "roulette"].into_iter().enumerate() {
+                let mut cpu = b06_runner(17);
+                let mut on_gpu = b06_runner(17);
+                for r in [&mut cpu, &mut on_gpu] {
+                    if game_rng { r.rng = altd_sim::game_random::GameRandom::new([1,2,3,4], 12345).into(); }
+                    r.settings.selection_algorithm = selection.into();
+                    r.settings.selection_size = 4;
+                    r.settings.crossover = crossover.into();
+                    r.settings.mutation_rate = [0.0, 0.05, 0.1][c];
+                    r.settings.adaptive_mutation = c % 2 == 0;
+                    r.settings.weight_decay = [0.0, 0.01, 1.0][s];
+                    r.settings.preserve_parents = "on_custom".into();
+                    r.settings.preserve_parents_size = 1;
+                }
+                let world = cpu.world.clone();
+                let gw = GpuWorld::new(gpu, &world);
+                let mut sim = cpu.gpu_sim(&gw, 65).unwrap();
+                for count in [17, 1, 65, 17] {
+                    cpu.advance(49, false);
+                    on_gpu.advance_window_gpu(&mut sim, &gw, 49, false, None).unwrap();
+                    cpu.settings.population = count;
+                    on_gpu.settings.population = count;
+                    let expected = cpu.next_generation();
+                    let got = on_gpu.next_generation_gpu(&mut sim).unwrap();
+                    assert_eq!(expected.preserved_count, got.preserved_count);
+                    assert_eq!(expected.rewards, got.rewards);
+                    assert_eq!(cpu.rng.to_json(), on_gpu.rng.to_json());
+                    for (i, (a, b)) in expected.networks.iter().zip(&got.networks).enumerate() {
+                        tally.record(0, a.shape == b.shape && a.params.iter().map(|x| x.to_bits()).eq(b.params.iter().map(|x| x.to_bits())),
+                            || format!("offspring {i}: game={game_rng} crossover={crossover} selection={selection} n={count}"));
+                    }
+                    compare_runners(&gw, &world, &cpu, &on_gpu, &mut tally, "turnover");
+                }
+            }
+        }
+    }
+    tally.report("turnover")
 }
 
 /// Diagnostic: after one generation, single-steps the cars four more times and
@@ -824,6 +1046,12 @@ fn main() {
             "bench" => bench_window(&gpu, 32768, 6000, false),
             "benchlive" => bench_window(&gpu, 32768, 6000, true),
             "bench2k" => bench_window(&gpu, 2048, 6000, false),
+            "benchfixed" => bench_fixed(&gpu),
+            "benchtrain" => bench_training(&gpu),
+            "schedules" => check_schedules(&gpu),
+            "reuse" => check_graph_reuse(&gpu),
+            "novelty" => check_novelty(&gpu),
+            "turnover" => check_turnover(&gpu),
             "window3" => check_window(&gpu, 2048, 6000, 2, &[(true, true)]),
             "settle" => settle_report(&gpu, 32768),
             other => panic!("unknown part {other}"),

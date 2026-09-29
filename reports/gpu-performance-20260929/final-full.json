@@ -1,0 +1,165 @@
+{
+  "library": "/var/home/zorro/git/AILearnsToDrive/driving_sim_rs/target/gpu/libaltd_gpu.so",
+  "library_sha256": "d22638b2804d0c7544a6dc44291ac5a508f3fba859b028cb4ec0a3d7afda97fc",
+  "requested_ticks": 5400,
+  "rayon_threads": "8",
+  "graph": "default",
+  "split": "default",
+  "profile": "off",
+  "samples": 3,
+  "warmups": 1,
+  "eliminate": false,
+  "results": [
+    {
+      "cars": 8192,
+      "median_seconds": 2.093966099,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 2.092875155,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 2.094087319,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 2.093610072,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 2.093966099,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        }
+      ]
+    },
+    {
+      "cars": 32768,
+      "median_seconds": 5.714591244,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 6.141205551,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 5.722020728,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 5.714591244,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 5.7050798,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        }
+      ]
+    },
+    {
+      "cars": 262144,
+      "median_seconds": 40.315434321,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 41.391765674,
+          "digest": "6ade42ca8ce33f4e",
+          "active": 262144
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 40.679368461,
+          "digest": "6ade42ca8ce33f4e",
+          "active": 262144
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 40.291074189,
+          "digest": "6ade42ca8ce33f4e",
+          "active": 262144
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 40.315434321,
+          "digest": "6ade42ca8ce33f4e",
+          "active": 262144
+        }
+      ]
+    }
+  ],
+  "checkpoint_sha256": "1203d453895f86b2292f88c3a8f4c0d741f107d4bebdc1bb98f4fc723760f51a"
+}

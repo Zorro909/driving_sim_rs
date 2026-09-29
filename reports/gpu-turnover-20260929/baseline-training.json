@@ -1,0 +1,539 @@
+{
+  "benchmark": "training",
+  "binary": "/tmp/altd-gpu-turnover-20260929/profiled-baseline/gpu_check",
+  "binary_sha256": "4928ad13b4119a303ea9c4cf2b68e488acc163c4d6a9396a65c9847adde892f0",
+  "library": "/tmp/altd-gpu-turnover-20260929/baseline/libaltd_gpu.so",
+  "library_sha256": "d22638b2804d0c7544a6dc44291ac5a508f3fba859b028cb4ec0a3d7afda97fc",
+  "requested_ticks": 5400,
+  "rayon_threads": "8",
+  "graph": "default",
+  "split": "default",
+  "profile": "off",
+  "training_profile": "off",
+  "generations": 3,
+  "samples": 3,
+  "warmups": 1,
+  "eliminate": true,
+  "results": [
+    {
+      "cars": 8192,
+      "median_seconds": 0.3856604676666667,
+      "generations": [
+        {
+          "generation": 0,
+          "digest": "e443b082f80fa4c0",
+          "median_simulate_seconds": 0.154641692,
+          "median_turnover_seconds": 0.169328363,
+          "median_total_seconds": 0.32566335700000004
+        },
+        {
+          "generation": 1,
+          "digest": "7c4c5892d87ffb87",
+          "median_simulate_seconds": 0.239600406,
+          "median_turnover_seconds": 0.171969231,
+          "median_total_seconds": 0.411569637
+        },
+        {
+          "generation": 2,
+          "digest": "6f039461df02d617",
+          "median_simulate_seconds": 0.249939649,
+          "median_turnover_seconds": 0.168973115,
+          "median_total_seconds": 0.419263012
+        }
+      ],
+      "runs": [
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 0,
+          "ticks": 462,
+          "simulate_seconds": 0.158355144,
+          "turnover_seconds": 0.170220199,
+          "total_seconds": 0.328575343,
+          "digest": "e443b082f80fa4c0",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 1,
+          "ticks": 564,
+          "simulate_seconds": 0.239888485,
+          "turnover_seconds": 0.163431421,
+          "total_seconds": 0.403319906,
+          "digest": "7c4c5892d87ffb87",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 2,
+          "ticks": 1044,
+          "simulate_seconds": 0.255758731,
+          "turnover_seconds": 0.159455299,
+          "total_seconds": 0.41521403,
+          "digest": "6f039461df02d617",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 0,
+          "ticks": 462,
+          "simulate_seconds": 0.154641692,
+          "turnover_seconds": 0.163426201,
+          "total_seconds": 0.318067893,
+          "digest": "e443b082f80fa4c0",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 1,
+          "ticks": 564,
+          "simulate_seconds": 0.236583911,
+          "turnover_seconds": 0.157877667,
+          "total_seconds": 0.39446157800000003,
+          "digest": "7c4c5892d87ffb87",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 2,
+          "ticks": 1044,
+          "simulate_seconds": 0.250289897,
+          "turnover_seconds": 0.168973115,
+          "total_seconds": 0.419263012,
+          "digest": "6f039461df02d617",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 0,
+          "ticks": 462,
+          "simulate_seconds": 0.156334994,
+          "turnover_seconds": 0.169328363,
+          "total_seconds": 0.32566335700000004,
+          "digest": "e443b082f80fa4c0",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 1,
+          "ticks": 564,
+          "simulate_seconds": 0.239600406,
+          "turnover_seconds": 0.171969231,
+          "total_seconds": 0.411569637,
+          "digest": "7c4c5892d87ffb87",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 2,
+          "ticks": 1044,
+          "simulate_seconds": 0.24957537,
+          "turnover_seconds": 0.170173039,
+          "total_seconds": 0.419748409,
+          "digest": "6f039461df02d617",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 0,
+          "ticks": 462,
+          "simulate_seconds": 0.154149354,
+          "turnover_seconds": 0.174657918,
+          "total_seconds": 0.328807272,
+          "digest": "e443b082f80fa4c0",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 1,
+          "ticks": 564,
+          "simulate_seconds": 0.246826623,
+          "turnover_seconds": 0.173684143,
+          "total_seconds": 0.42051076600000004,
+          "digest": "7c4c5892d87ffb87",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 8192,
+          "generation": 2,
+          "ticks": 1044,
+          "simulate_seconds": 0.249939649,
+          "turnover_seconds": 0.167739511,
+          "total_seconds": 0.41767916000000005,
+          "digest": "6f039461df02d617",
+          "sample": 3,
+          "warmup": false
+        }
+      ]
+    },
+    {
+      "cars": 32768,
+      "median_seconds": 1.1537997326666667,
+      "generations": [
+        {
+          "generation": 0,
+          "digest": "a2a2d40df5a7b882",
+          "median_simulate_seconds": 0.401643874,
+          "median_turnover_seconds": 0.667032381,
+          "median_total_seconds": 1.065739139
+        },
+        {
+          "generation": 1,
+          "digest": "e666b3e48f615336",
+          "median_simulate_seconds": 0.567170624,
+          "median_turnover_seconds": 0.663940486,
+          "median_total_seconds": 1.23111111
+        },
+        {
+          "generation": 2,
+          "digest": "93a894728ec166ac",
+          "median_simulate_seconds": 0.507569172,
+          "median_turnover_seconds": 0.655325856,
+          "median_total_seconds": 1.166883617
+        }
+      ],
+      "runs": [
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 0.477455262,
+          "turnover_seconds": 0.678329738,
+          "total_seconds": 1.1557849999999998,
+          "digest": "a2a2d40df5a7b882",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 1,
+          "ticks": 1242,
+          "simulate_seconds": 0.573877333,
+          "turnover_seconds": 0.662846331,
+          "total_seconds": 1.236723664,
+          "digest": "e666b3e48f615336",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 2,
+          "ticks": 900,
+          "simulate_seconds": 0.521415187,
+          "turnover_seconds": 0.657470146,
+          "total_seconds": 1.178885333,
+          "digest": "93a894728ec166ac",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 0.402918068,
+          "turnover_seconds": 0.65220946,
+          "total_seconds": 1.055127528,
+          "digest": "a2a2d40df5a7b882",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 1,
+          "ticks": 1242,
+          "simulate_seconds": 0.567170624,
+          "turnover_seconds": 0.663940486,
+          "total_seconds": 1.23111111,
+          "digest": "e666b3e48f615336",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 2,
+          "ticks": 900,
+          "simulate_seconds": 0.507569172,
+          "turnover_seconds": 0.667591388,
+          "total_seconds": 1.17516056,
+          "digest": "93a894728ec166ac",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 0.401643874,
+          "turnover_seconds": 0.677847671,
+          "total_seconds": 1.079491545,
+          "digest": "a2a2d40df5a7b882",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 1,
+          "ticks": 1242,
+          "simulate_seconds": 0.561797509,
+          "turnover_seconds": 0.664654202,
+          "total_seconds": 1.2264517110000002,
+          "digest": "e666b3e48f615336",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 2,
+          "ticks": 900,
+          "simulate_seconds": 0.502639514,
+          "turnover_seconds": 0.650345179,
+          "total_seconds": 1.152984693,
+          "digest": "93a894728ec166ac",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 0.398706758,
+          "turnover_seconds": 0.667032381,
+          "total_seconds": 1.065739139,
+          "digest": "a2a2d40df5a7b882",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 1,
+          "ticks": 1242,
+          "simulate_seconds": 0.575043778,
+          "turnover_seconds": 0.657056288,
+          "total_seconds": 1.232100066,
+          "digest": "e666b3e48f615336",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 32768,
+          "generation": 2,
+          "ticks": 900,
+          "simulate_seconds": 0.511557761,
+          "turnover_seconds": 0.655325856,
+          "total_seconds": 1.166883617,
+          "digest": "93a894728ec166ac",
+          "sample": 3,
+          "warmup": false
+        }
+      ]
+    },
+    {
+      "cars": 262144,
+      "median_seconds": 9.662792127000001,
+      "generations": [
+        {
+          "generation": 0,
+          "digest": "71111b7fe3ca36e1",
+          "median_simulate_seconds": 3.09987821,
+          "median_turnover_seconds": 5.8705833,
+          "median_total_seconds": 8.996727355
+        },
+        {
+          "generation": 1,
+          "digest": "b23da2cea1c61045",
+          "median_simulate_seconds": 3.937984486,
+          "median_turnover_seconds": 5.779596619,
+          "median_total_seconds": 9.717581105
+        },
+        {
+          "generation": 2,
+          "digest": "0550690210f887c3",
+          "median_simulate_seconds": 4.435182466,
+          "median_turnover_seconds": 5.65066133,
+          "median_total_seconds": 10.085843795999999
+        }
+      ],
+      "runs": [
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 3.13814073,
+          "turnover_seconds": 5.909035295,
+          "total_seconds": 9.047176024999999,
+          "digest": "71111b7fe3ca36e1",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 1,
+          "ticks": 912,
+          "simulate_seconds": 3.879592895,
+          "turnover_seconds": 5.854420559,
+          "total_seconds": 9.734013454,
+          "digest": "b23da2cea1c61045",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 2,
+          "ticks": 1242,
+          "simulate_seconds": 4.365291263,
+          "turnover_seconds": 5.567991793,
+          "total_seconds": 9.933283056,
+          "digest": "0550690210f887c3",
+          "sample": 0,
+          "warmup": true
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 3.09987821,
+          "turnover_seconds": 6.132041217,
+          "total_seconds": 9.231919427000001,
+          "digest": "71111b7fe3ca36e1",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 1,
+          "ticks": 912,
+          "simulate_seconds": 4.055890814,
+          "turnover_seconds": 6.016631374,
+          "total_seconds": 10.072522188,
+          "digest": "b23da2cea1c61045",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 2,
+          "ticks": 1242,
+          "simulate_seconds": 4.435182466,
+          "turnover_seconds": 5.65066133,
+          "total_seconds": 10.085843795999999,
+          "digest": "0550690210f887c3",
+          "sample": 1,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 3.078691719,
+          "turnover_seconds": 5.632049917,
+          "total_seconds": 8.710741636,
+          "digest": "71111b7fe3ca36e1",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 1,
+          "ticks": 912,
+          "simulate_seconds": 3.923627501,
+          "turnover_seconds": 5.56276795,
+          "total_seconds": 9.486395451,
+          "digest": "b23da2cea1c61045",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 2,
+          "ticks": 1242,
+          "simulate_seconds": 4.442384282,
+          "turnover_seconds": 5.511646749,
+          "total_seconds": 9.954031031,
+          "digest": "0550690210f887c3",
+          "sample": 2,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 0,
+          "ticks": 486,
+          "simulate_seconds": 3.126144055,
+          "turnover_seconds": 5.8705833,
+          "total_seconds": 8.996727355,
+          "digest": "71111b7fe3ca36e1",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 1,
+          "ticks": 912,
+          "simulate_seconds": 3.937984486,
+          "turnover_seconds": 5.779596619,
+          "total_seconds": 9.717581105,
+          "digest": "b23da2cea1c61045",
+          "sample": 3,
+          "warmup": false
+        },
+        {
+          "benchmark": "training",
+          "cars": 262144,
+          "generation": 2,
+          "ticks": 1242,
+          "simulate_seconds": 4.418846318,
+          "turnover_seconds": 5.855221603,
+          "total_seconds": 10.274067921,
+          "digest": "0550690210f887c3",
+          "sample": 3,
+          "warmup": false
+        }
+      ]
+    }
+  ],
+  "checkpoint_sha256": "1203d453895f86b2292f88c3a8f4c0d741f107d4bebdc1bb98f4fc723760f51a"
+}

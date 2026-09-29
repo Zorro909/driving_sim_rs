@@ -31,6 +31,12 @@ impl TrainingRandom {
     pub fn reproduce(&mut self,agents:&[AgentResult],settings:&EvolutionSettings)->Generation {
         match self{Self::Python(r)=>reproduce(agents,settings,r),Self::Game(r)=>crate::evolution::reproduce_game(agents,settings,r)}
     }
+    fn reproduce_with_scratch(&mut self, agents: &[AgentResult], settings: &EvolutionSettings, scratch: &mut Vec<f64>) -> Generation {
+        match self {
+            Self::Python(r) => crate::evolution::reproduce_with_scratch(agents, settings, r, scratch),
+            Self::Game(r) => crate::evolution::reproduce_game(agents, settings, r),
+        }
+    }
     pub fn xavier(&mut self,shape:&[usize])->Network {
         match self{Self::Python(r)=>Network::xavier(shape,r),Self::Game(r)=>Network::xavier_game(shape,r)}
     }
@@ -580,11 +586,19 @@ impl TrainingRunner {
     }
 
     fn install(&mut self, networks: &[Network], reused: bool) {
+        self.install_with_novelty(networks, reused, None);
+    }
+
+    fn install_with_novelty(&mut self, networks: &[Network], reused: bool, novelty: Option<&[f64]>) {
+        let mut profile = crate::training_profile::Profile::new("install");
         assert!(!networks.is_empty(), "a training generation needs at least one network");
+        if let Some(values) = novelty { assert_eq!(values.len(), networks.len()); }
         let count = networks.len() as f64;
         let size = networks[0].params.len();
-        let mean: Vec<f64> =
-            (0..size).into_par_iter().map(|i| networks.iter().map(|n| n.params[i]).fold(0.0, |a,b| a+b) / count).collect();
+        let mean: Vec<f64> = if novelty.is_none() {
+            (0..size).into_par_iter().map(|i| networks.iter().map(|n| n.params[i]).fold(0.0, |a,b| a+b) / count).collect()
+        } else { Vec::new() };
+        profile.mark("mean");
         let world = &*self.world;
         let (position, rotation) = (self.position, self.rotation);
         let retained=if reused {self.agents.len().min(networks.len())}else{0};
@@ -595,12 +609,14 @@ impl TrainingRunner {
             if reused { old.next().map(|agent| agent.car).unwrap_or_else(|| Car::new(world, position, rotation)) }
             else { Car::new(world, position, rotation) }
         }).collect();
-        self.agents = cars.into_par_iter().zip(networks.par_iter())
-            .map(|(mut car, network)| {
+        profile.mark("vehicles");
+        self.agents = cars.into_par_iter().zip(networks.par_iter()).enumerate()
+            .map(|(i, (mut car, network))| {
                 // VehicleManager resets both new and reused instances.
                 car.queue_reset(position, rotation);
-                let novelty =
-                    network.params.iter().zip(&mean).map(|(&a, &b)| crate::double_math::pow(a - b, 2.0)).fold(0.0,|a,b|a+b).sqrt();
+                let novelty = novelty.map_or_else(||
+                    network.params.iter().zip(&mean).map(|(&a, &b)| crate::double_math::pow(a - b, 2.0)).fold(0.0,|a,b|a+b).sqrt(),
+                    |values| values[i]);
                 TrainingAgent {
                     network: network.clone(),
                     car,
@@ -612,6 +628,7 @@ impl TrainingRunner {
                 }
             })
             .collect();
+        profile.mark("agents_and_novelty");
         if world.track.native_broadphase && self.physics.is_none() {
             self.physics=Some(crate::simulation::SharedPhysics::new(world,&mut self.agents.iter_mut().map(|a|&mut a.car).collect::<Vec<_>>()));
         }
@@ -632,6 +649,7 @@ impl TrainingRunner {
         }
         self.tick = 0;
         self.batch_index = 0;
+        profile.mark("passive_reset");
     }
 
     fn advance_physics(world:&World,agents:&mut[TrainingAgent],physics:&mut Option<crate::simulation::SharedPhysics>,eliminate:bool,drive:bool,tick:u64) {
@@ -825,6 +843,7 @@ impl TrainingRunner {
     pub fn advance_window_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim, world: &crate::gpu::GpuWorld, ticks: u64,
                               stop_when_inactive: bool, time_limit: Option<f64>) -> Result<u64, String> {
         use crate::gpu_sim::*;
+        let mut profile = crate::training_profile::Profile::new("gpu_window");
         if ticks == 0 {
             return Ok(0);
         }
@@ -839,21 +858,21 @@ impl TrainingRunner {
         for agent in &mut self.agents {
             agent.deactivated_at = None;
         }
-        if sim.network_tag != Some(self.generation) || sim.cars != self.agents.len() {
-            let shape = self.agents[0].network.shape.clone();
-            if self.agents.iter().any(|a| a.network.shape != shape) {
-                return Err("networks of different shapes".into());
-            }
-            let params: Vec<f64> = self.agents.iter().flat_map(|a| a.network.params.iter().copied()).collect();
+        if sim.network_tag != Some(self.generation) || sim.network_count() != self.agents.len() {
             let src = std::array::from_fn(|c| {
                 self.outputs.iter().rposition(|&slot| slot as usize == c).map_or(-1, |j| j as i32)
             });
-            sim.networks(&shape, &params, src);
+            // Agents own the networks; the GPU uploader reuses its staging
+            // allocation while copying them without cloning parameter vectors.
+            sim.upload_agent_networks(&self.agents, src)?;
+            profile.mark("networks");
             sim.network_tag = Some(self.generation);
         }
-        let cars = self.agents.par_iter().map(|a| a.car.gpu_export(vehicle, surfaces)).collect::<Result<Vec<_>, _>>()?;
-        let agents = self.agents.par_iter().map(agent_export).collect::<Result<Vec<_>, _>>()?;
+        let mut cars = self.agents.par_iter().map(|a| a.car.gpu_export(vehicle, surfaces)).collect::<Result<Vec<_>, _>>()?;
+        let mut agents = self.agents.par_iter().map(agent_export).collect::<Result<Vec<_>, _>>()?;
+        profile.mark("export_state");
         sim.upload(&cars, Some(&agents));
+        profile.mark("upload_state");
         let args = WindowArgs {
             start_tick: self.tick,
             ticks,
@@ -868,13 +887,16 @@ impl TrainingRunner {
             time_limit: time_limit.unwrap_or(0.0),
         };
         let (executed, transition_without_drive) = sim.window(&args);
-        let (mut cars, mut agents) = (Vec::new(), Vec::new());
+        profile.mark("window");
+        // The upload has finished. Read back into the same allocations.
         sim.download(Some(&mut cars), Some(&mut agents));
+        profile.mark("download_state");
         self.agents.par_iter_mut().zip(&cars).zip(&agents).try_for_each(|((a, c), g)| {
             a.car.gpu_import(c, surfaces)?;
             agent_import(g, a);
             Ok::<(), String>(())
         })?;
+        profile.mark("import_state");
         let bpt = self.batches_per_tick();
         self.tick += executed;
         self.batch_index = (self.batch_index + ((executed as usize - transition_without_drive as usize) % 8) * bpt) % 8;
@@ -957,5 +979,29 @@ impl TrainingRunner {
         let generation = self.reproduce_next();
         self.install_next(&generation);
         generation
+    }
+
+    /// Reproduce with the same RNG stream, then compute population novelty on
+    /// the GPU. Uploaded offspring stay in place for the next driving window.
+    pub fn next_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim) -> Result<Generation, String> {
+        let mut profile = crate::training_profile::Profile::new("gpu_turnover");
+        // The preceding upload is complete, so its host buffer can hold noise
+        // until reproduction finishes. Refilling it then uploads the offspring.
+        let mut scratch = sim.take_parameter_buffer();
+        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
+        let generation = self.rng.reproduce_with_scratch(&results, &self.settings, &mut scratch);
+        sim.return_parameter_buffer(scratch);
+        profile.mark("reproduce");
+        let src = std::array::from_fn(|c| self.outputs.iter().rposition(|&slot| slot as usize == c).map_or(-1, |j| j as i32));
+        sim.upload_networks(&generation.networks, src)?;
+        profile.mark("networks");
+        let novelty = sim.novelty();
+        profile.mark("novelty");
+        self.install_with_novelty(&generation.networks, true, Some(&novelty));
+        self.stats_phase = 0;
+        self.generation += 1;
+        sim.network_tag = Some(self.generation);
+        profile.mark("install");
+        Ok(generation)
     }
 }

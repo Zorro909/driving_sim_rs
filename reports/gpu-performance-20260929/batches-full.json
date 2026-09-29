@@ -1,0 +1,89 @@
+{
+  "library": "/tmp/altd-gpu-performance-20260929/batches/libaltd_gpu.so",
+  "library_sha256": "52d25cf6e6e1c6617c979a8227c1a7651dee8b339e8999316234677e85bbf589",
+  "requested_ticks": 5400,
+  "samples": 2,
+  "warmups": 1,
+  "eliminate": false,
+  "results": [
+    {
+      "cars": 8192,
+      "median_seconds": 2.0895757919999998,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 2.125404281,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 2.091265899,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 2.087885685,
+          "digest": "871379f8cd3a23ab",
+          "active": 8192
+        }
+      ]
+    },
+    {
+      "cars": 32768,
+      "median_seconds": 5.8035115865,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 5.7011972029999995,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 5.905111853,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 5406,
+          "eliminate": false,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 5.70191132,
+          "digest": "47c951ad33615303",
+          "active": 32768
+        }
+      ]
+    }
+  ],
+  "checkpoint_sha256": "1203d453895f86b2292f88c3a8f4c0d741f107d4bebdc1bb98f4fc723760f51a"
+}

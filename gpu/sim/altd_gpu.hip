@@ -136,12 +136,18 @@ struct WindowArgs {
 };
 
 struct WindowState {
-    uint32_t live_count[2], step_count[2];
+    uint32_t live_count[2][8], step_count[2];
     uint32_t stopped;
     uint32_t items;     // SAT items of the split step (cleared by its end kernel)
     uint64_t executed;  // the stopping tick's k
     uint64_t base;      // k before the current period; kernels add their offset
 };
+
+uint32_t live_total(const WindowState& st, uint32_t p) {
+    uint32_t count = 0;
+    for (uint32_t b = 0; b < 8; b++) count += st.live_count[p][b];
+    return count;
+}
 
 struct Sim {
     World world;  // device pointers, owned by the world handle
@@ -155,6 +161,9 @@ struct Sim {
     NetShape shape;
     size_t stride;   // parameters per network
     double* params;  // capacity * stride, one network per car
+    uint32_t network_count;
+    double* mean;
+    double* novelty;
     // altd_gpu_sim_window: work lists, settling, device state, stop polling.
     uint32_t* live[2];
     uint32_t* steps[2];
@@ -168,7 +177,20 @@ struct Sim {
     uint32_t* host_stopped;  // pinned
     hipEvent_t chunk_done[4];
     hipStream_t stream;  // blocking, so ordered with the null stream
+    hipGraphExec_t graph_exec;
+    WindowArgs graph_args;
+    uint32_t graph_n;
 };
+
+// Kernel arguments captured by the period graph. The requested window length
+// only affects the host's replay count and is not part of the captured graph.
+bool same_schedule(const WindowArgs& a, const WindowArgs& b) {
+    return a.start_tick == b.start_tick && a.start_batch == b.start_batch
+        && a.batches_per_tick == b.batches_per_tick && a.stats_phase == b.stats_phase
+        && a.stop_when_inactive == b.stop_when_inactive && a.eliminate_on_wall == b.eliminate_on_wall
+        && a.eliminate_when_idle == b.eliminate_when_idle && a.has_time_limit == b.has_time_limit
+        && a.time_limit == b.time_limit;
+}
 
 // Pass 1 of the sensor read: the path offset (a nearest-segment search) per reading car.
 __global__ void path_offset_kernel(World w, ReadMask m, Car* cars, uint32_t n, float* here) {
@@ -251,7 +273,11 @@ __device__ inline void step_car(const World& w, const VehicleDesc& v, Car& car, 
     record(car, agent, was_active, report, tick);
 }
 
-__global__ void step_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, uint32_t eliminate_on_wall,
+constexpr uint32_t STEP_THREADS = 64;
+
+// Bound all physics kernels to their actual block size so the solver
+// contact-index array reserves LDS for STEP_THREADS threads, rather than 1024.
+__global__ void __launch_bounds__(STEP_THREADS) step_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, uint32_t eliminate_on_wall,
                             uint64_t tick) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -297,7 +323,7 @@ __device__ inline void begin_car(const World& w, const VehicleDesc& v, Car* cars
 }
 
 // The SAT items, grid-stride (the grid is sized for the cars, not the items).
-__global__ void sat_kernel(World w, VehicleDesc v, Car* cars, const uint32_t* items, const WindowState* st, Vec2* pushes) {
+__global__ void __launch_bounds__(STEP_THREADS) sat_kernel(World w, VehicleDesc v, Car* cars, const uint32_t* items, const WindowState* st, Vec2* pushes) {
     uint32_t total = st->items;
     for (uint32_t t = blockIdx.x * blockDim.x + threadIdx.x; t < total; t += gridDim.x * blockDim.x) {
         uint32_t item = items[t];
@@ -312,13 +338,13 @@ __device__ inline bool end_car(const World& w, const VehicleDesc& v, Car& car, A
     return report;
 }
 
-__global__ void step_begin_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, StepCarry* carry,
+__global__ void __launch_bounds__(STEP_THREADS) step_begin_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, StepCarry* carry,
                                   uint32_t* items, WindowState* st) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     begin_car(w, v, cars, agents, i < n, i, drive != 0, carry, items, &st->items);
 }
 
-__global__ void step_end_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, uint32_t eliminate_on_wall,
+__global__ void __launch_bounds__(STEP_THREADS) step_end_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, uint32_t n, uint32_t drive, uint32_t eliminate_on_wall,
                                 uint64_t tick, const StepCarry* carry, const Vec2* pushes, WindowState* st) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i == 0) st->items = 0;  // the SAT kernel is done with them
@@ -430,12 +456,13 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
     s->capacity = capacity;
     if (hipMalloc(&s->cars, sizeof(Car) * capacity) || hipMalloc(&s->agents, sizeof(Agent) * capacity)
         || hipMalloc(&s->here, sizeof(float) * capacity) || hipMalloc(&s->inputs, sizeof(double) * capacity * MAX_SENSORS)
-        || hipMalloc(&s->live[0], sizeof(uint32_t) * capacity) || hipMalloc(&s->live[1], sizeof(uint32_t) * capacity)
+        || hipMalloc(&s->live[0], sizeof(uint32_t) * ((capacity + 7) / 8) * 8) || hipMalloc(&s->live[1], sizeof(uint32_t) * ((capacity + 7) / 8) * 8)
         || hipMalloc(&s->steps[0], sizeof(uint32_t) * capacity) || hipMalloc(&s->steps[1], sizeof(uint32_t) * capacity)
         || hipMalloc(&s->settled_at, sizeof(uint32_t) * capacity) || hipMalloc(&s->shadow, sizeof(Car) * capacity)
         || hipMalloc(&s->carry, sizeof(StepCarry) * capacity) || hipMalloc(&s->items, sizeof(uint32_t) * capacity * MAX_PAIRS)
         || hipMalloc(&s->pushes, sizeof(Vec2) * capacity * MAX_PAIRS)
-        || hipMalloc(&s->state, 64) || hipHostMalloc(&s->host_stopped, sizeof(uint32_t) * 4)
+        || hipMalloc(&s->novelty, sizeof(double) * capacity)
+        || hipMalloc(&s->state, sizeof(WindowState)) || hipHostMalloc(&s->host_stopped, sizeof(uint32_t) * 4)
         || hipEventCreateWithFlags(&s->chunk_done[0], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[1], hipEventDisableTiming)
         || hipEventCreateWithFlags(&s->chunk_done[2], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[3], hipEventDisableTiming)
         || hipStreamCreate(&s->stream)) {
@@ -447,9 +474,10 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
 
 void altd_gpu_sim_free(Sim* s) {
     if (!s) return;
+    if (s->graph_exec) (void)hipGraphExecDestroy(s->graph_exec);
     for (void* p : {(void*)s->cars, (void*)s->agents, (void*)s->here, (void*)s->inputs, (void*)s->params, (void*)s->live[0],
                     (void*)s->live[1], (void*)s->steps[0], (void*)s->steps[1], (void*)s->settled_at, (void*)s->shadow, (void*)s->state,
-                    (void*)s->carry, (void*)s->items, (void*)s->pushes})
+                    (void*)s->carry, (void*)s->items, (void*)s->pushes, (void*)s->mean, (void*)s->novelty})
         if (p) (void)hipFree(p);
     if (s->host_stopped) (void)hipHostFree(s->host_stopped);
     for (hipEvent_t e : s->chunk_done)
@@ -510,14 +538,65 @@ int altd_gpu_sim_networks(Sim* s, uint32_t layers, const uint32_t* width, uint32
         if (control_src[c] >= (int32_t)width[layers - 1]) return -1;
         shape.control_src[c] = control_src[c];
     }
+    // The graph embeds the network shape and parameter pointer. Parameter
+    // contents may change in place without invalidating it.
+    if (s->graph_exec && memcmp(&shape, &s->shape, sizeof shape) != 0) {
+        CHECK(hipGraphExecDestroy(s->graph_exec));
+        s->graph_exec = nullptr;
+    }
     if (stride != s->stride || !s->params) {
         if (s->params) CHECK(hipFree(s->params));
+        if (s->mean) CHECK(hipFree(s->mean));
         s->params = nullptr;
+        s->mean = nullptr;
         CHECK(hipMalloc(&s->params, sizeof(double) * stride * s->capacity));
+        CHECK(hipMalloc(&s->mean, sizeof(double) * stride));
     }
     s->shape = shape;
     s->stride = stride;
     CHECK(hipMemcpy(s->params, params, sizeof(double) * stride * n, hipMemcpyHostToDevice));
+    s->network_count = n;
+    return 0;
+}
+
+// One thread per parameter preserves the CPU's left-to-right population sum.
+// Neighboring threads read neighboring parameters of each network.
+__global__ void population_mean_kernel(const double* params, size_t stride, uint32_t n, double* mean) {
+    size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= stride) return;
+    double sum = 0.0;
+    for (uint32_t i = 0; i < n; i++) sum += params[(size_t)i * stride + j];
+    mean[j] = sum / (double)n;
+}
+
+// Parallelize the expensive pow calls, then add their results in the exact
+// parameter order used by TrainingRunner::install. pow(x, 2) is the game's
+// routine and must not be replaced by x*x or a parallel sum.
+__global__ void __launch_bounds__(64)
+population_novelty_kernel(const double* params, size_t stride, const double* mean, double* novelty) {
+    __shared__ double terms[64];
+    size_t car = blockIdx.x;
+    uint32_t lane = threadIdx.x;
+    double sum = 0.0;
+    for (size_t base = 0; base < stride; base += 64) {
+        size_t j = base + lane;
+        if (j < stride) terms[lane] = dpow(params[car * stride + j] - mean[j], 2.0);
+        __syncthreads();
+        if (lane == 0)
+            for (uint32_t k = 0; k < 64 && base + k < stride; k++) sum += terms[k];
+        __syncthreads();
+    }
+    if (lane == 0) novelty[car] = sqrt(sum);
+}
+
+int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
+    if (n != s->network_count || !s->params) return -1;
+    if (n == 0) return 0;
+    population_mean_kernel<<<blocks(s->stride, 128), 128, 0, s->stream>>>(s->params, s->stride, n, s->mean);
+    population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->params, s->stride, s->mean, s->novelty);
+    CHECK(hipGetLastError());
+    CHECK(hipMemcpyAsync(novelty, s->novelty, sizeof(double) * n, hipMemcpyDeviceToHost, s->stream));
+    CHECK(hipStreamSynchronize(s->stream));
     return 0;
 }
 
@@ -550,14 +629,14 @@ int altd_gpu_sim_step(Sim* s, uint32_t drive, uint32_t eliminate_on_wall, uint64
     if (s->world.shape_count == 0) return -2;
     if (s->n == 0) return 0;
     if (!split_step()) {
-        step_kernel<<<blocks(s->n, 64), 64>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, eliminate_on_wall, tick);
+        step_kernel<<<blocks(s->n, STEP_THREADS), STEP_THREADS>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, eliminate_on_wall, tick);
         CHECK(hipGetLastError());
         return 0;
     }
     CHECK(hipMemset(s->state, 0, sizeof(WindowState)));
-    step_begin_kernel<<<blocks(s->n, 64), 64>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, s->carry, s->items, s->state);
-    sat_kernel<<<blocks(s->n, 64), 64>>>(s->world, s->vehicle, s->cars, s->items, s->state, s->pushes);
-    step_end_kernel<<<blocks(s->n, 64), 64>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, eliminate_on_wall, tick, s->carry,
+    step_begin_kernel<<<blocks(s->n, STEP_THREADS), STEP_THREADS>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, s->carry, s->items, s->state);
+    sat_kernel<<<blocks(s->n, STEP_THREADS), STEP_THREADS>>>(s->world, s->vehicle, s->cars, s->items, s->state, s->pushes);
+    step_end_kernel<<<blocks(s->n, STEP_THREADS), STEP_THREADS>>>(s->world, s->vehicle, s->cars, s->agents, s->n, drive, eliminate_on_wall, tick, s->carry,
                                               s->pushes, s->state);
     CHECK(hipGetLastError());
     return 0;
@@ -584,7 +663,8 @@ int altd_gpu_sim_stats(Sim* s, uint64_t tick, uint64_t stats_tick, uint32_t elim
 //  - live: the cars that may read sensors or change statistics (active, or
 //    with a pending contact at the window start); after each statistics
 //    update exactly the active cars. Cars deactivated by a wall stay listed
-//    until the next rebuild and are filtered by `reads`.
+//    until the next rebuild and are filtered by their active flag. Each live
+//    list has eight segments, retaining the cars' original inference batches.
 //  - step: the cars still stepped. An inactive car whose step leaves every
 //    field but `tick` bitwise unchanged is settled: `car_step` is a pure
 //    function of that state for inactive cars (controls, agent and tick are
@@ -636,24 +716,27 @@ __device__ inline bool same_state(const Car& s, const Car& c) {
 // Clears HAS_DEACTIVATED and builds the first live and step lists (index 0).
 __global__ void w_start_kernel(Car* cars, Agent* agents, uint32_t n, uint32_t* live, uint32_t* steps, uint32_t* settled_at,
                                WindowState* st) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    bool valid = i < n, listed = false;
+    uint32_t batch_size = (n + 7) / 8, batch = blockIdx.y;
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i = batch * batch_size + j;
+    bool valid = j < batch_size && i < n, listed = false;
     if (valid) {
         uint32_t flags = agents[i].flags & ~AGENT_HAS_DEACTIVATED;
         agents[i].flags = flags;
         settled_at[i] = NOT_SETTLED;
         listed = (cars[i].flags & CAR_ACTIVE) || (flags & AGENT_PENDING_CONTACT);
     }
-    append(listed, i, live, &st->live_count[0]);
+    append(listed, i, live + batch * batch_size, &st->live_count[0][batch]);
     append(valid, i, steps, &st->step_count[0]);
 }
 
 // Statistics of the live cars in list p; the still active ones form list 1 - p.
-__global__ void w_stats_kernel(World w, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st, uint32_t p,
+__global__ void w_stats_kernel(World w, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st, uint32_t p, uint32_t batch_size,
                                uint64_t start_tick, uint32_t off, uint64_t first, uint32_t eliminate_when_idle) {
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
-    bool valid = !st->stopped && j < st->live_count[p], keep = false;
-    uint32_t i = valid ? in[j] : 0;
+    uint32_t batch = blockIdx.y;
+    bool valid = !st->stopped && j < st->live_count[p][batch], keep = false;
+    uint32_t i = valid ? in[batch * batch_size + j] : 0;
     if (valid) {
         uint32_t err = 0;
         uint64_t tick = start_tick + st->base + off;
@@ -661,7 +744,7 @@ __global__ void w_stats_kernel(World w, Car* cars, Agent* agents, const uint32_t
         cars[i].error |= err;
         keep = cars[i].flags & CAR_ACTIVE;
     }
-    append(keep, i, out, &st->live_count[1 - p]);
+    append(keep, i, out + batch * batch_size, &st->live_count[1 - p][batch]);
 }
 
 // The stop test after the statistics of tick k (live list 1 - p holds the
@@ -671,32 +754,36 @@ __global__ void w_stop_kernel(WindowState* st, uint32_t p, uint64_t start_tick, 
     if (st->stopped) return;
     uint64_t k = st->base + off;
     bool time_stop = has_time_limit && (double)((start_tick + k - first) / 6) * 0.1 >= time_limit;
-    if (time_stop || (stop_when_inactive && st->live_count[1 - p] == 0)) {
+    uint32_t live = 0;
+    for (uint32_t b = 0; b < 8; b++) live += st->live_count[1 - p][b];
+    if (time_stop || (stop_when_inactive && live == 0)) {
         st->stopped = 1;
         st->executed = k;
         return;
     }
-    st->live_count[p] = 0;
+    for (uint32_t b = 0; b < 8; b++) st->live_count[p][b] = 0;
     st->step_count[1 - p] = 0;
 }
 
+// The live lists retain original batch identity. Each y slice handles one
+// scheduled batch; z slices of the sensor grid handle individual sensors.
 __global__ void w_path_offset_kernel(World w, ReadMask m, Car* cars, const uint32_t* list, const WindowState* st, uint32_t p,
                                      float* here) {
+    uint32_t batch = (m.batch_index + blockIdx.y) % 8;
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (st->stopped || j >= st->live_count[p]) return;
-    uint32_t i = list[j];
-    if (!reads(m, cars[i], i)) return;
+    if (st->stopped || j >= st->live_count[p][batch]) return;
+    uint32_t i = list[batch * m.batch_size + j];
+    if (!(cars[i].flags & CAR_ACTIVE)) return;
     here[i] = sensor_path_offset(w, cars[i]);
 }
 
-// One thread per (sensor, listed car), sensor-major.
 __global__ void w_sensor_kernel(World w, VehicleDesc v, Sensors s, ReadMask m, Car* cars, const uint32_t* list,
                                 const WindowState* st, uint32_t p, const float* here, double* inputs) {
-    uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t count = st->live_count[p];
-    if (st->stopped || t >= count * s.count) return;
-    uint32_t k = t / count, i = list[t % count];
-    if (!reads(m, cars[i], i)) return;
+    uint32_t batch = (m.batch_index + blockIdx.y) % 8;
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x, k = blockIdx.z;
+    if (st->stopped || j >= st->live_count[p][batch]) return;
+    uint32_t i = list[batch * m.batch_size + j];
+    if (!(cars[i].flags & CAR_ACTIVE)) return;
     uint32_t err = 0;
     inputs[(size_t)i * s.count + k] = sensor_value(w, v, cars[i], s.s[k], s.needs_path ? here[i] : 0.0f, err);
     if (err) atomicOr(&cars[i].error, err);
@@ -705,17 +792,18 @@ __global__ void w_sensor_kernel(World w, VehicleDesc v, Sensors s, ReadMask m, C
 __global__ void __launch_bounds__(LANES * CARS_PER_BLOCK)
 w_forward_kernel(NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
                  const uint32_t* list, const WindowState* st, uint32_t p, const double* __restrict__ inputs, Agent* agents) {
-    uint32_t count = st->live_count[p];
+    uint32_t batch = (m.batch_index + blockIdx.y) % 8;
+    uint32_t count = st->live_count[p][batch];
     if (st->stopped || blockIdx.x * CARS_PER_BLOCK >= count) return;  // uniform per block
     uint32_t j = blockIdx.x * CARS_PER_BLOCK + threadIdx.x / LANES;
-    uint32_t car = j < count ? list[j] : 0;
-    bool live = j < count && reads(m, cars[car], car);
+    uint32_t car = j < count ? list[batch * m.batch_size + j] : 0;
+    bool live = j < count && (cars[car].flags & CAR_ACTIVE);
     forward_car(shape, params, stride, live, car, inputs, agents);
 }
 
 // Steps the cars of step list q. With `out`, inactive cars are checked for
 // settling and the others form step list 1 - q.
-__global__ void w_step_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st,
+__global__ void __launch_bounds__(STEP_THREADS) w_step_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st,
                               uint32_t q, uint32_t* settled_at, Car* shadow, uint32_t eliminate_on_wall, uint64_t start_tick,
                               uint32_t off) {
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -738,7 +826,7 @@ __global__ void w_step_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, 
 }
 
 // w_step_kernel split (see sat_kernel): begin, then the SAT items, then end.
-__global__ void w_step_begin_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, WindowState* st, uint32_t q,
+__global__ void __launch_bounds__(STEP_THREADS) w_step_begin_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, WindowState* st, uint32_t q,
                                     uint32_t settle, Car* shadow, StepCarry* carry, uint32_t* items) {
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
     if (st->stopped) return;  // uniform
@@ -748,7 +836,7 @@ __global__ void w_step_begin_kernel(World w, VehicleDesc v, Car* cars, Agent* ag
     begin_car(w, v, cars, agents, valid, i, true, carry, items, &st->items);
 }
 
-__global__ void w_step_end_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st,
+__global__ void __launch_bounds__(STEP_THREADS) w_step_end_kernel(World w, VehicleDesc v, Car* cars, Agent* agents, const uint32_t* in, uint32_t* out, WindowState* st,
                                   uint32_t q, uint32_t* settled_at, const Car* shadow, uint32_t eliminate_on_wall, uint64_t start_tick,
                                   uint32_t off, const StepCarry* carry, const Vec2* pushes) {
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -810,10 +898,9 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
         timed.push_back(t);
         return 0;
     };
-    static_assert(sizeof(WindowState) <= 64, "Sim::state holds 64 bytes");
     WindowState* st = s->state;
     CHECK(hipMemsetAsync(st, 0, sizeof(WindowState), stream));
-    if (n) w_start_kernel<<<blocks(n, 256), 256, 0, stream>>>(s->cars, s->agents, n, s->live[0], s->steps[0], s->settled_at, st);
+    if (n) w_start_kernel<<<dim3(blocks((n + 7) / 8, 256), 8), 256, 0, stream>>>(s->cars, s->agents, n, s->live[0], s->steps[0], s->settled_at, st);
     uint64_t first = a->stats_phase == 0 ? 6 : a->stats_phase;
     // The time limit stops the window at a known tick; the host runs up to it.
     uint64_t limit = a->ticks;
@@ -835,7 +922,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
             WindowState now;
             (void)hipMemcpyAsync(&now, st, sizeof now, hipMemcpyDeviceToHost, stream);  // no CHECK: this lambda returns void
             (void)hipStreamSynchronize(stream);
-            fprintf(stderr, "  tick %5llu: live %u/%u, steps %u/%u\n", (unsigned long long)enqueued, now.live_count[0], now.live_count[1],
+            fprintf(stderr, "  tick %5llu: live %u/%u, steps %u/%u\n", (unsigned long long)enqueued, live_total(now, 0), live_total(now, 1),
                     now.step_count[0], now.step_count[1]);
         }
         uint64_t tick_mod = a->start_tick + off;
@@ -843,7 +930,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
         bool stats = tick_mod % 6 == a->stats_phase;
         if (stats) {
             if (n) phase(0, [&] {
-                w_stats_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, s->cars, s->agents, s->live[p], s->live[1 - p], st, p,
+                w_stats_kernel<<<dim3(blocks((n + 7) / 8, 64), 8), 64, 0, stream>>>(s->world, s->cars, s->agents, s->live[p], s->live[1 - p], st, p, (n + 7) / 8,
                                                                  a->start_tick, off, first, a->eliminate_when_idle);
                 w_stop_kernel<<<1, 1, 0, stream>>>(st, p, a->start_tick, off, first, a->has_time_limit, a->time_limit,
                                                    a->stop_when_inactive);
@@ -856,12 +943,12 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
             ReadMask mask{(uint32_t)((n + 7) / 8), batch_index, a->batches_per_tick, 1};
             phase(1, [&] {
                 if (s->sensors.needs_path)
-                    w_path_offset_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, mask, s->cars, s->live[p], st, p, s->here);
-                w_sensor_kernel<<<blocks((size_t)n * s->sensors.count, 64), 64, 0, stream>>>(s->world, s->vehicle, s->sensors, mask,
+                    w_path_offset_kernel<<<dim3(blocks(mask.batch_size, 64), mask.batches_per_tick), 64, 0, stream>>>(s->world, mask, s->cars, s->live[p], st, p, s->here);
+                w_sensor_kernel<<<dim3(blocks(mask.batch_size, 64), mask.batches_per_tick, s->sensors.count), 64, 0, stream>>>(s->world, s->vehicle, s->sensors, mask,
                                                                                            s->cars, s->live[p], st, p, s->here, s->inputs);
             });
             phase(2, [&] {
-                w_forward_kernel<<<blocks(n, CARS_PER_BLOCK), LANES * CARS_PER_BLOCK, 0, stream>>>(
+                w_forward_kernel<<<dim3(blocks(mask.batch_size, CARS_PER_BLOCK), mask.batches_per_tick), LANES * CARS_PER_BLOCK, 0, stream>>>(
                     s->shape, s->params, s->stride, mask, s->cars, s->live[p], st, p, s->inputs, s->agents);
             });
             phase(3, [&] {
@@ -869,14 +956,14 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
                 uint32_t q = stats ? 1 - p : p;
                 uint32_t* out = stats ? s->steps[p] : nullptr;
                 if (!split_step()) {
-                    w_step_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], out, st, q,
+                    w_step_kernel<<<blocks(n, STEP_THREADS), STEP_THREADS, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], out, st, q,
                                                                     s->settled_at, s->shadow, a->eliminate_on_wall, a->start_tick, off);
                     return;
                 }
-                w_step_begin_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], st, q,
+                w_step_begin_kernel<<<blocks(n, STEP_THREADS), STEP_THREADS, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], st, q,
                                                                       out != nullptr, s->shadow, s->carry, s->items);
-                sat_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, s->vehicle, s->cars, s->items, st, s->pushes);
-                w_step_end_kernel<<<blocks(n, 64), 64, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], out, st, q,
+                sat_kernel<<<blocks(n, STEP_THREADS), STEP_THREADS, 0, stream>>>(s->world, s->vehicle, s->cars, s->items, st, s->pushes);
+                w_step_end_kernel<<<blocks(n, STEP_THREADS), STEP_THREADS, 0, stream>>>(s->world, s->vehicle, s->cars, s->agents, s->steps[q], out, st, q,
                                                                     s->settled_at, s->shadow, a->eliminate_on_wall, a->start_tick, off,
                                                                     s->carry, s->pushes);
             });
@@ -890,12 +977,21 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     uint64_t periods = limit / PERIOD, rest = limit % PERIOD;
     hipGraphExec_t exec = nullptr;
     if (use_graph && periods > 1) {
-        hipGraph_t graph;
-        CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
-        enqueue_period();
-        CHECK(hipStreamEndCapture(stream, &graph));
-        CHECK(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
-        CHECK(hipGraphDestroy(graph));
+        if (s->graph_exec && (s->graph_n != n || !same_schedule(s->graph_args, *a))) {
+            CHECK(hipGraphExecDestroy(s->graph_exec));
+            s->graph_exec = nullptr;
+        }
+        if (!s->graph_exec) {
+            hipGraph_t graph;
+            CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
+            enqueue_period();
+            CHECK(hipStreamEndCapture(stream, &graph));
+            CHECK(hipGraphInstantiate(&s->graph_exec, graph, nullptr, nullptr, 0));
+            CHECK(hipGraphDestroy(graph));
+            s->graph_n = n;
+            s->graph_args = *a;
+        }
+        exec = s->graph_exec;
     }
     // Polls the device stop flag every POLL periods, keeping DEPTH polls queued.
     constexpr uint64_t POLL = 2;
@@ -935,7 +1031,6 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     WindowState result;
     CHECK(hipMemcpyAsync(&result, st, sizeof result, hipMemcpyDeviceToHost, stream));
     CHECK(hipStreamSynchronize(stream));
-    if (exec) CHECK(hipGraphExecDestroy(exec));
     *executed = result.stopped ? result.executed : limit;
     *transition_without_drive = result.stopped;
     constexpr uint64_t SPAN = 600;  // profile timeline bucket, ticks

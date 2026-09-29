@@ -1,0 +1,17 @@
+altd_train_profile {"stage":"install","seconds":[["mean",0.025668806],["vehicles",0.013282661],["agents_and_novelty",0.131542105],["passive_reset",0.01372148]]}
+altd_train_profile {"stage":"gpu_window","seconds":[["pack_networks",0.033972139],["upload_networks",0.017856081],["export_state",0.018775766],["upload_state",0.004282501],["window",0.310338391],["download_state",0.01111632],["import_state",0.00448229]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.162864956],["transform",0.071410372]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.003109287],["selection",0.001175554],["crossover",0.031980858],["normal_draws",0.234383478],["mutation",0.02469438]]}
+altd_train_profile {"stage":"install","seconds":[["mean",0.022608059],["vehicles",0.017441822],["agents_and_novelty",0.099343339],["passive_reset",0.01788732]]}
+{"benchmark":"training","cars":32768,"generation":0,"ticks":486,"simulate_seconds":0.400874398,"turnover_seconds":0.487535153,"total_seconds":0.8884095510000001,"digest":"a2a2d40df5a7b882"}
+altd_train_profile {"stage":"gpu_window","seconds":[["pack_networks",0.219931412],["upload_networks",0.016232178],["export_state",0.043236678],["upload_state",0.004287311],["window",0.480832602],["download_state",0.008279323],["import_state",0.003669754]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.157293531],["transform",0.070015339]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.003117017],["selection",0.001155494],["crossover",0.030566704],["normal_draws",0.227411999],["mutation",0.025210688]]}
+altd_train_profile {"stage":"install","seconds":[["mean",0.023305956],["vehicles",0.009776437],["agents_and_novelty",0.097953804],["passive_reset",0.014859504]]}
+{"benchmark":"training","cars":32768,"generation":1,"ticks":1242,"simulate_seconds":0.776522378,"turnover_seconds":0.466194717,"total_seconds":1.242717095,"digest":"e666b3e48f615336"}
+altd_train_profile {"stage":"gpu_window","seconds":[["pack_networks",0.220183061],["upload_networks",0.015951929],["export_state",0.044001464],["upload_state",0.004331931],["window",0.421910394],["download_state",0.008294094],["import_state",0.003310825]]}
+altd_train_profile {"stage":"normal_draws","seconds":[["uniform_draws",0.153679647],["transform",0.071049514]]}
+altd_train_profile {"stage":"reproduce_python","seconds":[["rewards",0.003024037],["selection",0.001297254],["crossover",0.029827058],["normal_draws",0.22484012],["mutation",0.024148233]]}
+altd_train_profile {"stage":"install","seconds":[["mean",0.024156122],["vehicles",0.010325934],["agents_and_novelty",0.09666931],["passive_reset",0.015182523]]}
+{"benchmark":"training","cars":32768,"generation":2,"ticks":900,"simulate_seconds":0.718038908,"turnover_seconds":0.459049259,"total_seconds":1.177088167,"digest":"93a894728ec166ac"}
+ALL OK

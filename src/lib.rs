@@ -10,6 +10,7 @@ mod network_simd;
 pub mod pymath;
 pub mod pyrandom;
 pub mod training;
+mod training_profile;
 pub mod vec2;
 pub mod world;
 
@@ -35,4 +36,3 @@ mod double_math_tables;
 /// GPU simulator (HIP, gpu/sim): bit-exact with the CPU.
 pub mod gpu;
 pub mod gpu_sim;
-

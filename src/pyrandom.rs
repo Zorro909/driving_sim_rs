@@ -93,31 +93,35 @@ impl PyRandom {
     }
 
     fn twist(&mut self) {
-        const MAG01: [u32; 2] = [0, 0x9908_b0df];
         let s = &mut self.state;
         for k in 0..N - M {
             let y = (s[k] & 0x8000_0000) | (s[k + 1] & 0x7fff_ffff);
-            s[k] = s[k + M] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
+            s[k] = s[k + M] ^ (y >> 1) ^ (0u32.wrapping_sub(y & 1) & 0x9908_b0df);
         }
         for k in N - M..N - 1 {
             let y = (s[k] & 0x8000_0000) | (s[k + 1] & 0x7fff_ffff);
-            s[k] = s[k + M - N] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
+            s[k] = s[k + M - N] ^ (y >> 1) ^ (0u32.wrapping_sub(y & 1) & 0x9908_b0df);
         }
         let y = (s[N - 1] & 0x8000_0000) | (s[0] & 0x7fff_ffff);
-        s[N - 1] = s[M - 1] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
+        s[N - 1] = s[M - 1] ^ (y >> 1) ^ (0u32.wrapping_sub(y & 1) & 0x9908_b0df);
         self.index = 0;
+    }
+
+    #[inline]
+    fn temper(mut y: u32) -> u32 {
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^ (y >> 18)
     }
 
     pub fn next_u32(&mut self) -> u32 {
         if self.index >= N {
             self.twist();
         }
-        let mut y = self.state[self.index];
+        let y = self.state[self.index];
         self.index += 1;
-        y ^= y >> 11;
-        y ^= (y << 7) & 0x9d2c_5680;
-        y ^= (y << 15) & 0xefc6_0000;
-        y ^ (y >> 18)
+        Self::temper(y)
     }
 
     /// `random.random()`.
@@ -125,6 +129,29 @@ impl PyRandom {
         let a = self.next_u32() >> 5;
         let b = self.next_u32() >> 6;
         (a as f64 * 67108864.0 + b as f64) * (1.0 / 9007199254740992.0)
+    }
+
+    /// Draw in MT state-sized blocks so tempering and conversion can be
+    /// vectorized. Twist boundaries and the final generator state are exactly
+    /// those of sequential `random()` calls, including odd starting indices.
+    fn fill_uniforms(&mut self, mut out: &mut [f64]) {
+        while !out.is_empty() {
+            if self.index == N { self.twist(); }
+            if self.index == N - 1 {
+                out[0] = self.random();
+                out = &mut out[1..];
+                continue;
+            }
+            let count = out.len().min((N - self.index) / 2);
+            let words = &self.state[self.index..self.index + count * 2];
+            for (value, pair) in out[..count].iter_mut().zip(words.chunks_exact(2)) {
+                let a = Self::temper(pair[0]) >> 5;
+                let b = Self::temper(pair[1]) >> 6;
+                *value = (a as f64 * 67108864.0 + b as f64) * (1.0 / 9007199254740992.0);
+            }
+            self.index += count * 2;
+            out = &mut out[count..];
+        }
     }
 
     /// `random.gauss(0, sigma)`, including the cached second variate.
@@ -145,20 +172,23 @@ impl PyRandom {
     /// `count` sequential `gauss(1)` calls (the result is `z`, not `0.0 + z`).
     /// Uniform draws stay sequential; the transcendental math runs in parallel.
     pub fn standard_normals(&mut self, count: usize) -> Vec<f64> {
+        let mut out = Vec::new();
+        self.standard_normals_into(count, &mut out);
+        out
+    }
+
+    /// Reuse storage without clearing the elements that will be overwritten.
+    pub(crate) fn standard_normals_into(&mut self, count: usize, out: &mut Vec<f64>) {
         use rayon::prelude::*;
-        let mut out = Vec::with_capacity(count + 1);
-        if count > 0 {
-            if let Some(z) = self.gauss_next.take() {
-                out.push(z);
-            }
-        }
+        let mut profile = crate::training_profile::Profile::new("normal_draws");
+        let cached = if count > 0 { self.gauss_next.take() } else { None };
         // Store each pair's uniforms in place, then transform the pairs in parallel.
-        let offset = out.len();
+        let offset = usize::from(cached.is_some());
         let pairs = (count - offset).div_ceil(2);
-        for _ in 0..pairs {
-            out.push(self.random());
-            out.push(self.random());
-        }
+        out.resize(offset + pairs * 2, 0.0);
+        if let Some(z) = cached { out[0] = z; }
+        self.fill_uniforms(&mut out[offset..]);
+        profile.mark("uniform_draws");
         out[offset..].par_chunks_exact_mut(2).with_min_len(4096).for_each(|pair| {
             let x2pi = pair[0] * std::f64::consts::TAU;
             let g2rad = (-2.0 * (1.0 - pair[1]).ln()).sqrt();
@@ -168,7 +198,7 @@ impl PyRandom {
         if out.len() > count {
             self.gauss_next = out.pop();
         }
-        out
+        profile.mark("transform");
     }
 
     /// `random.getrandbits(k)` for `1 <= k <= 32`.
@@ -241,6 +271,38 @@ mod tests {
             }
             assert_eq!(a.gauss(1.0).to_bits(), b.gauss(1.0).to_bits());
             assert_eq!(a.random().to_bits(), b.random().to_bits());
+        }
+    }
+
+    #[test]
+    fn bulk_uniforms_preserve_every_twist_boundary_and_checkpoint() {
+        for seed in [0, 11, -3, (1 << 40) + 5] {
+            for index in 0..=N {
+                let mut expected = PyRandom::new(seed);
+                expected.gauss(1.0); // Keep a cached normal across uniform draws.
+                for _ in 0..index { expected.next_u32(); }
+                let mut actual = expected.clone();
+                for count in [0, 1, 2, 311, 312, 313, 625] {
+                    let mut values = vec![0.0; count];
+                    actual.fill_uniforms(&mut values);
+                    for value in values { assert_eq!(value.to_bits(), expected.random().to_bits()); }
+                    assert_eq!(actual.to_json(), expected.to_json());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reused_normal_storage_preserves_cached_values_and_rng_state() {
+        let mut expected = PyRandom::new(123);
+        let mut actual = expected.clone();
+        let mut storage = vec![f64::NAN; 20000];
+        for count in [0, 1, 0, 7, 623, 624, 625, 10001, 2, 0, 3] {
+            actual.standard_normals_into(count, &mut storage);
+            assert_eq!(storage.len(), count);
+            for &value in &storage { assert_eq!((0.0 + value).to_bits(), expected.gauss(1.0).to_bits()); }
+            assert_eq!(actual.to_json(), expected.to_json());
+            assert_eq!(actual.randrange(57), expected.randrange(57));
         }
     }
 }

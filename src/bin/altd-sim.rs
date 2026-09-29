@@ -1349,7 +1349,11 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         let last = generation + 1 == config.generations;
         if !last {
             runner.settings.mutation_rate = scheduled_rate(config, generation + 1);
-            runner.next_generation();
+            if let Some(sim) = &mut gpu_sim {
+                runner.next_generation_gpu(sim).unwrap_or_else(|e| panic!("--gpu: {e}"));
+            } else {
+                runner.next_generation();
+            }
         }
         let turnover_seconds = turnover_started.elapsed().as_secs_f64();
         let wall = generation_started.elapsed().as_secs_f64();

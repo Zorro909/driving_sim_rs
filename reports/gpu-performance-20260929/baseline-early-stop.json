@@ -1,0 +1,165 @@
+{
+  "library": "/tmp/altd-gpu-performance-20260929/baseline/libaltd_gpu.so",
+  "library_sha256": "4e6a27390552f15689aeacfad8b3efbbd622c6f7a73c9a5ef0f6eae59fba097d",
+  "requested_ticks": 5400,
+  "rayon_threads": "8",
+  "graph": "default",
+  "split": "default",
+  "profile": "off",
+  "samples": 3,
+  "warmups": 1,
+  "eliminate": true,
+  "results": [
+    {
+      "cars": 8192,
+      "median_seconds": 0.214723002,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 462,
+          "eliminate": true,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 0.21500578,
+          "digest": "3e8b9d70a06e1fd2",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 462,
+          "eliminate": true,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 0.216565972,
+          "digest": "3e8b9d70a06e1fd2",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 462,
+          "eliminate": true,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 0.214723002,
+          "digest": "3e8b9d70a06e1fd2",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 8192,
+          "ticks": 462,
+          "eliminate": true,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 0.212778671,
+          "digest": "3e8b9d70a06e1fd2",
+          "active": 0
+        }
+      ]
+    },
+    {
+      "cars": 32768,
+      "median_seconds": 0.635022228,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 0.656051576,
+          "digest": "edc97c55bd90ded7",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 0.640537661,
+          "digest": "edc97c55bd90ded7",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 0.633798294,
+          "digest": "edc97c55bd90ded7",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 32768,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 0.635022228,
+          "digest": "edc97c55bd90ded7",
+          "active": 0
+        }
+      ]
+    },
+    {
+      "cars": 262144,
+      "median_seconds": 4.384248955,
+      "runs": [
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 0,
+          "warmup": true,
+          "seconds": 4.46904401,
+          "digest": "9b6cca1d2bdce208",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 1,
+          "warmup": false,
+          "seconds": 4.384248955,
+          "digest": "9b6cca1d2bdce208",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 2,
+          "warmup": false,
+          "seconds": 4.350671819,
+          "digest": "9b6cca1d2bdce208",
+          "active": 0
+        },
+        {
+          "benchmark": "fixed_generation",
+          "cars": 262144,
+          "ticks": 486,
+          "eliminate": true,
+          "sample": 3,
+          "warmup": false,
+          "seconds": 4.447791549,
+          "digest": "9b6cca1d2bdce208",
+          "active": 0
+        }
+      ]
+    }
+  ],
+  "checkpoint_sha256": "1203d453895f86b2292f88c3a8f4c0d741f107d4bebdc1bb98f4fc723760f51a"
+}

@@ -1,0 +1,55 @@
+   Compiling altd_sim v0.1.0 (/var/home/zorro/git/AILearnsToDrive/driving_sim_rs)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.33s
+     Running unittests src/lib.rs (target/release/deps/altd_sim-36aec7c70cd16d78)
+
+running 17 tests
+test network::tests::vector_layout_matches_python ... ok
+test network::tests::xavier_matches_python ... ok
+test pymath::tests::compensated_sum_recovers_cancelled_terms ... ok
+test pymath::tests::floored_modulo_matches_python ... ok
+test pymath::tests::hypot_basic_values ... ok
+test pyrandom::tests::gauss_randrange_and_seeds_match_cpython ... ok
+test pyrandom::tests::matches_cpython_seed_7 ... ok
+test pyrandom::tests::json_state_round_trips ... ok
+test pyrandom::tests::batched_normals_match_sequential_gauss ... ok
+test pyrandom::tests::reused_normal_storage_preserves_cached_values_and_rng_state ... ok
+test broadphase::tests::original_tilemap_deferred_wall_query_order ... ok
+test broadphase::tests::original_engine_full_wall_query_order ... ok
+test path_segments::tests::avx2_scan_matches_scalar_scan ... ok
+test network_simd::tests::expm1_matches_game_expm1_on_the_tanh_domain ... ok
+test network_simd::tests::tanh4_matches_every_game_tanh_branch ... ok
+test pyrandom::tests::bulk_uniforms_preserve_every_twist_boundary_and_checkpoint ... ok
+test network_simd::tests::simd_forward_matches_scalar_loop ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/game_training.rs (target/release/deps/game_training-ddbb4f1abd5fb832)
+
+running 17 tests
+test every_original_sensor_name_loads_with_its_original_defaults ... ok
+test checkpoint_roundtrip_preserves_both_game_streams ... ok
+test vision_lengths_match_the_game_editor_for_every_whole_angle ... ok
+test random_streams_and_reproduction_match_original_assemblies ... ok
+test pause_preserves_original_scheduler_phase_and_batch_cursor ... ok
+test paused_runner_matches_original_native_freeze_and_restore ... ok
+test installed_generation_reaches_native_waiting_state_before_drive ... ok
+test generation_stop_matches_original_scheduler_callbacks ... ok
+test idle_elimination_stops_scoring_but_retains_passive_cars ... ok
+test exact_sensor_export_retains_order_and_parameters ... ok
+test statistics_and_laps_match_original_game ... ok
+test generated_curve_controls_and_baking_match_original_engine ... ok
+test double_math_matches_shipped_windows_runtime ... ok
+test random_tracks_and_rng_consumption_match_original_game ... ok
+test random_training_transitions_install_generated_worlds_and_preserve_config ... ok
+test process_hash_seed_matches_original_track_catalog_and_generation ... ok
+test car_major_windows_match_tick_major_scheduler ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/scratch_cli.rs (target/release/deps/scratch_cli-d07e3beed52d1be2)
+
+running 1 test
+test scratch_elimination_settings_overrides_and_resume ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.97s
+
