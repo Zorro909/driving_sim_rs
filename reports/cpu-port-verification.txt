@@ -1,0 +1,29 @@
+CPU port verification, 2026-09-28
+
+97 distinct tests passed in debug and release profiles.
+The full suite passed with 96 tests, then the added idle-elimination test
+passed in debug and the full 16-test game_training target passed in release.
+
+Commands:
+  cargo test --offline --manifest-path driving_sim_rs/Cargo.toml -j 2 --no-fail-fast -- --test-threads=2
+  cd driving_sim_rs && cargo test --release --offline -j 2 -- --test-threads=2
+  cargo test --release --offline -j 2 --test game_training -- --test-threads=2
+  cargo build --release --offline -j 2
+  python3 driving_sim_rs/check_accuracy.py --label cpu-port --cases a01 a05 a06 a07 b06 --closed-loop --sensors --assert-position 0 --assert-closed-loop-exact
+  driving_sim_rs/target/release/altd-sim --threads 2 bench --population 128 --ticks 600
+
+Accuracy gates passed. All five tracks have zero one-step position error.
+A01/A07/B06 closed-loop replays are exact. The checker reports the existing
+A05/A06 closed-loop deviations separately; it does not assert those are exact.
+See cpu-port_summary.json and the individual reports for all error metrics.
+
+Two imported test issues were corrected without changing simulation math:
+- Explicit wrapping subtraction in the SIMD threshold corpus fixes debug overflow.
+- The pause-scheduler fixture restores its captured post-reset body basis,
+  which differs from the basis after TrainingRunner's settling callbacks.
+
+CLI regression coverage includes settings/flag precedence, actual idle
+elimination, changed resume settings and population, legacy metadata migration,
+repeated resume after migration, mismatched full layer layouts including equal
+parameter counts, and truncated checkpoint rejection. The idle lifecycle test
+also checks score freezing while physical ticks continue in both CPU modes.

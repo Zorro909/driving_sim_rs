@@ -1,0 +1,4 @@
+# Rust never contracts a*b+c into FMA on its own, so native codegen keeps
+# the game arithmetic order while enabling native CPU optimizations.
+[build]
+rustflags = ["-C", "target-cpu=native"]

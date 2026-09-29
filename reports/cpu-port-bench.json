@@ -1,0 +1,61 @@
+{
+  "population": 128,
+  "timed_ticks": 600,
+  "warmup_ticks": 2,
+  "batch_count": 2,
+  "seed": 7,
+  "spawn_index": 0,
+  "settings": {
+    "population": 128,
+    "selection_algorithm": "best",
+    "selection_size": 14,
+    "crossover": "none",
+    "mutation_rate": 0.05,
+    "adaptive_mutation": true,
+    "weight_decay": 0.0001,
+    "preserve_parents": "on_custom",
+    "preserve_parents_size": 7,
+    "rewards": [
+      {
+        "metric": "total_score",
+        "weight": 100,
+        "type": "default"
+      }
+    ]
+  },
+  "physics_shapes": 94,
+  "network_shape": [
+    20,
+    16,
+    16,
+    16,
+    16,
+    12,
+    12,
+    8,
+    5
+  ],
+  "network_parameters": 1661,
+  "active_after_ticks": 128,
+  "contacts_after_ticks": 5291,
+  "world_load_seconds": 0.006380109,
+  "initialization_seconds": 0.005020355,
+  "warmup_seconds": 0.000230089,
+  "timed_wall_seconds": 0.073458825,
+  "timed_cpu_seconds": 0.14620031300000003,
+  "turnover_seconds": 0.003710462,
+  "simulated_seconds": 10.0,
+  "realtime_multiplier": 136.13068273280984,
+  "wall_seconds_per_simulated_second": 0.0073458825,
+  "car_ticks_per_wall_second": 1045483.6433879795,
+  "complete_generation_simulated_seconds": 10.033333333333333,
+  "complete_generation_wall_seconds": 0.082419731,
+  "complete_generation_realtime_multiplier": 121.73460422157085,
+  "peak_rss_kib": 41456,
+  "mode": "independent",
+  "implementation": "rust altd_sim 0.1.0",
+  "platform": "linux-x86_64",
+  "logical_cpus": 32,
+  "affinity_cpus": 32,
+  "threads": 2
+}

@@ -1,0 +1,135 @@
+{
+  "first_tick": 2,
+  "stop_tick_exclusive": 2400,
+  "sensor_update_parity": 0,
+  "sample_state_rule": "tick-1 on update ticks; tick-2 on held ticks",
+  "vision_all": {
+    "samples": 31174,
+    "nonzero_errors": 0,
+    "rmse": 0.0,
+    "max": 0.0
+  },
+  "ray_mismatches": [],
+  "sensors": {
+    "AngVel": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "Boost": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "Dir": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "Grip": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "VelF": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "VelS": {
+      "samples": 2398,
+      "nonzero_errors": 2,
+      "rmse": 3.442710532295154e-9,
+      "max": 1.1920928955078125e-7
+    },
+    "Curve": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-135": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-90": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-60": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-35": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-20": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-10": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_0": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_10": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_20": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_35": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_60": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_90": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_135": {
+      "samples": 2398,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    }
+  }
+}

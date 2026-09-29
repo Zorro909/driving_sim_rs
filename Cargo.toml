@@ -1,0 +1,24 @@
+[package]
+name = "altd_sim"
+version = "0.1.0"
+edition = "2021"
+description = "CPU game-fidelity simulator and trainer for AI Learns To Drive"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip parses JSON floats exactly like Python's float().
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+debug = "line-tables-only"
+
+[[bin]]
+name = "altd-sim"
+path = "src/bin/altd-sim.rs"

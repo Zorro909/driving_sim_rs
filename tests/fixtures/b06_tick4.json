@@ -1,0 +1,1332 @@
+{
+  "frames": [
+    {
+      "tick": 2,
+      "engine_frame": 867,
+      "generation_time": 9.9,
+      "position": [
+        2688,
+        1535.923
+      ],
+      "rotation": 0,
+      "velocity": [
+        0,
+        -4.62
+      ],
+      "angular_velocity": 0,
+      "cached_position": [
+        2688,
+        1535.923
+      ],
+      "cached_velocity": [
+        0,
+        -4.62
+      ],
+      "cached_acceleration": [
+        0,
+        -4.62
+      ],
+      "boost_energy": 0.99,
+      "active": true,
+      "collision_count": 8,
+      "physics_contacts": [],
+      "score": 46.02745691935221,
+      "wheel_angles": [
+        -14,
+        -14,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": -0.9999999999967221
+        },
+        {
+          "name": "Acceleration",
+          "value": 0.9999999997462183
+        },
+        {
+          "name": "Handbrake",
+          "value": 0.20118879976540688
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999999992235
+        },
+        {
+          "name": "Boost",
+          "value": 1
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.7825207114219666
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.5200001001358032
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.7782974243164062
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.7579566240310669
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.7058990001678467
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.6355147361755371
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0.5399999618530273
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0.4645808935165405
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0.3581797480583191
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.15259689092636108
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.7342503070831299
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0.5200001001358032
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.7825207114219666
+        },
+        {
+          "name": "AngVel",
+          "value": 0
+        },
+        {
+          "name": "Boost",
+          "value": 1
+        },
+        {
+          "name": "Dir",
+          "value": 1
+        },
+        {
+          "name": "Grip",
+          "value": 1
+        },
+        {
+          "name": "VelF",
+          "value": 0
+        },
+        {
+          "name": "VelS",
+          "value": 0
+        },
+        {
+          "name": "Curve",
+          "value": 0.1741357445716858
+        }
+      ]
+    },
+    {
+      "tick": 3,
+      "engine_frame": 868,
+      "generation_time": 9.9,
+      "position": [
+        2687.9917,
+        1535.7712
+      ],
+      "rotation": -0.0005043263,
+      "velocity": [
+        -0.49224353,
+        -9.103893
+      ],
+      "angular_velocity": -0.030259576,
+      "cached_position": [
+        2687.9917,
+        1535.7712
+      ],
+      "cached_velocity": [
+        -0.49224353,
+        -9.103893
+      ],
+      "cached_acceleration": [
+        -0.49224353,
+        -4.4838934
+      ],
+      "boost_energy": 0.98,
+      "active": true,
+      "collision_count": 8,
+      "physics_contacts": [],
+      "score": 46.02745691935221,
+      "wheel_angles": [
+        -22.196093,
+        -22.196093,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": -0.9999999999967221
+        },
+        {
+          "name": "Acceleration",
+          "value": 0.9999999997462183
+        },
+        {
+          "name": "Handbrake",
+          "value": 0.20118879976540688
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999999992235
+        },
+        {
+          "name": "Boost",
+          "value": 1
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.7825207114219666
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.5200001001358032
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.7782974243164062
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.7579566240310669
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.7058990001678467
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.6355147361755371
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0.5399999618530273
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0.4645808935165405
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0.3581797480583191
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.15259689092636108
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.7342503070831299
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0.5200001001358032
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.7825207114219666
+        },
+        {
+          "name": "AngVel",
+          "value": 0
+        },
+        {
+          "name": "Boost",
+          "value": 1
+        },
+        {
+          "name": "Dir",
+          "value": 1
+        },
+        {
+          "name": "Grip",
+          "value": 1
+        },
+        {
+          "name": "VelF",
+          "value": 0
+        },
+        {
+          "name": "VelS",
+          "value": 0
+        },
+        {
+          "name": "Curve",
+          "value": 0.1741357445716858
+        }
+      ]
+    },
+    {
+      "tick": 4,
+      "engine_frame": 869,
+      "generation_time": 9.9,
+      "position": [
+        2687.9705,
+        1535.5464
+      ],
+      "rotation": -0.0017924294,
+      "velocity": [
+        -1.2701899,
+        -13.4884815
+      ],
+      "angular_velocity": -0.07728617,
+      "cached_position": [
+        2687.9705,
+        1535.5464
+      ],
+      "cached_velocity": [
+        -1.2701899,
+        -13.4884815
+      ],
+      "cached_acceleration": [
+        -0.77794635,
+        -4.3845882
+      ],
+      "boost_energy": 0.97002864,
+      "active": true,
+      "collision_count": 8,
+      "physics_contacts": [],
+      "score": 46.02745691935221,
+      "wheel_angles": [
+        0.026421137,
+        0.026421137,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": 0.9999999999956486
+        },
+        {
+          "name": "Acceleration",
+          "value": 1
+        },
+        {
+          "name": "Handbrake",
+          "value": -0.9999999999999146
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999912330496
+        },
+        {
+          "name": "Boost",
+          "value": 0.9971358843142194
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.7824298143386841
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.5200415253639221
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.7783811092376709
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.7581515908241272
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.7062612771987915
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.6359952092170715
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0.5406490564346313
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0.4651795029640198
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0.35884708166122437
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.1532995104789734
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.7340211868286133
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0.43995851278305054
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.7826114892959595
+        },
+        {
+          "name": "AngVel",
+          "value": -0.015129804611206055
+        },
+        {
+          "name": "Boost",
+          "value": 0.9800000190734863
+        },
+        {
+          "name": "Dir",
+          "value": 0.9999998211860657
+        },
+        {
+          "name": "Grip",
+          "value": 1
+        },
+        {
+          "name": "VelF",
+          "value": 0.009104132652282715
+        },
+        {
+          "name": "VelS",
+          "value": -0.0009752511978149414
+        },
+        {
+          "name": "Curve",
+          "value": 0.17707447707653046
+        }
+      ]
+    }
+  ],
+  "collider_shapes": [
+    {
+      "collider_rid": "RID(40754944671764)",
+      "collider_shape": 4,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -384,
+          -384
+        ],
+        [
+          384,
+          -384
+        ],
+        [
+          384,
+          160
+        ],
+        [
+          291,
+          152
+        ],
+        [
+          175,
+          121.5
+        ],
+        [
+          49.5,
+          47
+        ],
+        [
+          -79,
+          -33.5
+        ]
+      ],
+      "body_origin": [
+        4995,
+        1152
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40750649704467)",
+      "collider_shape": 1,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -384,
+          384
+        ],
+        [
+          -384,
+          352
+        ],
+        [
+          -72,
+          352
+        ]
+      ],
+      "body_origin": [
+        5763,
+        1152
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40750649704467)",
+      "collider_shape": 3,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          64,
+          352
+        ],
+        [
+          -72,
+          352
+        ],
+        [
+          -8,
+          304
+        ],
+        [
+          8,
+          304
+        ]
+      ],
+      "body_origin": [
+        5763,
+        1152
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40763534606358)",
+      "collider_shape": 1,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -160,
+          -384
+        ],
+        [
+          384,
+          -384
+        ],
+        [
+          384,
+          384
+        ],
+        [
+          -160,
+          -288
+        ]
+      ],
+      "body_origin": [
+        6531,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40763534606358)",
+      "collider_shape": 3,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -176,
+          -240
+        ],
+        [
+          384,
+          384
+        ],
+        [
+          -384,
+          384
+        ],
+        [
+          -240,
+          -176
+        ]
+      ],
+      "body_origin": [
+        6531,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40763534606358)",
+      "collider_shape": 4,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -304,
+          -160
+        ],
+        [
+          -240,
+          -176
+        ],
+        [
+          -384,
+          384
+        ]
+      ],
+      "body_origin": [
+        6531,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40772124540952)",
+      "collider_shape": 3,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -109,
+          -218.5
+        ],
+        [
+          -242.5,
+          -76
+        ],
+        [
+          -384,
+          -384
+        ]
+      ],
+      "body_origin": [
+        4995,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40772124540952)",
+      "collider_shape": 2,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -242.5,
+          -76
+        ],
+        [
+          -320,
+          96
+        ],
+        [
+          -384,
+          -384
+        ]
+      ],
+      "body_origin": [
+        4995,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40772124540952)",
+      "collider_shape": 1,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -320,
+          96
+        ],
+        [
+          -352,
+          288
+        ],
+        [
+          -384,
+          -384
+        ]
+      ],
+      "body_origin": [
+        4995,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40724879900685)",
+      "collider_shape": 7,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -384,
+          384
+        ],
+        [
+          -384,
+          -384
+        ],
+        [
+          -350.5,
+          -384
+        ],
+        [
+          -349.5,
+          -263
+        ]
+      ],
+      "body_origin": [
+        4995,
+        2688
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40780714475546)",
+      "collider_shape": 2,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          384,
+          -384
+        ],
+        [
+          80,
+          176
+        ],
+        [
+          48,
+          96
+        ]
+      ],
+      "body_origin": [
+        6531,
+        2688
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40780714475546)",
+      "collider_shape": 1,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          384,
+          -384
+        ],
+        [
+          96,
+          288
+        ],
+        [
+          80,
+          176
+        ]
+      ],
+      "body_origin": [
+        6531,
+        2688
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40690520162309)",
+      "collider_shape": 1,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          384,
+          -160
+        ],
+        [
+          384,
+          384
+        ],
+        [
+          -384,
+          384
+        ],
+        [
+          288,
+          -160
+        ]
+      ],
+      "body_origin": [
+        4227,
+        4224
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40690520162309)",
+      "collider_shape": 2,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          240,
+          -176
+        ],
+        [
+          288,
+          -160
+        ],
+        [
+          -384,
+          384
+        ]
+      ],
+      "body_origin": [
+        4227,
+        4224
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40690520162309)",
+      "collider_shape": 4,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          160,
+          -304
+        ],
+        [
+          176,
+          -240
+        ],
+        [
+          -384,
+          -384
+        ]
+      ],
+      "body_origin": [
+        4227,
+        4224
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40690520162309)",
+      "collider_shape": 5,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          160,
+          -304
+        ],
+        [
+          -384,
+          -384
+        ],
+        [
+          160,
+          -384
+        ]
+      ],
+      "body_origin": [
+        4227,
+        4224
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40699110096903)",
+      "collider_shape": 5,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -384,
+          -384
+        ],
+        [
+          -64,
+          -32
+        ],
+        [
+          -128,
+          -64
+        ]
+      ],
+      "body_origin": [
+        4227,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40699110096903)",
+      "collider_shape": 6,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          -384,
+          -384
+        ],
+        [
+          -128,
+          -64
+        ],
+        [
+          -240,
+          -96
+        ]
+      ],
+      "body_origin": [
+        4227,
+        1920
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40673340293121)",
+      "collider_shape": 5,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          352,
+          -384
+        ],
+        [
+          384,
+          -384
+        ],
+        [
+          384,
+          384
+        ],
+        [
+          344,
+          -256
+        ]
+      ],
+      "body_origin": [
+        3459,
+        3456
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    },
+    {
+      "collider_rid": "RID(40673340293121)",
+      "collider_shape": 6,
+      "shape_type": "ConvexPolygon",
+      "shape_points": [
+        [
+          304,
+          -112
+        ],
+        [
+          344,
+          -256
+        ],
+        [
+          384,
+          384
+        ]
+      ],
+      "body_origin": [
+        3459,
+        3456
+      ],
+      "body_basis_x": [
+        1,
+        0
+      ],
+      "body_basis_y": [
+        0,
+        1
+      ],
+      "shape_origin": [
+        0,
+        0
+      ],
+      "shape_basis_x": [
+        1,
+        0
+      ],
+      "shape_basis_y": [
+        0,
+        1
+      ]
+    }
+  ]
+}

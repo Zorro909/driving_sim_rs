@@ -1,0 +1,248 @@
+{
+  "first_tick": 2,
+  "stop_tick_exclusive": 900,
+  "sensor_update_parity": 1,
+  "sample_state_rule": "tick-1 on update ticks; tick-2 on held ticks",
+  "vision_all": {
+    "samples": 11674,
+    "nonzero_errors": 14,
+    "rmse": 1.0782064885189436e-8,
+    "max": 4.76837158203125e-7
+  },
+  "ray_mismatches": [
+    {
+      "tick": 443,
+      "source_index": 442,
+      "degrees": 135.0,
+      "length": 624.2640380859375,
+      "actual": 0.6667766571044922,
+      "expected": 0.6667762994766235
+    },
+    {
+      "tick": 444,
+      "source_index": 442,
+      "degrees": 135.0,
+      "length": 624.2640380859375,
+      "actual": 0.6667766571044922,
+      "expected": 0.6667762994766235
+    },
+    {
+      "tick": 459,
+      "source_index": 458,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.705417275428772,
+      "expected": 0.7054169774055481
+    },
+    {
+      "tick": 460,
+      "source_index": 458,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.705417275428772,
+      "expected": 0.7054169774055481
+    },
+    {
+      "tick": 471,
+      "source_index": 470,
+      "degrees": 60.0,
+      "length": 499.9999694824219,
+      "actual": 0.5635014772415161,
+      "expected": 0.5635011196136475
+    },
+    {
+      "tick": 472,
+      "source_index": 470,
+      "degrees": 60.0,
+      "length": 499.9999694824219,
+      "actual": 0.5635014772415161,
+      "expected": 0.5635011196136475
+    },
+    {
+      "tick": 511,
+      "source_index": 510,
+      "degrees": -35.0,
+      "length": 691.4912109375,
+      "actual": 0.7231920957565308,
+      "expected": 0.7231922149658203
+    },
+    {
+      "tick": 512,
+      "source_index": 510,
+      "degrees": -35.0,
+      "length": 691.4912109375,
+      "actual": 0.7231920957565308,
+      "expected": 0.7231922149658203
+    },
+    {
+      "tick": 541,
+      "source_index": 540,
+      "degrees": 20.0,
+      "length": 763.8155517578125,
+      "actual": 0.157404363155365,
+      "expected": 0.1574048399925232
+    },
+    {
+      "tick": 542,
+      "source_index": 540,
+      "degrees": 20.0,
+      "length": 763.8155517578125,
+      "actual": 0.157404363155365,
+      "expected": 0.1574048399925232
+    },
+    {
+      "tick": 705,
+      "source_index": 704,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.7721201777458191,
+      "expected": 0.7721202373504639
+    },
+    {
+      "tick": 706,
+      "source_index": 704,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.7721201777458191,
+      "expected": 0.7721202373504639
+    },
+    {
+      "tick": 717,
+      "source_index": 716,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.8274260759353638,
+      "expected": 0.8274263739585876
+    },
+    {
+      "tick": 718,
+      "source_index": 716,
+      "degrees": 0.0,
+      "length": 800.0,
+      "actual": 0.8274260759353638,
+      "expected": 0.8274263739585876
+    }
+  ],
+  "sensors": {
+    "AngVel": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "Boost": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "Dir": {
+      "samples": 898,
+      "nonzero_errors": 10,
+      "rmse": 6.289873856203664e-9,
+      "max": 5.960464477539063e-8
+    },
+    "Grip": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "VelF": {
+      "samples": 898,
+      "nonzero_errors": 2,
+      "rmse": 5.6258342049480525e-9,
+      "max": 1.1920928955078125e-7
+    },
+    "VelS": {
+      "samples": 898,
+      "nonzero_errors": 8,
+      "rmse": 1.0142116846599695e-8,
+      "max": 1.1920928955078125e-7
+    },
+    "Curve": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-135": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-90": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-60": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-35": {
+      "samples": 898,
+      "nonzero_errors": 2,
+      "rmse": 5.6258342049480525e-9,
+      "max": 1.1920928955078125e-7
+    },
+    "vision_-20": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_-10": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_0": {
+      "samples": 898,
+      "nonzero_errors": 6,
+      "rmse": 2.0088246162742392e-8,
+      "max": 2.980232238769531e-7
+    },
+    "vision_10": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_20": {
+      "samples": 898,
+      "nonzero_errors": 2,
+      "rmse": 2.250333681979221e-8,
+      "max": 4.76837158203125e-7
+    },
+    "vision_35": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_60": {
+      "samples": 898,
+      "nonzero_errors": 2,
+      "rmse": 1.6877502614844157e-8,
+      "max": 3.5762786865234375e-7
+    },
+    "vision_90": {
+      "samples": 898,
+      "nonzero_errors": 0,
+      "rmse": 0.0,
+      "max": 0.0
+    },
+    "vision_135": {
+      "samples": 898,
+      "nonzero_errors": 2,
+      "rmse": 1.6877502614844157e-8,
+      "max": 3.5762786865234375e-7
+    }
+  }
+}
