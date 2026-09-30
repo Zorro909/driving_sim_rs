@@ -29,6 +29,8 @@ pub mod game_random;
 pub mod simulation;
 
 pub mod random_track;
+// The buffered training producer uses native threads and prepares HIP worlds.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod training_tracks;
 
 pub mod double_math;

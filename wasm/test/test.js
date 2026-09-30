@@ -4,6 +4,8 @@
 // checks the GPU raycaster against the CPU and drives the same scenario with
 // GPU rays. `root` is the URL of the repository root.
 import init, { Simulation, GpuRaycaster, version } from '../pkg/altd_sim.js';
+import { verifyDivision } from './division.js';
+import { verifyTicks } from './tick-parity.js';
 
 const text = async (url) => {
     const response = await fetch(url);
@@ -33,6 +35,7 @@ async function runSteps(sim, scenario, raycaster) {
     result.milliseconds = performance.now() - started;
     result.generation = sim.generation;
     result.tick = sim.tick;
+    result.checkpoint = sim.checkpointJson();
     return result;
 }
 
@@ -49,6 +52,7 @@ function compare(got, expected) {
     };
     check('generation', got.generation, expected.generation);
     check('tick', got.tick, expected.tick);
+    if (expected.checkpoint !== undefined) check('checkpoint', got.checkpoint, expected.checkpoint);
     check('ticks.length', got.ticks.length, expected.ticks.length);
     check('generations.length', got.generations.length, expected.generations.length);
     check('states.length', got.states.length, expected.states.length);
@@ -68,10 +72,13 @@ function compare(got, expected) {
 
 export async function run(root) {
     await init();
-    const scenario = JSON.parse(await text(root + 'wasm/test/scenario.json'));
-    const reference = JSON.parse(await text(root + 'wasm/test/reference.json'));
+    const options = window.altdTestOptions || {};
+    const scenarioPath = options.scenario || 'wasm/test/scenario.json';
+    const referencePath = options.reference || 'wasm/test/reference.json';
+    const scenario = JSON.parse(await text(root + scenarioPath));
+    const reference = JSON.parse(await text(root + referencePath));
     const [scene, network, model] = await Promise.all([scenario.scene, scenario.network, scenario.model].map((p) => text(root + p)));
-    const report = { version: version(), cpu: null, gpu: null, ok: false };
+    const report = { version: version(), scenario: scenarioPath, reference: referencePath, cpu: null, gpu: null, ok: false };
 
     const cpuSim = new Simulation(scene, network, model, scenario.options);
     report.rayCount = cpuSim.rayCount();
@@ -109,14 +116,16 @@ export async function run(root) {
         const device = await adapter.requestDevice();
         const raycaster = await GpuRaycaster.create(device, cpuSim);
         report.gpu = { adapter: adapterInfo, nodeCount: raycaster.nodeCount, wallCount: raycaster.wallCount, depth: raycaster.depth };
-        report.gpu.verify = await raycaster.verify(cpuSim, 4000, 4000, 7);
+        if (window.altdDivisionFixture) report.gpu.division = await verifyDivision(device, root, window.altdDivisionFixture);
+        report.gpu.verify = await raycaster.verify(cpuSim, options.verifyRays ?? 4000, options.verifyPoints ?? 4000, options.verifySeed ?? 7);
         const gpuSim = new Simulation(scene, network, model, scenario.options);
         const gpu = await runSteps(gpuSim, scenario, raycaster);
         report.gpu.compare = compare(gpu, cpu);
         report.gpu.milliseconds = Math.round(gpu.milliseconds);
         report.gpu.raysChecked = gpuSim.gpuRaysChecked();
         report.gpu.rayMismatches = gpuSim.gpuRayMismatches();
-        report.gpu.ok = report.gpu.compare.ok && report.gpu.verify.rayMismatches === 0 && report.gpu.verify.pointMismatches === 0 && report.gpu.rayMismatches === 0;
+        if (options.tickCheck) report.gpu.tickParity = await verifyTicks(scene, network, model, scenario, raycaster, options.tickCheck);
+        report.gpu.ok = report.gpu.compare.ok && report.gpu.verify.rayMismatches === 0 && report.gpu.verify.pointMismatches === 0 && report.gpu.rayMismatches === 0 && report.gpu.division?.ok !== false && report.gpu.tickParity?.ok !== false;
         report.ok = report.ok && report.gpu.ok;
     } catch (error) {
         report.gpu = { unavailable: String(error && error.message || error) };

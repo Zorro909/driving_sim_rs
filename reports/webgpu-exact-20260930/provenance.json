@@ -1,0 +1,22 @@
+{
+  "mainCommit": "3fa7fa49681d61b4bb15a3eee6f366a8efb406ff",
+  "rebasedPatchCommit": "b453de136b31a351d7dc56fa7d52d2d7c379fba8",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "wasmSha256": "d83673f0747fe930852d0c78aa7fc7667e04f3935d6208009bbefe2e0342d1ce",
+  "divisionFixtureSha256": "be3d5507812473d55d32b07cc553f245bd70ef8e374899ea98209c39e8256ce2",
+  "sourceSha256": {
+    "src/wasm/float.wgsl": "06d95600965892ab65de255afd217f4f52f3cac61e8a423fad2d1f5ed8d7523e",
+    "src/wasm/rays.wgsl": "074c21d02784512582127b362b5f6a73197343a69b84fb39506d9e79ff4ec8cc",
+    "src/wasm/gpu.rs": "4ce9c65d64d4d70802ce5f698e39762dd61d405d8e1835f22e8d23b18081bc56",
+    "wasm/test/test.js": "71fa375d7d6f291deb227c10415b0ed8aecff1c04a1d27e8dc5943629d88ce1e",
+    "wasm/test/tick-parity.js": "9c413d581f0f76bc8a95ac31b64408ea91b2cdaa2e18886a1bd2b86d506b3367",
+    "examples/webgpu_division_reference.rs": "e70f76102944f844c61efc4b1dd825e88ff4f6d282f0776cbde2a8e1820dbf73"
+  },
+  "referenceSha256": {
+    "wasm/test/reference.json": "e6555b38308061472945817349bdac501c60eb181861394d9368dd95bc7a3fb1",
+    "wasm/test/scenarios/a01-reference.json": "8b0dab68688cc3ef321e6ff70e44d82f304a143de7037c8521f337475fc2676e",
+    "wasm/test/scenarios/a07-reference.json": "56a2e0340d3e08aa4916558b3c6fbe921123ea556dbf3bf9d15e12cbbac0b3e5",
+    "wasm/test/scenarios/b06-reference.json": "fb628e4e3ba6ead8ccb60fc1f0e9351a35205b98e485363024574f29b39e79fd"
+  },
+  "gameSummaryMatchesOriginalBaseline": true
+}

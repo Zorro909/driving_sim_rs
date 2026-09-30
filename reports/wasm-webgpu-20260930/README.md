@@ -1,5 +1,8 @@
 # WASM and WebGPU validation, 2026-09-30
 
+This records the original shader. The corrected shader now passes hardware
+parity checks; see [the exact simulation validation](../webgpu-exact-20260930/README.md).
+
 The patch is applied. The native and WASM CPU checks pass, but the WebGPU
 raycaster fails exact parity on the RX 7900 XTX. This failure repeats in
 Chromium 151.0.7922.34 and 153.0.8010.12 with identical mismatch counts.

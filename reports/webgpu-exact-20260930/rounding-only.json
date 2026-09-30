@@ -1,0 +1,164 @@
+{
+  "version": "0.1.0",
+  "cpu": {
+    "values": 2773,
+    "mismatches": 0,
+    "first": null,
+    "maxAbsoluteError": 0,
+    "ticks": "240,0,150,498,0,606",
+    "expectedTicks": "240,0,150,498,0,606",
+    "ok": true,
+    "milliseconds": 56,
+    "bestLap": null,
+    "checkpointBytes": 279530
+  },
+  "gpu": {
+    "adapter": {
+      "vendor": "amd",
+      "architecture": "rdna-3",
+      "device": "",
+      "description": "",
+      "isFallbackAdapter": false
+    },
+    "nodeCount": 307,
+    "wallCount": 381,
+    "depth": 13,
+    "verify": {
+      "rays": 4000,
+      "rayMismatches": 35,
+      "points": 4000,
+      "pointMismatches": 70,
+      "firstRayMismatch": {
+        "index": 287,
+        "query": [
+          3899.6484375,
+          1748.6177978515625,
+          3437.132568359375,
+          1762.5247802734375
+        ],
+        "got": [
+          3840,
+          1750.411376953125,
+          1,
+          0
+        ],
+        "expected": [
+          3840,
+          1750.4112548828125,
+          1,
+          0
+        ],
+        "gotBits": [
+          1164967936,
+          1155190058,
+          1065353216,
+          0
+        ],
+        "expectedBits": [
+          1164967936,
+          1155190057,
+          1065353216,
+          0
+        ]
+      },
+      "firstPointMismatch": {
+        "index": 77,
+        "query": [
+          5248.86767578125,
+          3303.478271484375,
+          0,
+          0
+        ],
+        "got": [
+          5376,
+          3303.47802734375,
+          1,
+          0
+        ],
+        "expected": [
+          5376,
+          3303.478271484375,
+          1,
+          0
+        ],
+        "gotBits": [
+          1168637952,
+          1162770342,
+          1065353216,
+          0
+        ],
+        "expectedBits": [
+          1168637952,
+          1162770343,
+          1065353216,
+          0
+        ]
+      }
+    },
+    "compare": {
+      "values": 2773,
+      "mismatches": 302,
+      "first": {
+        "where": "states[0][0]",
+        "got": 3943.181884765625,
+        "expected": 3943.1845703125
+      },
+      "maxAbsoluteError": 0.08028101921081543,
+      "ticks": "240,0,150,498,0,606",
+      "expectedTicks": "240,0,150,498,0,606",
+      "ok": false
+    },
+    "milliseconds": 3136,
+    "raysChecked": 119743,
+    "rayMismatches": 601,
+    "ok": false
+  },
+  "ok": false,
+  "rayCount": 13,
+  "sensorNames": [
+    "↑ -135°",
+    "↑ -90°",
+    "↑ -60°",
+    "↑ -35°",
+    "↑ -20°",
+    "↑ -10°",
+    "↑ 0°",
+    "↑ 10°",
+    "↑ 20°",
+    "↑ 35°",
+    "↑ 60°",
+    "↑ 90°",
+    "↑ 135°",
+    "AngVel",
+    "Boost",
+    "Wheel",
+    "Grip",
+    "VelF",
+    "VelS",
+    "Curve"
+  ],
+  "population": 32,
+  "browser": "153.0.8010.12",
+  "gpuMode": "hardware",
+  "hardware": {
+    "devices": [
+      {
+        "vendorId": 4098,
+        "deviceId": 5710,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "AMD",
+        "driverVersion": "26.2.2"
+      },
+      {
+        "vendorId": 4098,
+        "deviceId": 29772,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "",
+        "driverVersion": ""
+      }
+    ],
+    "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon RX 7900 XTX (RADV NAVI31) (0x0000744C)), radv-26.2.2)"
+  }
+}

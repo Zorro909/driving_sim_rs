@@ -1,0 +1,83 @@
+{
+  "version": "0.1.0",
+  "scenario": "wasm/test/scenario.json",
+  "reference": "wasm/test/reference.json",
+  "cpu": {
+    "values": 2773,
+    "mismatches": 0,
+    "first": null,
+    "maxAbsoluteError": 0,
+    "ticks": "240,0,150,498,0,606",
+    "expectedTicks": "240,0,150,498,0,606",
+    "ok": true,
+    "milliseconds": 56,
+    "bestLap": null,
+    "checkpointBytes": 279530
+  },
+  "gpu": {
+    "adapter": {
+      "vendor": "google",
+      "architecture": "swiftshader",
+      "device": "",
+      "description": "",
+      "isFallbackAdapter": true
+    },
+    "nodeCount": 307,
+    "wallCount": 381,
+    "depth": 13,
+    "division": {
+      "count": 1049732,
+      "mismatches": 0,
+      "first": null,
+      "ok": true
+    },
+    "verify": {
+      "rays": 4000,
+      "rayMismatches": 0,
+      "points": 4000,
+      "pointMismatches": 0,
+      "firstRayMismatch": null,
+      "firstPointMismatch": null
+    },
+    "compare": {
+      "values": 2774,
+      "mismatches": 0,
+      "first": null,
+      "maxAbsoluteError": 0,
+      "ticks": "240,0,150,498,0,606",
+      "expectedTicks": "240,0,150,498,0,606",
+      "ok": true
+    },
+    "milliseconds": 3016,
+    "raysChecked": 119743,
+    "rayMismatches": 0,
+    "ok": true
+  },
+  "ok": true,
+  "rayCount": 13,
+  "sensorNames": [
+    "↑ -135°",
+    "↑ -90°",
+    "↑ -60°",
+    "↑ -35°",
+    "↑ -20°",
+    "↑ -10°",
+    "↑ 0°",
+    "↑ 10°",
+    "↑ 20°",
+    "↑ 35°",
+    "↑ 60°",
+    "↑ 90°",
+    "↑ 135°",
+    "AngVel",
+    "Boost",
+    "Wheel",
+    "Grip",
+    "VelF",
+    "VelS",
+    "Curve"
+  ],
+  "population": 32,
+  "browser": "153.0.8010.12",
+  "gpuMode": "software"
+}

@@ -2,12 +2,11 @@
 //! (raycasts and closest wall points) in a compute shader, serving the ray
 //! sensors of `TrainingRunner`'s ray window and batch queries for JavaScript.
 //!
-//! WebGPU cannot promise the CPU's arithmetic: WGSL allows fusing a multiply
-//! and an add into one rounding and only bounds the error of a division, so
-//! a device may return a different hit for a ray that grazes a wall or a
-//! bounding box. `verify` compares a device with the CPU on random queries,
-//! and `gpuVerifyEvery` samples the sensor rays of every window; the
-//! simulation continues with the GPU's values and reports the mismatches.
+//! `float.wgsl` preserves the CPU's rounding boundaries and divides binary32
+//! significands with integers, avoiding WGSL fusion and approximate division.
+//! `verify` compares a device with the CPU on random queries, and
+//! `gpuVerifyEvery` samples the sensor rays of every window. These checks
+//! diagnose hardware differences without replacing the GPU's results.
 
 use super::{Shared, Simulation};
 use crate::bsp::RayTree;
@@ -29,7 +28,8 @@ use web_sys::{
 /// The BSP arrays of `RayTree::gpu_arrays`.
 pub type TreeArrays = (Vec<([u32; 4], [f32; 4], [f32; 4])>, Vec<[f32; 4]>, f32, usize);
 
-const SHADER: &str = include_str!("rays.wgsl");
+const FLOAT_SHADER: &str = include_str!("float.wgsl");
+const RAY_SHADER: &str = include_str!("rays.wgsl");
 /// `MAX_DEPTH` of rays.wgsl: the deepest BSP the shader's stack holds.
 pub const MAX_DEPTH: usize = 48;
 const WORKGROUP: u32 = 64;
@@ -111,7 +111,8 @@ impl Raycaster {
             s[0].to_bits(), s[1].to_bits(), s[2].to_bits(), s[3].to_bits(),
         ]).collect();
         let queue = device.queue();
-        let module = device.create_shader_module(&GpuShaderModuleDescriptor::new(SHADER));
+        let shader = format!("{FLOAT_SHADER}\n{RAY_SHADER}");
+        let module = device.create_shader_module(&GpuShaderModuleDescriptor::new(&shader));
         let stage = GpuProgrammableStage::new(&module);
         stage.set_entry_point("main");
         // `layout: "auto"`: the string stands in for a pipeline layout object.
@@ -335,8 +336,18 @@ impl GpuRaycaster {
             let got_points = inner.query(OP_CLOSEST_WALL, &point_queries).await?;
             let ray_mismatches = got_rays.iter().zip(&expected_rays).filter(|(a, b)| !same_result(a, b)).count();
             let point_mismatches = got_points.iter().zip(&expected_points).filter(|(a, b)| !same_result(a, b)).count();
+            let first_mismatch = |queries: &[[f32; 4]], got: &[[f32; 4]], expected: &[[f32; 4]]| {
+                got.iter().zip(expected).position(|(a, b)| !same_result(a, b)).map(|i| {
+                    serde_json::json!({
+                        "index": i, "query": queries[i], "got": got[i], "expected": expected[i],
+                        "gotBits": got[i].map(f32::to_bits), "expectedBits": expected[i].map(f32::to_bits),
+                    })
+                })
+            };
             let report = serde_json::json!({
                 "rays": rays, "rayMismatches": ray_mismatches, "points": points, "pointMismatches": point_mismatches,
+                "firstRayMismatch": first_mismatch(&ray_queries, &got_rays, &expected_rays),
+                "firstPointMismatch": first_mismatch(&point_queries, &got_points, &expected_points),
             });
             js_sys::JSON::parse(&report.to_string())
         })

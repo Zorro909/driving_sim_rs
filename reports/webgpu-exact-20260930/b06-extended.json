@@ -1,0 +1,111 @@
+{
+  "version": "0.1.0",
+  "scenario": "wasm/test/scenarios/b06.json",
+  "reference": "wasm/test/scenarios/b06-reference.json",
+  "cpu": {
+    "values": 2859,
+    "mismatches": 0,
+    "first": null,
+    "maxAbsoluteError": 0,
+    "ticks": "240,0,150,756,0,606",
+    "expectedTicks": "240,0,150,756,0,606",
+    "ok": true,
+    "milliseconds": 86,
+    "bestLap": null,
+    "checkpointBytes": 469889
+  },
+  "gpu": {
+    "adapter": {
+      "vendor": "amd",
+      "architecture": "rdna-3",
+      "device": "",
+      "description": "",
+      "isFallbackAdapter": false
+    },
+    "nodeCount": 420,
+    "wallCount": 550,
+    "depth": 14,
+    "verify": {
+      "rays": 65536,
+      "rayMismatches": 0,
+      "points": 65536,
+      "pointMismatches": 0,
+      "firstRayMismatch": null,
+      "firstPointMismatch": null
+    },
+    "compare": {
+      "values": 2860,
+      "mismatches": 0,
+      "first": null,
+      "maxAbsoluteError": 0,
+      "ticks": "240,0,150,756,0,606",
+      "expectedTicks": "240,0,150,756,0,606",
+      "ok": true
+    },
+    "milliseconds": 3579,
+    "raysChecked": 93912,
+    "rayMismatches": 0,
+    "tickParity": {
+      "ticksPerGeneration": 300,
+      "values": 3332016,
+      "mismatches": 0,
+      "first": null,
+      "modes": [
+        "independent",
+        "lockstep"
+      ],
+      "raysChecked": 96798,
+      "rayMismatches": 0,
+      "ok": true
+    },
+    "ok": true
+  },
+  "ok": true,
+  "rayCount": 13,
+  "sensorNames": [
+    "↑ -135°",
+    "↑ -90°",
+    "↑ -60°",
+    "↑ -35°",
+    "↑ -20°",
+    "↑ -10°",
+    "↑ 0°",
+    "↑ 10°",
+    "↑ 20°",
+    "↑ 35°",
+    "↑ 60°",
+    "↑ 90°",
+    "↑ 135°",
+    "AngVel",
+    "Boost",
+    "Wheel",
+    "Grip",
+    "VelF",
+    "VelS",
+    "Curve"
+  ],
+  "population": 33,
+  "browser": "153.0.8010.12",
+  "gpuMode": "hardware",
+  "hardware": {
+    "devices": [
+      {
+        "vendorId": 4098,
+        "deviceId": 5710,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "AMD",
+        "driverVersion": "26.2.2"
+      },
+      {
+        "vendorId": 4098,
+        "deviceId": 29772,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "",
+        "driverVersion": ""
+      }
+    ],
+    "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon RX 7900 XTX (RADV NAVI31) (0x0000744C)), radv-26.2.2)"
+  }
+}

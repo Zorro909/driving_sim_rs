@@ -96,7 +96,9 @@ const near = await raycaster.closestWall(Float32Array.from([x, y, 0, 0]));   // 
 
 `src/wasm/rays.wgsl` is a port of the HIP `gpu/sim/rays.h`: the BSP raycast and closest-wall queries of `src/bsp.rs` as a compute shader, with the CPU's visiting order and operation order. A GPU window runs tick-major (`TrainingRunner::begin_ray_window` in `src/training.rs`): each tick the statistics run on the CPU, the ray sensors of the cars due for inference are cast in one dispatch, and inference and the physics step follow on the CPU. Natively, `training::tests::ray_window_matches_advance` shows this window reproduces `advance` in both modes.
 
-WebGPU cannot promise the CPU's arithmetic. WGSL lets an implementation fuse a multiply and an add into one rounding and only bounds the error of a division, so a device may return a different hit for a ray that grazes a wall or a bounding box. `verify` compares a device with the CPU on random rays and points, `gpuVerifyEvery` samples the sensor rays of every window, and the simulation continues with the GPU's values while `gpuRayMismatches()` counts the differences. Chromium's SwiftShader adapter matches the CPU on every query of `wasm/test/run.mjs`. The rest of the simulator (double-precision physics, statistics and inference) stays on the CPU: WGSL has no 64-bit floats.
+The shader uses `src/wasm/float.wgsl` to reproduce the CPU's float32 rounding. Each addition, subtraction and multiplication passes through a bitcast and an XOR with a uniform zero, preventing fusion or reassociation across that boundary. Division operates on integer significands and rounds once to nearest, ties to even, including subnormal results. This avoids WGSL's approximate division. The RX 7900 XTX now matches the native reference in the tested simulation scenarios. `verify` and `gpuVerifyEvery` still compare GPU results with the CPU and count differences without replacing the GPU results. The rest of the simulator, including double-precision physics, statistics and inference, stays on the CPU because WGSL has no 64-bit floats.
+
+These tests cover finite scene coordinates on the tested hardware. WGSL may flush subnormal inputs or results of addition and multiplication, and NaN payload propagation is not standardized. The division regression checks subnormal and signed-zero results as raw bits, but treats NaN payloads as equivalent. Results on other devices still need verification.
 
 A GPU window waits for one buffer read-back per tick, which costs about a millisecond of latency; with a few dozen cars that is slower than casting the rays on the CPU. It pays off for populations whose rays per tick outweigh the round trip, and it demonstrates the tick-major window an external raycaster drives.
 
@@ -112,7 +114,23 @@ NO_GPU=1 node wasm/test/run.mjs                  # CPU comparison only
 
 `run.mjs` serves the repository root, opens `wasm/test/index.html` in headless Chromium, and prints the page's report: the CPU scenario against the native reference, then the raycaster's `verify` and the same scenario driven with GPU rays against the CPU run, all compared bit for bit. The default `GPU=software` explicitly uses SwiftShader. `GPU=hardware` uses Vulkan and rejects fallback adapters. Reports include the adapter, browser version and, in hardware mode, Chromium's GPU device information. Missing WebGPU and query failures fail the test. `CHROMIUM=/path/to/chrome` overrides the browser; `NO_GPU=1` explicitly skips GPU checks.
 
-The RX 7900 XTX hardware run on Mesa 26.2.2 fails exact WebGPU parity, while the WASM CPU and SwiftShader runs pass. See [the hardware validation report](../reports/wasm-webgpu-20260930/README.md) for counts and reproducible commands. Use the CPU path when these reference results must remain exact.
+The original hardware failures and the fix are recorded in [the initial validation report](../reports/wasm-webgpu-20260930/README.md) and [the exactness report](../reports/webgpu-exact-20260930/README.md). The corrected shader passes on the RX 7900 XTX with Mesa 26.2.2.
+
+For broader checks, `SCENARIO` and `REFERENCE` select paths relative to the repository root. `VERIFY_RAYS`, `VERIFY_POINTS` and `VERIFY_SEED` control random query verification. `TICK_CHECK=N` additionally compares every tick for three generations of N ticks in each scheduler mode, including all exported states, controls, sensors, metrics and generation checkpoints. For example:
+
+```sh
+cargo run --release --example webgpu_division_reference
+GPU=hardware DIVISION_FIXTURE=target/webgpu-division.bin \
+  VERIFY_RAYS=65536 VERIFY_POINTS=65536 TICK_CHECK=400 node wasm/test/run.mjs
+
+for track in a01 a07 b06; do
+  GPU=hardware SCENARIO="wasm/test/scenarios/$track.json" \
+    REFERENCE="wasm/test/scenarios/$track-reference.json" \
+    VERIFY_RAYS=65536 VERIFY_POINTS=65536 TICK_CHECK=300 node wasm/test/run.mjs
+done
+```
+
+The division fixture contains 1,049,732 native results, including signed zero, subnormal boundaries, infinities, and random operands across all exponent ranges. `DIVISION_FIXTURE` makes the browser test the production division helper against those raw bit patterns. The added Rally scenarios use 33 cars, different batch counts and elimination settings, and a larger network; their checked-in references come from `wasm_reference`.
 
 ## Portability notes
 

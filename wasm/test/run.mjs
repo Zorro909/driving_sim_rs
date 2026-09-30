@@ -56,6 +56,15 @@ let report;
 try {
     const page = await browser.newPage();
     await page.addInitScript((mode) => { window.altdGpuMode = mode; }, gpuMode);
+    await page.addInitScript((fixture) => { window.altdDivisionFixture = fixture; }, process.env.DIVISION_FIXTURE);
+    await page.addInitScript((options) => { window.altdTestOptions = options; }, {
+        scenario: process.env.SCENARIO || 'wasm/test/scenario.json',
+        reference: process.env.REFERENCE || 'wasm/test/reference.json',
+        verifyRays: Number(process.env.VERIFY_RAYS || 4000),
+        verifyPoints: Number(process.env.VERIFY_POINTS || 4000),
+        verifySeed: Number(process.env.VERIFY_SEED || 7),
+        tickCheck: Number(process.env.TICK_CHECK || 0),
+    });
     page.on('console', (message) => { if (message.type() === 'error' || message.type() === 'warning') console.error(`[browser ${message.type()}] ${message.text()}`); });
     page.on('pageerror', (error) => console.error(`[browser error] ${error}`));
     await page.goto(`http://127.0.0.1:${port}/wasm/test/index.html`);
