@@ -52,6 +52,70 @@ fn stop_reason(root: &Path, name: &str) -> Value {
 }
 
 #[test]
+fn random_tracks_change_each_generation_and_resume_the_same_sequence() {
+    let workspace = Workspace::new("random-tracks");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
+    let settings_path = root.join("tracks.json");
+    fs::write(&settings_path, json!({
+        "length": {"min": 6, "max": 12}, "allow_double": [false, true],
+        "surfaces": {"pool": [0, 1, 2], "count": [1, 2, 3]}, "distribution": [0, 1]
+    }).to_string()).unwrap();
+    let options = ["--track-mode", "random", "--random-track-settings", settings_path.to_str().unwrap(),
+        "--ticks", "12", "--spawn-trace", "/no-spawn-trace-needed"];
+    success(run(root, "continuous", &[options.as_slice(), &["--generations", "4", "--track-buffer-size", "1"]].concat()));
+    success(run(root, "resumed", &[options.as_slice(), &["--generations", "2", "--track-buffer-size", "3"]].concat()));
+    success(run(root, "resumed", &[options.as_slice(), &["--resume", "--generations", "4", "--seed", "999", "--track-buffer-size", "2"]].concat()));
+    let continuous = logs(root, "continuous");
+    let resumed = logs(root, "resumed");
+    assert_eq!(continuous.len(), 4);
+    let mut previous_tiles = Value::Null;
+    for (a, b) in continuous.iter().zip(&resumed) {
+        for key in ["generation", "track_config", "track_file", "best_score", "mean_score", "simulated_ticks"] {
+            assert_eq!(a[key], b[key], "resume must preserve {key}");
+        }
+        let name = a["track_file"].as_str().unwrap();
+        let track = load(root.join("continuous").join(name));
+        assert_eq!(track, load(root.join("resumed").join(name)));
+        assert_ne!(track["tiles"], previous_tiles);
+        previous_tiles = track["tiles"].clone();
+        assert!((6..=12).contains(&track["config"]["length"].as_i64().unwrap()));
+    }
+    let meta = load(root.join("resumed/checkpoint.json"));
+    assert_eq!(meta["random_tracks"]["seed"], 1);
+    assert_eq!(meta["generation"], 4);
+    assert_eq!(load(root.join("resumed/run.json"))["random_track_seed"], 1);
+
+    let rejected = run(root, "invalid-buffer", &[options.as_slice(), &["--track-buffer-size", "0"]].concat());
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("track-buffer-size must be positive"));
+}
+
+#[test]
+fn train_random_mode_uses_generated_spawns_without_a_trace() {
+    let workspace = Workspace::new("train-random");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
+    let output_path = root.join("training.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
+        .args(["--threads", "1", "train", "--track-mode", "random", "--population", "1", "--generations", "2", "--ticks", "12"])
+        .arg("--scene").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scenes_exact/rally_b06_scene.json"))
+        .arg("--network").arg(root.join("seed.json"))
+        .arg("--model").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/rally_trained_model_exact.json"))
+        .arg("--settings").arg(root.join("settings.json"))
+        .arg("--output").arg(&output_path).output().unwrap();
+    success(output);
+    let report = load(&output_path);
+    assert_eq!(report["track_mode"], "random");
+    assert_ne!(report["history"][0]["track"]["tiles"], report["history"][1]["track"]["tiles"]);
+    let fixed = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
+        .args(["--threads", "1", "train", "--scene", "/missing", "--network", "/missing", "--model", "/missing", "--output", "/missing"])
+        .output().unwrap();
+    assert!(!fixed.status.success());
+    assert!(String::from_utf8_lossy(&fixed.stderr).contains("--spawn-trace is required"));
+}
+
+#[test]
 fn scratch_elimination_settings_overrides_and_resume() {
     let workspace = Workspace::new("settings");
     let root = &workspace.0;

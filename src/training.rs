@@ -989,8 +989,12 @@ impl TrainingRunner {
         Ok(track)
     }
 
-    fn replace_track(&mut self, world: Arc<World>, position: V2, rotation: f64) {
+    /// Select a prepared track before starting or installing a generation.
+    pub fn replace_track(&mut self, world: Arc<World>, position: V2, rotation: f64) {
         if let Some(physics) = self.physics.as_mut() { physics.queue_tilemap_redraw(self.world.clone()); }
+        if self.physics.is_none() {
+            for agent in &mut self.agents { agent.car.clear_track_contacts(); }
+        }
         self.world = world;
         self.position = position;
         self.rotation = rotation;

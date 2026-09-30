@@ -807,6 +807,14 @@ impl<'a> GpuSim<'a> {
         }
     }
 
+    /// Switch uploaded tracks while retaining population and network buffers.
+    /// Keep `world` alive until the next switch or until this simulator is dropped.
+    pub fn set_world(&mut self, world: &GpuWorld<'a>) {
+        assert!(std::ptr::eq(self.gpu, world.gpu()), "GPU world belongs to another device handle");
+        let f: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 = self.gpu.symbol("altd_gpu_sim_set_world");
+        check(unsafe { f(self.handle, world.handle()) }, "set_world");
+    }
+
     /// The retained host state buffers (empty on first use); return them with
     /// `return_state_buffers` so the next window reuses the allocations.
     pub(crate) fn take_state_buffers(&mut self) -> (Vec<GpuCar>, Vec<GpuAgent>) {

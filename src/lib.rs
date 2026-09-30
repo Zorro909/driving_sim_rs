@@ -29,6 +29,7 @@ pub mod game_random;
 pub mod simulation;
 
 pub mod random_track;
+pub mod training_tracks;
 
 pub mod double_math;
 mod double_math_tables;

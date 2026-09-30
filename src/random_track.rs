@@ -117,6 +117,9 @@ pub fn default_hashcode_seed() -> u32 { catalog().hashcode_seed }
 
 pub fn blocks() -> &'static [Block] { &catalog().blocks }
 
+/// Tile grid bounds [x, y, width, height] from the original game catalog.
+pub fn bounds() -> [i32; 4] { catalog().bounds }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratedTile {
     pub position: Position,

@@ -1,0 +1,7 @@
+{
+  "length": { "min": 12, "max": 40 },
+  "allow_double": [false, true],
+  "surfaces": { "pool": [0, 1, 2], "count": [1, 2, 3] },
+  "distribution": [0, 1],
+  "start": null
+}

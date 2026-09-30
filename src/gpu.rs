@@ -118,15 +118,32 @@ impl Drop for GpuWorld<'_> {
     }
 }
 
+/// Owned host track arrays. Preparing these calls no GPU APIs and can run on
+/// the CPU producer thread before a device is opened or a track is uploaded.
+pub struct PreparedGpuWorld {
+    arrays: crate::gpu_sim::TrackArrays,
+    rays: (Vec<RayNode>, Vec<[f32; 4]>, f32, usize),
+}
+
+impl PreparedGpuWorld {
+    pub fn new(world: &crate::world::World) -> Result<Self, String> {
+        let track = &world.track;
+        if track.raycaster_present() == Some(false) { return Err("GPU port expects a BSP raycaster".into()); }
+        let (nodes, walls, magnitude, depth) = track.ray_tree().ok_or("GPU port needs the BSP RayTree")?.gpu_arrays();
+        let nodes = nodes.into_iter().map(|(links, own, subtree)| RayNode { links, own, subtree }).collect();
+        Ok(Self { arrays: crate::gpu_sim::TrackArrays::new(world)?, rays: (nodes, walls, magnitude, depth) })
+    }
+}
+
 impl<'a> GpuWorld<'a> {
     pub fn new(gpu: &'a Gpu, world: &crate::world::World) -> GpuWorld<'a> {
-        let track = &world.track;
-        assert!(track.raycaster_present() != Some(false), "GPU port expects a BSP raycaster");
+        Self::from_prepared(gpu, PreparedGpuWorld::new(world).unwrap_or_else(|e| panic!("GPU track export: {e}")))
+    }
+
+    /// Upload CPU-prepared geometry without rebuilding spatial query arrays.
+    pub fn from_prepared(gpu: &'a Gpu, prepared: PreparedGpuWorld) -> GpuWorld<'a> {
         crate::gpu_sim::check_layout(gpu);
-        let (nodes, walls, magnitude, depth) = track.ray_tree().expect("GPU port needs the BSP RayTree").gpu_arrays();
-        let nodes: Vec<RayNode> = nodes.into_iter().map(|(links, own, subtree)| RayNode { links, own, subtree }).collect();
-        let arrays = crate::gpu_sim::TrackArrays::new(world).unwrap_or_else(|e| panic!("GPU track export: {e}"));
-        let rays = (nodes, walls, magnitude, depth);
+        let PreparedGpuWorld { arrays, rays } = prepared;
         let desc = arrays.desc(&rays);
         let create: unsafe extern "C" fn(*const crate::gpu_sim::WorldDesc) -> *mut c_void = gpu.symbol("altd_gpu_world_create");
         // The library copies every array; `rays` only has to outlive the call.

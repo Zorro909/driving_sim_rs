@@ -63,6 +63,38 @@ Each generation prints lap and score summaries. Lap crossings are interpolated w
 
 Checkpoints are written at generation boundaries every `--checkpoint-every` generations, default 100, and after the last generation when training stops on its own. Zero disables checkpointing. Resuming replays work after the latest checkpoint, truncating the corresponding log entries. Resuming a final checkpoint with a higher `--generations` continues exactly as an uninterrupted run would.
 
+### Random tracks
+
+Both `train` and `train-scratch` accept `--track-mode random`. Each generation uses a fresh track shared by the whole population. Tracks always come from the game's CPU TrackFactory algorithm and tile resources. The supplied `--scene` provides vehicle and space settings; the generated curve provides the spawn pose, so random mode does not need `--spawn-trace`. The default remains `--track-mode fixed`.
+
+```sh
+target/release/altd-sim train-scratch \
+  --track-mode random \
+  --random-track-settings examples/random_track_settings.json \
+  --track-buffer-size 8 --gpu \
+  --out-dir ../training_runs/random_tracks
+```
+
+`--gpu` requires rebuilding the HIP library with `gpu/build.sh` after this update. A dedicated CPU producer prepares tracks, collision geometry, and spatial queries, including GPU query arrays, in a bounded queue while simulation runs. `--track-buffer-size` defaults to eight and must be positive. GPU training uploads the next prepared track at each generation boundary and retains its population and network allocations. If the queue runs dry, training waits for a fresh track. Random mode uses independent car physics on both backends; the library's native shared TileMap redraw replay remains separate.
+
+Without a settings file, lengths range from 12 to 40 tiles, all block types are enabled, and surfaces form sections. Each track uniformly samples a surface count from one, two, or three, then samples a subset and ordering from asphalt, dirt, and ice. This gives each surface count equal probability.
+
+The JSON file accepts these fields; omitted fields use those defaults:
+
+| Field | Accepted values |
+|---|---|
+| `length` | Fixed even tile count, or `{"min": 12, "max": 40}` with inclusive bounds. Ranges sample only even counts. The game's grid supports 4 to 76 tiles. |
+| `allow_double` | `true` or `false`, or choices such as `[false, true]`. True permits all game block types. |
+| `surfaces` | Fixed set such as `[0, 1]`; explicit set choices such as `[[0], [1], [0, 2], [0, 1, 2]]`; or `{"pool": [0, 1, 2], "count": [1, 2, 3]}` to sample counts and subsets. IDs are asphalt `0`, dirt `1`, ice `2`. A pool such as `[0, 1]` with count `[1, 2]` excludes ice. |
+| `distribution` | `0` for a random surface per tile, `1` for consecutive sections, or choices `[0, 1]`. |
+| `start` | `null` for a new grid position each track, or a fixed `[x, y]` inside the game's grid. |
+
+The generator may shorten a difficult path within the requested length range. It retries failed tracks and rejects results below the minimum; impossible settings stop training with an error. Fixed lengths never shorten.
+
+Tracks use an independent seed derived from the run seed and generation number. Queue depth and CPU/GPU selection do not change the sequence. A resume retains the track seed from the checkpoint; supply the same track settings and scene template to reproduce the sequence. As with other training options, omitted settings use defaults on resume. `--init-population` starts a track sequence using the new run's seed and the imported generation number.
+
+`train-scratch` saves generated tracks to `tracks/gNNNNN.track.json` and records the file and effective configuration in each log entry and best-network export. Recreate a scene with `GeneratedTrack::to_scene` and the run's scene template, then set `track.native_broadphase` to `false` for the same independent car physics. `train` includes generated tracks in its history output. Lap times across different lengths describe different tasks; the all-time best lap and lap-based stop conditions still compare their raw times.
+
 ### Stop conditions
 
 Training normally ends at `--generations`. These options end it earlier, after the first generation that meets any of them:
@@ -103,7 +135,7 @@ Existing checkpoints can be continued with the new simulator when their shape ma
 - `network` and `network_simd` implement scalar and AVX2 inference with the same accumulation order.
 - `godot_math`, `native_math`, `managed_trig`, and `double_math` reproduce the captured game's math routines.
 - `training` and `evolution` implement scoring, scheduling, reproduction, and vehicle reuse. `game_random` supports captured game RNG streams through `--game-rng-state`; ordinary seeded training retains the Python-compatible RNG.
-- `random_track` exposes generated-track and redraw support through the library. Random-track CLI orchestration remains separate.
+- `random_track` implements the game's track generation and redraw support. `training_tracks` samples training variants and prepares tracks in a bounded CPU queue.
 
 Independent mode runs each car through a window to keep its state and network in cache, catching inactive cars up to the final callback. Lockstep advances all cars one tick at a time. Scenes requesting native shared broadphase use the tick-major path in either mode to retain native ordering.
 

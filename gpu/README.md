@@ -25,6 +25,8 @@ target/release/altd-sim train-scratch --gpu --out-dir ../training_runs/b06_gpu
 
 `--threads` controls CPU work such as reproduction and packing transfers, including with `--gpu`. `--mode` only affects CPU driving. The GPU runs the tick-major order, which yields the same results as both CPU modes. The GPU runner rejects paused windows and scenes that use the native shared broadphase (some generated tracks).
 
+`train-scratch --track-mode random --gpu` generates tracks on a dedicated CPU thread. `--track-buffer-size` controls the bounded queue of prepared tracks, default eight. Each generation consumes a fresh track and uploads its geometry before driving; population and network buffers stay allocated. The CLI uses independent car physics for random tracks on both CPU and GPU. Configure length ranges, block choices, surface counts and subsets with `--random-track-settings`; see [random tracks](../README.md#random-tracks).
+
 | Variable | Effect |
 |---|---|
 | `ALTD_GPU_LIB` | Library path (default `target/gpu/libaltd_gpu.so` of this crate) |
@@ -47,7 +49,7 @@ target/release/altd-sim train-scratch --gpu --out-dir ../training_runs/b06_gpu
 
 Every tick runs statistics, sensors, network forward and the step as separate kernels. Live cars are compacted within their original eight inference batches. Sensor and forward grids cover only the batches due that tick; cars eliminated since the last compaction are filtered by their active flag. The separate physics list also retains inactive cars that have not settled exactly.
 
-A window replays a HIP graph per 24-tick period, covering the statistics and inference cycles. Compatible windows reuse the executable graph. A changed schedule, population size, network shape or output mapping invalidates it; network weights can be replaced in place. The host polls a stop flag every 48 ticks, while the device applies the exact stopping tick before driving.
+A window replays a HIP graph per 24-tick period, covering the statistics and inference cycles. Compatible windows reuse the executable graph. A changed track, schedule, population size, network shape or output mapping invalidates it; network weights can be replaced in place. The host polls a stop flag every 48 ticks, while the device applies the exact stopping tick before driving.
 
 ### Generation turnover
 
@@ -88,6 +90,7 @@ target/release/examples/gpu_check                  # math primitives (millions o
 target/release/examples/gpu_check rays sensors infer stats step window
 target/release/examples/gpu_check schedules reuse window3
 target/release/examples/gpu_check novelty turnover
+cargo test --test training_tracks -- --ignored
 ```
 
 Each part compares every output bit against the CPU and prints `ALL OK`. `window` runs full generations and compares every agent. The defaults use B06. To check another track, set `ALTD_GPU_SCENE`, `ALTD_GPU_SPAWN`, `ALTD_GPU_NETWORK` and `ALTD_GPU_MODEL`, for example:

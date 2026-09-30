@@ -339,6 +339,13 @@ impl Car {
         }
     }
 
+    /// Shape indices and warm contacts belong to the track that created them.
+    pub(crate) fn clear_track_contacts(&mut self) {
+        self.wall_contacts.clear();
+        self.previous_contacts.clear();
+        self.scratch = CollisionScratch::default();
+    }
+
     pub fn set_body_basis(&mut self, x: F2, y: F2) {
         self.body_basis = (x, y);
         self.rotation = crate::native_math::atan2(x.y, x.x) as f64;

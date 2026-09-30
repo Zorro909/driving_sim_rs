@@ -555,6 +555,18 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
     return s;
 }
 
+// Graph kernels capture world pointers by value. Invalidate the graph before
+// releasing the old track, while retaining all population allocations.
+int altd_gpu_sim_set_world(Sim* s, const World* world) {
+    CHECK(hipStreamSynchronize(s->stream));
+    if (s->graph_exec) {
+        CHECK(hipGraphExecDestroy(s->graph_exec));
+        s->graph_exec = nullptr;
+    }
+    s->world = *world;
+    return 0;
+}
+
 void altd_gpu_sim_free(Sim* s) {
     if (!s) return;
     if (s->graph_exec) (void)hipGraphExecDestroy(s->graph_exec);

@@ -9,8 +9,9 @@ use altd_sim::network::{parameter_count, Network};
 use altd_sim::pymath::{py_max, py_min, py_pow, py_remainder, py_sum};
 use altd_sim::pyrandom::PyRandom;
 use altd_sim::training::{Mode, ScoreTracker, SensorLayout, TrainingAgent, TrainingRunner, TrainingRandom};
+use altd_sim::training_tracks::{RandomTrainingTrackSettings, TrainingTrackBuffer};
 use altd_sim::world::{vector, World};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{json, Map, Value};
 use std::f64::consts::PI;
 use std::io::Write;
@@ -37,6 +38,40 @@ struct Cli {
 enum ModeArg {
     Independent,
     Lockstep,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum TrackMode {
+    Fixed,
+    Random,
+}
+
+#[derive(Args)]
+struct TrackOptions {
+    /// Use the scene's fixed track or a fresh CPU-generated track each generation.
+    #[arg(long, value_enum, default_value_t = TrackMode::Fixed)]
+    track_mode: TrackMode,
+    /// JSON TrackFactory settings with fixed values, min/max lengths, or choices.
+    #[arg(long)]
+    random_track_settings: Option<PathBuf>,
+    /// Number of prepared tracks queued by the CPU producer, including with --gpu.
+    #[arg(long, default_value_t = 8)]
+    track_buffer_size: usize,
+}
+
+impl TrackOptions {
+    fn settings(&self) -> Option<RandomTrainingTrackSettings> {
+        if self.track_mode == TrackMode::Fixed {
+            assert!(self.random_track_settings.is_none(), "--random-track-settings requires --track-mode random");
+            return None;
+        }
+        let settings: RandomTrainingTrackSettings = self.random_track_settings.as_deref()
+            .map(|path| serde_json::from_value(load(path)).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+            .unwrap_or_default();
+        settings.validate().unwrap_or_else(|e| panic!("--random-track-settings: {e}"));
+        assert!(self.track_buffer_size > 0, "--track-buffer-size must be positive");
+        Some(settings)
+    }
 }
 
 impl From<ModeArg> for Mode {
@@ -179,14 +214,16 @@ enum Command {
     },
     /// train.py: run and evolve networks for several generations.
     Train {
+        #[command(flatten)]
+        tracks: TrackOptions,
         #[arg(long)]
         scene: PathBuf,
         #[arg(long)]
         network: PathBuf,
         #[arg(long)]
         model: PathBuf,
-        #[arg(long)]
-        spawn_trace: PathBuf,
+        #[arg(long, required_if_eq("track_mode", "fixed"))]
+        spawn_trace: Option<PathBuf>,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -217,6 +254,8 @@ enum Command {
     /// mutation rate, logging lap times each generation and saving the network
     /// behind every new best lap. Defaults: generalist rally network on B06.
     TrainScratch {
+        #[command(flatten)]
+        tracks: TrackOptions,
         #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/scenes_exact/rally_b06_scene.json"))]
         scene: PathBuf,
         /// Trace whose first frame is the spawn pose.
@@ -1025,6 +1064,7 @@ fn train(
     scene: &Value, network_data: &Value, model: &Value, spawn_trace: &Value, settings_file: Option<&Value>,
     population: Option<usize>, generations: usize, ticks: Option<u64>, seed: i64, batch_count: usize,
     eliminate_on_wall: Option<bool>, idle_eliminate: Option<bool>, mode: Mode, threads: usize, game_rng_state: Option<&Value>,
+    tracks: &TrackOptions,
 ) -> (Value, Value) {
     let empty = json!({});
     let settings_data = settings_file.unwrap_or(&empty);
@@ -1037,15 +1077,26 @@ fn train(
     let (eliminate_on_wall, idle_eliminate) = elimination_options(settings_data, eliminate_on_wall, idle_eliminate);
     assert!(population >= 1 && generations >= 1 && ticks >= 1, "population, generations, and ticks must be positive");
     settings.population = population;
-    let spawn = &frames(spawn_trace)[0];
     let started = Instant::now();
-    let world = Arc::new(World::from_scene(scene));
+    let track_settings = tracks.settings();
+    let track_buffer = track_settings.as_ref().map(|settings| {
+        TrainingTrackBuffer::new(scene.clone(), settings.clone(), seed, 0, tracks.track_buffer_size, false)
+            .unwrap_or_else(|e| panic!("random tracks: {e}"))
+    });
+    let mut current_track = track_buffer.as_ref().map(|b| b.next_track().unwrap_or_else(|e| panic!("random tracks: {e}")));
+    let (world, position, rotation) = match &current_track {
+        Some(track) => (track.world.clone(), track.position, track.rotation),
+        None => {
+            let spawn = &frames(spawn_trace)[0];
+            (Arc::new(World::from_scene(scene)), vector(&spawn["position"]), num(&spawn["rotation"]))
+        }
+    };
     let world_seconds = started.elapsed().as_secs_f64();
     let seed_network = Network::from_game_export(network_data);
     let mut runner = TrainingRunner::new(
         world,
-        vector(&spawn["position"]),
-        num(&spawn["rotation"]),
+        position,
+        rotation,
         SensorLayout::from_exports(network_data, model),
         &output_names(network_data),
         settings.clone(),
@@ -1084,8 +1135,14 @@ fn train(
             "best_score": scores[best_raw],
             "mean_score": py_sum(scores.iter().copied()) / scores.len() as f64,
             "total_collision_updates": py_sum(results.iter().map(|r| r.metrics[11].unwrap())),
+            "track": current_track.as_ref().map(|t| &t.track),
         }));
         if generation + 1 < generations {
+            if let Some(buffer) = &track_buffer {
+                let track = buffer.next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
+                runner.replace_track(track.world.clone(), track.position, track.rotation);
+                current_track = Some(track);
+            }
             runner.next_generation();
         }
     }
@@ -1102,6 +1159,8 @@ fn train(
         "history": history,
         "best_score": best_score,
         "best_network": best,
+        "track_mode": if track_settings.is_some() { "random" } else { "fixed" },
+        "random_track_settings": track_settings,
     });
     let simulated_seconds = simulated_ticks as f64 / 60.0;
     let mut timing = json!({
@@ -1121,6 +1180,7 @@ fn train(
 }
 
 struct ScratchConfig {
+    tracks: TrackOptions,
     scene: PathBuf,
     spawn_trace: PathBuf,
     network: PathBuf,
@@ -1243,6 +1303,7 @@ fn elimination_options(settings: &Value, wall: Option<bool>, idle: Option<bool>)
 
 fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let (scene, network_data, model) = (load(&config.scene), load(&config.network), load(&config.model));
+    let track_settings = config.tracks.settings();
     let shape = &config.shape;
     let inputs = network_data["inputs"].as_array().expect("inputs").len();
     let outputs = output_names(&network_data);
@@ -1296,10 +1357,15 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         "schedule": match config.schedule { Schedule::Geometric => "geometric", Schedule::Linear => "linear" },
         "seed": config.seed, "init_network": config.init_network, "batch_count": config.batch_count, "settings": settings.to_json(),
         "stop": config.stop.to_json(),
+        "track_mode": if track_settings.is_some() { "random" } else { "fixed" },
+        "random_track_settings": track_settings,
+        "track_buffer_size": config.tracks.track_buffer_size,
     });
+    if track_settings.is_some() { run["track"] = json!("random"); run["spawn_trace"] = Value::Null; }
     if let Some(path)=&config.game_rng_state {run["game_rng_state"]=load(path);}
     if let Some(path)=&config.init_population {run["init_population"]=json!(path);}
     let checkpoint = load_optional(&dir.join("checkpoint.json"));
+    let initial_population_meta = config.init_population.as_deref().map(load);
     if config.resume {
         assert!(checkpoint.is_some(), "--resume: no checkpoint.json in {}", dir.display());
     } else {
@@ -1315,9 +1381,25 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let _ = std::fs::remove_file(&stop_request_path);
 
     let started = Instant::now();
-    let world = Arc::new(World::from_scene(&scene));
-    let spawn_trace = load(&config.spawn_trace);
-    let spawn = &frames(&spawn_trace)[0];
+    let restored_meta = if config.resume { checkpoint.as_ref() } else { initial_population_meta.as_ref() };
+    let starting_generation = restored_meta.and_then(|m| m["generation"].as_u64()).unwrap_or(0);
+    let track_seed = if config.resume {
+        checkpoint.as_ref().and_then(|m| m["random_tracks"]["seed"].as_i64()).unwrap_or(config.seed)
+    } else { config.seed };
+    run["random_track_seed"] = track_settings.as_ref().map_or(Value::Null, |_| json!(track_seed));
+    let track_buffer = track_settings.as_ref().map(|settings| {
+        TrainingTrackBuffer::new(scene.clone(), settings.clone(), track_seed, starting_generation, config.tracks.track_buffer_size, config.gpu)
+            .unwrap_or_else(|e| panic!("random tracks: {e}"))
+    });
+    let mut current_track = track_buffer.as_ref().map(|b| b.next_track().unwrap_or_else(|e| panic!("random tracks: {e}")));
+    let (world, position, rotation) = match &current_track {
+        Some(track) => (track.world.clone(), track.position, track.rotation),
+        None => {
+            let spawn_trace = load(&config.spawn_trace);
+            let spawn = &frames(&spawn_trace)[0];
+            (Arc::new(World::from_scene(&scene)), vector(&spawn["position"]), num(&spawn["rotation"]))
+        }
+    };
     let restoring = config.resume || config.init_population.is_some();
     let mut rng: TrainingRandom = match &config.game_rng_state {
         Some(path) => altd_sim::game_random::GameRandom::from_json(&load(path)).into(),
@@ -1333,8 +1415,8 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     };
     let mut runner = TrainingRunner::new(
         world,
-        vector(&spawn["position"]),
-        num(&spawn["rotation"]),
+        position,
+        rotation,
         SensorLayout::from_exports(&network_data, &model),
         &outputs,
         settings,
@@ -1346,7 +1428,10 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     );
     runner.mode = mode;
     let gpu = config.gpu.then(|| altd_sim::gpu::Gpu::open(None).unwrap_or_else(|e| panic!("--gpu: {e}")));
-    let gpu_world = gpu.as_ref().map(|g| altd_sim::gpu::GpuWorld::new(g, &runner.world));
+    let mut gpu_world = gpu.as_ref().map(|g| match current_track.as_mut() {
+        Some(track) => altd_sim::gpu::GpuWorld::from_prepared(g, track.gpu_world.take().expect("buffered GPU track arrays")),
+        None => altd_sim::gpu::GpuWorld::new(g, &runner.world),
+    });
     let mut gpu_sim = gpu_world.as_ref().map(|w| runner.gpu_sim(w, config.population).unwrap_or_else(|e| panic!("--gpu: {e}")));
 
     let log_path = dir.join("log.jsonl");
@@ -1369,7 +1454,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         println!("resumed {} at generation {generation}", dir.display());
         generation as usize
     } else if let Some(path) = &config.init_population {
-        let mut meta = load(path);
+        let mut meta = initial_population_meta.unwrap();
         let generation = install_checkpoint(&mut runner, config, &mut meta, path.parent().unwrap_or(Path::new(".")));
         std::fs::write(&log_path, "").expect("log file");
         println!("continuing the population of {} at generation {generation}", path.display());
@@ -1400,6 +1485,14 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let mut stop_state = StopState { best_lap: None, best_score: f64::NEG_INFINITY, stale: 0 };
     for generation in first_generation..config.generations {
         let generation_started = Instant::now();
+        let track_file = current_track.as_ref().map(|track| {
+            assert_eq!(track.generation, generation as u64, "track buffer generation differs from population");
+            let name = format!("tracks/g{generation:05}.track.json");
+            std::fs::create_dir_all(dir.join("tracks")).expect("track directory");
+            write_atomic(&dir.join(&name), (serde_json::to_string(&track.track).unwrap() + "\n").as_bytes());
+            name
+        });
+        let generation_track_config = current_track.as_ref().map(|t| t.track.config.clone());
         let rate = runner.settings.mutation_rate;
         match (&mut gpu_sim, &gpu_world) {
             (Some(sim), Some(world)) => {
@@ -1443,6 +1536,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
                     "generation": generation, "car": i, "inference_batch": i / config.population.div_ceil(8),
                     "reused_vehicle": generation > 0, "best_lap_s": lap, "total_score": scores[i],
                     "mutation_rate": rate, "track": run["track"], "seed": config.seed,
+                    "track_file": track_file, "track_config": generation_track_config,
                 });
                 let text = serde_json::to_string_pretty(&export).unwrap() + "\n";
                 let name = format!("g{generation:05}_{lap:.2}s.json");
@@ -1469,6 +1563,16 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         // Breed after the last generation too, so the final checkpoint continues exactly.
         if !last || final_checkpoint {
             runner.settings.mutation_rate = scheduled_rate(config, generation + 1);
+            if let Some(buffer) = &track_buffer {
+                let mut track = buffer.next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
+                runner.replace_track(track.world.clone(), track.position, track.rotation);
+                if let (Some(gpu), Some(sim)) = (&gpu, &mut gpu_sim) {
+                    let world = altd_sim::gpu::GpuWorld::from_prepared(gpu, track.gpu_world.take().expect("buffered GPU track arrays"));
+                    sim.set_world(&world);
+                    gpu_world = Some(world);
+                }
+                current_track = Some(track);
+            }
             if let Some(sim) = &mut gpu_sim {
                 runner.next_generation_gpu(sim).unwrap_or_else(|e| panic!("--gpu: {e}"));
             } else {
@@ -1479,6 +1583,8 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         let wall = generation_started.elapsed().as_secs_f64();
         let record = json!({
             "generation": generation,
+            "track_file": track_file,
+            "track_config": generation_track_config,
             "mutation_rate": rate,
             "best_lap_s": generation_best,
             "mean_best_lap_s": mean_lap,
@@ -1513,6 +1619,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
                 dir,
                 &runner,
                 json!({"best_lap_s": best_lap.is_finite().then_some(best_lap), "best_lap_generation": best_lap_generation,
+                       "random_tracks": track_settings.as_ref().map(|settings| json!({"seed": track_seed, "settings": settings})),
                        "stop_reason": if last { stop_reason.clone().unwrap() } else { Value::Null }}),
             );
         }
@@ -1553,14 +1660,20 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
         }
         Command::Train {
+            tracks,
             scene, network, model, spawn_trace, output, settings, population, generations, ticks, seed,
             batch_count, eliminate_on_wall, no_eliminate_on_wall, idle_eliminate, no_idle_eliminate, game_rng_state,
         } => {
+            if tracks.track_mode == TrackMode::Fixed && spawn_trace.is_none() {
+                clap::Error::raw(clap::error::ErrorKind::MissingRequiredArgument, "--spawn-trace is required with --track-mode fixed").exit();
+            }
             let settings = settings.as_deref().map(load);
+            let spawn_data = if tracks.track_mode == TrackMode::Fixed { load(spawn_trace.as_deref().unwrap()) } else { Value::Null };
             let (result, timing) = train(
-                &load(&scene), &load(&network), &load(&model), &load(&spawn_trace), settings.as_ref(), population,
+                &load(&scene), &load(&network), &load(&model),
+                &spawn_data, settings.as_ref(), population,
                 generations, ticks, seed, batch_count, flag(eliminate_on_wall, no_eliminate_on_wall),
-                flag(idle_eliminate, no_idle_eliminate), mode, threads, game_rng_state.as_deref().map(load).as_ref(),
+                flag(idle_eliminate, no_idle_eliminate), mode, threads, game_rng_state.as_deref().map(load).as_ref(), &tracks,
             );
             write_report(&output, &result);
             let history = result["history"].as_array().unwrap();
@@ -1576,6 +1689,7 @@ fn main() {
             );
         }
         Command::TrainScratch {
+            tracks,
             scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
             mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume,
             eliminate_on_wall, no_eliminate_on_wall, idle_eliminate, no_idle_eliminate, gpu,
@@ -1586,6 +1700,7 @@ fn main() {
                 plateau: stop_plateau, plateau_metric,
             };
             let config = ScratchConfig {
+                tracks,
                 scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
                 mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume, stop,
                 eliminate_on_wall: flag(eliminate_on_wall, no_eliminate_on_wall),
