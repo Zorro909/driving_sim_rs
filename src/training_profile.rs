@@ -11,7 +11,11 @@ pub(crate) struct Profile {
 impl Profile {
     pub(crate) fn new(name: &'static str) -> Self {
         static ENABLED: OnceLock<bool> = OnceLock::new();
-        let enabled = *ENABLED.get_or_init(|| std::env::var("ALTD_TRAIN_PROFILE").is_ok_and(|v| v == "1"));
+        // `Instant::now` is unavailable on wasm32-unknown-unknown; the
+        // environment variable cannot be set there either.
+        let enabled = *ENABLED.get_or_init(|| {
+            !cfg!(target_arch = "wasm32") && std::env::var("ALTD_TRAIN_PROFILE").is_ok_and(|v| v == "1")
+        });
         Self { name, previous: enabled.then(Instant::now), phases: Vec::new() }
     }
 

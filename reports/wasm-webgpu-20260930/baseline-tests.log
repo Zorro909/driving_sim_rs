@@ -1,0 +1,204 @@
+   Compiling crossbeam-utils v0.8.23
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling crossbeam-epoch v0.9.21
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling crossbeam-deque v0.8.8
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.23
+   Compiling libc v0.2.189
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling heck v0.5.0
+   Compiling utf8parse v0.2.2
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling clap_lex v1.1.1
+   Compiling strsim v0.11.1
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling either v1.18.0
+   Compiling anstyle-parse v1.0.0
+   Compiling anstream v1.0.0
+   Compiling clap_builder v4.6.7
+   Compiling indexmap v2.14.2
+   Compiling syn v3.0.6
+   Compiling rayon v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.7
+   Compiling clap v4.6.7
+   Compiling altd_sim v0.1.0 (/var/home/zorro/.t3/worktrees/driving_sim_rs/t3code-8b520ae7)
+    Finished `release` profile [optimized + debuginfo] target(s) in 23.45s
+     Running unittests src/lib.rs (target/release/deps/altd_sim-36aec7c70cd16d78)
+
+running 20 tests
+test broadphase::tests::original_tilemap_deferred_wall_query_order ... ok
+test broadphase::tests::original_engine_full_wall_query_order ... ok
+test network::tests::vector_layout_matches_python ... ok
+test network::tests::xavier_matches_python ... ok
+test evolution::tests::fused_copy_mutation_matches_sequential_reproduction ... ok
+test network_simd::tests::expm1_matches_game_expm1_on_the_tanh_domain ... ok
+test network_simd::tests::tanh4_matches_every_game_tanh_branch ... ok
+test path_segments::tests::avx2_scan_matches_scalar_scan ... ok
+test pymath::tests::compensated_sum_recovers_cancelled_terms ... ok
+test pymath::tests::floored_modulo_matches_python ... ok
+test pymath::tests::hypot_basic_values ... ok
+test pyrandom::tests::batched_normals_match_sequential_gauss ... ok
+test network_simd::tests::simd_forward_matches_scalar_loop ... ok
+test pyrandom::tests::gauss_randrange_and_seeds_match_cpython ... ok
+test pyrandom::tests::json_state_round_trips ... ok
+test pyrandom::tests::matches_cpython_seed_7 ... ok
+test pyrandom::tests::reused_normal_storage_preserves_cached_values_and_rng_state ... ok
+test training::tests::export_state_into_matches_per_agent_export ... ok
+test training::tests::owned_install_matches_cloning_install ... ok
+test pyrandom::tests::bulk_uniforms_preserve_every_twist_boundary_and_checkpoint ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running unittests src/bin/altd-sim.rs (target/release/deps/altd_sim-c0760326ee656dc3)
+
+running 2 tests
+test scratch_reward_tests::stop_rules_use_generation_laps_and_fixed_order ... ok
+test scratch_reward_tests::reward_choice_changes_the_preserved_parent ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/exact_speedups.rs (target/release/deps/exact_speedups-b5ce4c0dd4e9df36)
+
+running 2 tests
+test ray_tree_matches_bsp_traversal ... ok
+test closest_path_matches_linear_projection ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.98s
+
+     Running tests/game_fidelity.rs (target/release/deps/game_fidelity-95085eb9a98c1219)
+
+running 16 tests
+test a07_contact_at_tick_195_reproduces_velocity_bits_with_native_pair_order ... ok
+test a07_contact_at_tick_663_matches_game ... ok
+test a07_recorded_velocity_inputs_use_native_float_remap ... ok
+test a07_tick_four_reproduces_recorded_free_motion ... ok
+test a07_tick_two_reproduces_velocity_bits ... ok
+test b06_first_contact_at_tick_1125_matches_game ... ok
+test b06_tick_four_reproduces_rotation_bits ... ok
+test bsp_reconstructs_the_games_exported_split_segments ... ok
+test engine_math_full_float_range_matches_original_runtime ... ok
+test center_distance_follows_the_score_track_section ... ok
+test managed_transform_trig_matches_windows_game_runtime ... ok
+test lap_times_interpolate_the_crossing_within_the_stats_interval ... ok
+test packed_math_full_float_range_matches_original_runtime ... ok
+test native_transforms_match_shipped_engine_bits ... ok
+test scalar_math_full_float_range_matches_original_runtime ... ok
+test spawn_score_does_not_count_as_movement_for_idle_detection ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/game_training.rs (target/release/deps/game_training-ddbb4f1abd5fb832)
+
+running 17 tests
+test checkpoint_roundtrip_preserves_both_game_streams ... ok
+test double_math_matches_shipped_windows_runtime ... ok
+test every_original_sensor_name_loads_with_its_original_defaults ... ok
+test exact_sensor_export_retains_order_and_parameters ... ok
+test generated_curve_controls_and_baking_match_original_engine ... ok
+test generation_stop_matches_original_scheduler_callbacks ... ok
+test idle_elimination_stops_scoring_but_retains_passive_cars ... ok
+test installed_generation_reaches_native_waiting_state_before_drive ... ok
+test pause_preserves_original_scheduler_phase_and_batch_cursor ... ok
+test paused_runner_matches_original_native_freeze_and_restore ... ok
+test car_major_windows_match_tick_major_scheduler ... ok
+test random_streams_and_reproduction_match_original_assemblies ... ok
+test process_hash_seed_matches_original_track_catalog_and_generation ... ok
+test random_tracks_and_rng_consumption_match_original_game ... ok
+test statistics_and_laps_match_original_game ... ok
+test vision_lengths_match_the_game_editor_for_every_whole_angle ... ok
+test random_training_transitions_install_generated_worlds_and_preserve_config ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/native_population.rs (target/release/deps/native_population-3f6107077e805af5)
+
+running 12 tests
+test coalesced_track_initialization_preserves_native_cell_order ... ok
+test generated_tracks_preserve_native_redraw_and_resize_physics ... ok
+test original_tilemap_population_matches_native_drives_and_resets ... ok
+test packed_game_population_preserves_reset_callbacks_and_contacts ... ok
+test original_vehicle_types_preserve_native_tilemap_contact_bits ... ok
+test population_crosses_native_dynamic_leaf_capacity ... ok
+test population_resize_retains_native_allocation_and_optimizer_history ... ok
+test population_uses_one_optimizer_and_native_constraint_order ... ok
+test packed_vehicle_resize_preserves_mixed_native_pair_orientation ... ok
+test tilemap_redraw_preserves_native_wall_lifecycle ... ok
+test training_runner_preserves_shared_native_physics_order ... ok
+test track_redraw_and_population_resize_preserve_deferred_order ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/native_vehicle.rs (target/release/deps/native_vehicle-f55632bced246e1e)
+
+running 34 tests
+test boost_brakes_reverse_and_clamped_controls_match_native_vehicle ... ok
+test broadphase_pair_creation_precedes_touching_and_preserves_order ... ok
+test distance_sensor_preserves_empty_raycasters_and_float_boundaries ... ok
+test distant_body_origins_preserve_native_report_coordinates ... ok
+test crossing_onto_dirt_matches_original_vehicle ... ok
+test eliminated_body_keeps_native_passive_physics ... ok
+test free_drive_matches_every_captured_bit ... ok
+test freezing_preserves_native_physics_and_restores_callback_velocity ... ok
+test every_vehicle_type_matches_original_mixed_controls ... ok
+test gravity_preserves_native_mass_and_inverse_mass_rounding ... ok
+test ice_drive_matches_original_vehicle ... ok
+test manual_deactivation_resets_velocity_on_native_callback ... ok
+test native_contact_report_capacity_preserves_solver_and_slot_order ... ok
+test generated_world_matches_original_tilemap_drive_and_reset ... ok
+test native_sensor_bits_cover_pending_requests_and_property_changes ... ok
+test native_curve_baking_and_samples_match_shipped_engine ... ok
+test network_uses_game_order_and_windows_activation ... ok
+test offset_collision_shapes_and_centers_of_mass_match_native_contacts ... ok
+test near_parallel_native_contacts_match_all_captured_bits ... ok
+test persistent_wall_contacts_match_every_captured_bit ... ok
+test reset_during_contact_matches_native_callback_order ... ok
+test restitution_uses_native_velocity_before_damping ... ok
+test runtime_properties_preserve_wheel_initialization_snapshots ... ok
+test shallow_edge_contact_epsilon_matches_native_precision ... ok
+test ordered_sensor_parameters_and_duplicates_match_game ... ok
+test simultaneous_corner_contacts_match_original_engine ... ok
+test slanted_wall_with_rotating_offset_shape_matches_native_contacts ... ok
+test tiny_handbrake_power_uses_game_zero_tolerance ... ok
+test track_sensor_bits_follow_deferred_resets ... ok
+test translated_contact_coordinates_preserve_native_rounding ... ok
+test velocity_limit_matches_native_impulse_order ... ok
+test standalone_car_matches_native_tilemap_contacts_and_reset ... ok
+test wall_material_friction_matches_native_smooth_and_rough_combination ... ok
+test waiting_preserves_wheels_while_native_basis_settles ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/scratch_cli.rs (target/release/deps/scratch_cli-d07e3beed52d1be2)
+
+running 4 tests
+test scratch_final_checkpoint_continues_exactly ... ok
+test scratch_stop_conditions ... ok
+test scratch_stop_request_file ... ok
+test scratch_elimination_settings_overrides_and_resume ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/segment_grid.rs (target/release/deps/segment_grid-deaf9f8262637e07)
+
+running 1 test
+test pruned_path_searches_match_linear_scans ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.83s
+
+   Doc-tests altd_sim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

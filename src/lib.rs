@@ -34,6 +34,18 @@ pub mod training_tracks;
 pub mod double_math;
 mod double_math_tables;
 
-/// GPU simulator (HIP, gpu/sim): bit-exact with the CPU.
+/// Embedding sessions over `training::TrainingRunner` (the WebAssembly
+/// library and examples/wasm_reference.rs).
+pub mod session;
+
+/// GPU simulator (HIP, gpu/sim): bit-exact with the CPU. The loader uses
+/// dlopen, so the WebAssembly target leaves it out.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_sim;
+
+/// The WebAssembly library (`--target wasm32-unknown-unknown --features wasm`):
+/// JavaScript bindings and the WebGPU raycaster.
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub mod wasm;

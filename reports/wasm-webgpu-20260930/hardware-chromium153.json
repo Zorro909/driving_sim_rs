@@ -1,0 +1,98 @@
+{
+  "version": "0.1.0",
+  "cpu": {
+    "values": 2773,
+    "mismatches": 0,
+    "first": null,
+    "maxAbsoluteError": 0,
+    "ticks": "240,0,150,498,0,606",
+    "expectedTicks": "240,0,150,498,0,606",
+    "ok": true,
+    "milliseconds": 58,
+    "bestLap": null,
+    "checkpointBytes": 279530
+  },
+  "gpu": {
+    "adapter": {
+      "vendor": "amd",
+      "architecture": "rdna-3",
+      "device": "",
+      "description": "",
+      "isFallbackAdapter": false
+    },
+    "nodeCount": 307,
+    "wallCount": 381,
+    "depth": 13,
+    "verify": {
+      "rays": 4000,
+      "rayMismatches": 117,
+      "points": 4000,
+      "pointMismatches": 866
+    },
+    "compare": {
+      "values": 2773,
+      "mismatches": 413,
+      "first": {
+        "where": "states[0][3]",
+        "got": -0.5522225499153137,
+        "expected": -0.5522210597991943
+      },
+      "maxAbsoluteError": 2.202617198228836,
+      "ticks": "240,0,150,498,0,606",
+      "expectedTicks": "240,0,150,498,0,606",
+      "ok": false
+    },
+    "milliseconds": 3033,
+    "raysChecked": 119743,
+    "rayMismatches": 2420,
+    "ok": false
+  },
+  "ok": false,
+  "rayCount": 13,
+  "sensorNames": [
+    "↑ -135°",
+    "↑ -90°",
+    "↑ -60°",
+    "↑ -35°",
+    "↑ -20°",
+    "↑ -10°",
+    "↑ 0°",
+    "↑ 10°",
+    "↑ 20°",
+    "↑ 35°",
+    "↑ 60°",
+    "↑ 90°",
+    "↑ 135°",
+    "AngVel",
+    "Boost",
+    "Wheel",
+    "Grip",
+    "VelF",
+    "VelS",
+    "Curve"
+  ],
+  "population": 32,
+  "browser": "153.0.8010.12",
+  "gpuMode": "hardware",
+  "hardware": {
+    "devices": [
+      {
+        "vendorId": 4098,
+        "deviceId": 5710,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "AMD",
+        "driverVersion": "26.2.2"
+      },
+      {
+        "vendorId": 4098,
+        "deviceId": 29772,
+        "vendorString": "",
+        "deviceString": "",
+        "driverVendor": "",
+        "driverVersion": ""
+      }
+    ],
+    "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon RX 7900 XTX (RADV NAVI31) (0x0000744C)), radv-26.2.2)"
+  }
+}

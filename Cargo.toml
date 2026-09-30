@@ -5,13 +5,41 @@ edition = "2021"
 description = "CPU game-fidelity simulator and trainer for AI Learns To Drive"
 license = "MIT"
 
+[lib]
+# Keep native test artifacts distinct. wasm/build.sh selects cdylib explicitly.
+crate-type = ["rlib"]
+
+[features]
+default = ["cli"]
+# The `altd-sim` command line (native only).
+cli = ["dep:clap"]
+# The WebAssembly library in src/wasm: JavaScript bindings and the WebGPU raycaster.
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:console_error_panic_hook"]
+
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-libc = "0.2"
+clap = { version = "4", features = ["derive"], optional = true }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip parses JSON floats exactly like Python's float().
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window", "Navigator", "WorkerGlobalScope", "WorkerNavigator",
+    "Gpu", "GpuAdapter", "GpuDevice", "GpuQueue",
+    "GpuBuffer", "GpuBufferDescriptor", "GpuBufferBinding",
+    "GpuShaderModule", "GpuShaderModuleDescriptor", "GpuCompilationInfo", "GpuCompilationMessage", "GpuCompilationMessageType",
+    "GpuComputePipeline", "GpuComputePipelineDescriptor", "GpuProgrammableStage", "GpuPipelineLayout",
+    "GpuBindGroup", "GpuBindGroupDescriptor", "GpuBindGroupEntry", "GpuBindGroupLayout",
+    "GpuCommandEncoder", "GpuComputePassEncoder", "GpuCommandBuffer",
+    "gpu_buffer_usage", "gpu_map_mode",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# dlopen of the HIP simulator (src/gpu.rs) and process statistics in the CLI.
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1
@@ -22,3 +50,4 @@ debug = "line-tables-only"
 [[bin]]
 name = "altd-sim"
 path = "src/bin/altd-sim.rs"
+required-features = ["cli"]

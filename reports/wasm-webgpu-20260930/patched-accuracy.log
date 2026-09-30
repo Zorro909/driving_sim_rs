@@ -1,0 +1,15 @@
+a01 position: {'max': 0.0, 'rmse': 0.0} velocity: {'max': 0.0, 'rmse': 0.0} contact mismatches: 0
+a01 rays: {'samples': 7774, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelF: {'samples': 598, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelS: {'samples': 598, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0}
+a05 position: {'max': 0.0, 'rmse': 0.0} velocity: {'max': 0.00020446919682704767, 'rmse': 7.05372827013331e-06} contact mismatches: unavailable
+a05 rays: {'samples': 11674, 'nonzero_errors': 14, 'rmse': 1.0782064885189436e-08, 'max': 4.76837158203125e-07} VelF: {'samples': 898, 'nonzero_errors': 2, 'rmse': 5.6258342049480525e-09, 'max': 1.1920928955078125e-07} VelS: {'samples': 898, 'nonzero_errors': 8, 'rmse': 1.0142116846599695e-08, 'max': 1.1920928955078125e-07}
+a06 position: {'max': 0.0, 'rmse': 0.0} velocity: {'max': 0.0004930265631531833, 'rmse': 2.784818731300569e-05} contact mismatches: unavailable
+a06 rays: {'samples': 11674, 'nonzero_errors': 42, 'rmse': 3.048630399801481e-08, 'max': 1.3709068298339844e-06} VelF: {'samples': 898, 'nonzero_errors': 6, 'rmse': 9.744230677928886e-09, 'max': 1.1920928955078125e-07} VelS: {'samples': 898, 'nonzero_errors': 20, 'rmse': 1.7566661674610916e-08, 'max': 1.7881393432617188e-07}
+a07 position: {'max': 0.0, 'rmse': 0.0} velocity: {'max': 0.0004501504410250071, 'rmse': 1.2039838524912392e-05} contact mismatches: 0
+a07 rays: {'samples': 18174, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelF: {'samples': 1398, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelS: {'samples': 1398, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0}
+b06 position: {'max': 0.0, 'rmse': 0.0} velocity: {'max': 1.1601948795887412e-05, 'rmse': 3.512577158917965e-07} contact mismatches: 0
+b06 rays: {'samples': 31174, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelF: {'samples': 2398, 'nonzero_errors': 0, 'rmse': 0.0, 'max': 0.0} VelS: {'samples': 2398, 'nonzero_errors': 2, 'rmse': 3.442710532295154e-09, 'max': 1.1920928955078125e-07}
+a01_closed first >1px: None first 500 max: 0.0
+a07_closed first >1px: None first 500 max: 0.0
+b06_closed first >1px: None first 500 max: 0.0
+a05_closed first >1px: 75 first 500 max: 55.500155232294034
+a06_closed first >1px: 119 first 500 max: 76.11384438924793

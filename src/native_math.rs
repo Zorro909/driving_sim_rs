@@ -170,8 +170,108 @@ pub fn engine_sin_cos(x:f32)->(f32,f32) {
     (sine,cosine)
 }
 #[cfg(not(any(target_arch="x86",target_arch="x86_64")))]
-pub fn engine_sin_cos(_x:f32)->(f32,f32) {
-    panic!("bit-exact shipped Godot trigonometry requires the x86 x87 instruction set")
+pub fn engine_sin_cos(x:f32)->(f32,f32) {
+    engine_sin_cos_portable(x)
+}
+
+/// Inputs up to this magnitude have been compared exhaustively with x87 `FSINCOS`.
+pub const ENGINE_PORTABLE_DOMAIN: f32 = 16.0;
+
+/// `engine_sin_cos` without the x87 instruction set (the WebAssembly library
+/// and other non-x86 targets): the fdlibm kernels in f64 after a Cody-Waite
+/// reduction, as gpu/sim/math.h `engine_sin_cos_raw`. The float results
+/// equal x87 `FSINCOS` for every float with |x| <= `ENGINE_PORTABLE_DOMAIN`
+/// (examples/gpu_engine_scan.rs found no exception, and
+/// `portable_engine_sin_cos_matches_x87` in this module rechecks the domain
+/// natively). Larger finite arguments use the same reduction, whose products
+/// stay exact for |x| below 2^20; those results have not been compared.
+/// FSINCOS leaves NaNs quieted and turns infinities into the x87 indefinite.
+// The literals are the fdlibm constants as written (2/pi is the rounded value).
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
+pub fn engine_sin_cos_portable(xf: f32) -> (f32, f32) {
+    if xf.is_nan() {
+        let quiet = f32::from_bits(xf.to_bits() | 0x0040_0000);
+        return (quiet, quiet);
+    }
+    if xf.is_infinite() {
+        let indefinite = f32::from_bits(0xffc0_0000);
+        return (indefinite, indefinite);
+    }
+    let x = xf as f64;
+    let n = (x * 6.36619772367581382433e-01).round_ties_even();
+    // Keeps -0 (and every tiny argument) unchanged when no reduction happens.
+    let y = if n == 0.0 { x } else { (x - n * 1.57079632673412561417e+00) - n * 6.07710050650619224932e-11 };
+    let z = y * y;
+    let w = z * z;
+    let r = 8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 + z * 2.75573137070700676789e-06)
+        + z * w * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10);
+    // fdlibm returns tiny arguments unchanged, which also keeps the sign of -0.
+    let sy = if y.abs() < f64::from_bits(0x3e40_0000_0000_0000) { y } else { y + z * y * (-1.66666666666666324348e-01 + z * r) };
+    let rc = z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * 2.48015872894767294178e-05))
+        + w * w * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11));
+    let hz = 0.5 * z;
+    let one_minus = 1.0 - hz;
+    let cy = one_minus + (((1.0 - one_minus) - hz) + z * rc);
+    let q = (n as i64) & 3;
+    let (mut sv, mut cv) = if q & 1 != 0 { (cy, sy) } else { (sy, cy) };
+    if q & 2 != 0 { sv = -sv; }
+    if (q + 1) & 2 != 0 { cv = -cv; }
+    (sv as f32, cv as f32)
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    fn check(bits: u32) -> Option<(u32, u32, u32, u32, u32)> {
+        let x = f32::from_bits(bits);
+        let (s, c) = engine_sin_cos(x);
+        let (ps, pc) = engine_sin_cos_portable(x);
+        (s.to_bits() != ps.to_bits() || c.to_bits() != pc.to_bits()).then_some((bits, s.to_bits(), c.to_bits(), ps.to_bits(), pc.to_bits()))
+    }
+
+    /// Every 61st float with |x| <= 16 plus the domain edges and specials,
+    /// against the x87 instruction (`cargo test -- --ignored` runs the whole domain).
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn portable_engine_sin_cos_matches_x87() {
+        let limit = ENGINE_PORTABLE_DOMAIN.to_bits();
+        let mut mismatches = Vec::new();
+        for sign in [0u32, 0x8000_0000] {
+            for bits in (0..=limit).step_by(61).chain([limit, limit - 1, 0x3fc9_0fdb, 0x4049_0fdb, 0x40c9_0fdb, 0x3f49_0fdb, 1, 0]) {
+                mismatches.extend(check(sign | bits));
+                if mismatches.len() > 8 { break; }
+            }
+        }
+        assert!(mismatches.is_empty(), "portable engine trig differs from x87: {mismatches:x?}");
+        for bits in [0x7fc0_0000u32, 0xffc0_0000, 0x7f80_0000, 0xff80_0000, 0x7f80_0001] {
+            let (s, c) = engine_sin_cos(f32::from_bits(bits));
+            let (ps, pc) = engine_sin_cos_portable(f32::from_bits(bits));
+            assert!(s.is_nan() && c.is_nan() && ps.is_nan() && pc.is_nan());
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    #[ignore = "exhaustive: about two billion evaluations"]
+    fn portable_engine_sin_cos_matches_x87_exhaustively() {
+        let limit = ENGINE_PORTABLE_DOMAIN.to_bits();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let per = (limit as usize + 1).div_ceil(threads) as u32;
+        let mismatches: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads as u32).map(|t| scope.spawn(move || {
+                let mut found = Vec::new();
+                for sign in [0u32, 0x8000_0000] {
+                    for bits in (t * per)..((t + 1) * per).min(limit + 1) {
+                        found.extend(check(sign | bits));
+                    }
+                }
+                found
+            })).collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        assert!(mismatches.is_empty(), "{} mismatches, first {:x?}", mismatches.len(), &mismatches[..mismatches.len().min(8)]);
+    }
 }
 pub fn engine_sin(x:f32)->f32 {engine_sin_cos(x).0}
 pub fn engine_cos(x:f32)->f32 {engine_sin_cos(x).1}

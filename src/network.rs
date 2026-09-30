@@ -74,24 +74,43 @@ impl Network {
 
     /// `Network.from_game_export`: MCP `get_network(include_weights=true)` or its saved subset.
     pub fn from_game_export(data: &Value) -> Network {
+        Self::try_from_game_export(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `from_game_export` reporting malformed exports instead of panicking.
+    pub fn try_from_game_export(data: &Value) -> Result<Network, String> {
         let summary = data.get("summary").unwrap_or(data);
-        let shape: Vec<usize> =
-            summary["shape"].as_array().expect("network shape").iter().map(|v| v.as_u64().unwrap() as usize).collect();
-        let weights = data["weights"].as_array().expect("weights");
-        let biases = data["biases"].as_array().expect("biases");
-        assert!(weights.len() == shape.len() - 1 && biases.len() == weights.len(), "the weight and bias layer count does not match shape");
+        let shape: Vec<usize> = summary["shape"].as_array().ok_or("missing network shape")?
+            .iter().map(|v| v.as_u64().map(|n| n as usize).ok_or("network shape must hold positive integers")).collect::<Result<_, _>>()?;
+        if shape.len() < 2 || shape.iter().any(|&n| n == 0) {
+            return Err(format!("invalid network shape {shape:?}"));
+        }
+        let weights = data["weights"].as_array().ok_or("missing weights")?;
+        let biases = data["biases"].as_array().ok_or("missing biases")?;
+        if weights.len() != shape.len() - 1 || biases.len() != weights.len() {
+            return Err("the weight and bias layer count does not match shape".into());
+        }
+        let number = |v: &Value| v.as_f64().ok_or("network parameters must be numbers");
         let mut params = Vec::with_capacity(parameter_count(&shape));
         for (layer, (matrix, bias)) in weights.iter().zip(biases).enumerate() {
-            let (matrix, bias) = (matrix.as_array().unwrap(), bias.as_array().unwrap());
-            assert!(matrix.len() == shape[layer] && bias.len() == shape[layer + 1], "layer {layer} dimensions do not match shape");
-            for row in matrix {
-                let row = row.as_array().unwrap();
-                assert_eq!(row.len(), bias.len(), "layer {layer} weight row has the wrong size");
-                params.extend(row.iter().map(|v| v.as_f64().unwrap()));
+            let (matrix, bias) = (matrix.as_array().ok_or("weights must be nested arrays")?, bias.as_array().ok_or("biases must be arrays")?);
+            if matrix.len() != shape[layer] || bias.len() != shape[layer + 1] {
+                return Err(format!("layer {layer} dimensions do not match shape"));
             }
-            params.extend(bias.iter().map(|v| v.as_f64().unwrap()));
+            for row in matrix {
+                let row = row.as_array().ok_or("weights must be nested arrays")?;
+                if row.len() != bias.len() {
+                    return Err(format!("layer {layer} weight row has the wrong size"));
+                }
+                for v in row {
+                    params.push(number(v)?);
+                }
+            }
+            for v in bias {
+                params.push(number(v)?);
+            }
         }
-        Network::from_vector(&shape, params)
+        Ok(Network::from_vector(&shape, params))
     }
 
     /// Nested `{"shape", "weights", "biases"}` like the Python export.

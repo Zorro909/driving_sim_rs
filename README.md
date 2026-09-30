@@ -1,6 +1,6 @@
 # Rust driving simulation (`altd-sim`)
 
-`driving_sim_rs` is the CPU simulator and trainer for AI Learns To Drive. It incorporates the accuracy and performance work from `experiments/driving_sim_rs_fidelity`: native float physics and collision ordering, runtime math, exact sensor parameters, interpolated lap times, accelerated spatial queries, and AVX2 network inference. It also includes the bit-exact HIP GPU simulator (`--gpu`, see [gpu/README.md](gpu/README.md)).
+`driving_sim_rs` is the CPU simulator and trainer for AI Learns To Drive. It incorporates the accuracy and performance work from `experiments/driving_sim_rs_fidelity`: native float physics and collision ordering, runtime math, exact sensor parameters, interpolated lap times, accelerated spatial queries, and AVX2 network inference. It also includes the bit-exact HIP GPU simulator (`--gpu`, see [gpu/README.md](gpu/README.md)) and a WebAssembly build of the simulator as a JavaScript library with a WebGPU raycaster (see [wasm/README.md](wasm/README.md)).
 
 The original Rust implementation matched the Python simulator. This implementation targets the game, so Python comparison reports and older training results are no longer expected to match. The old throughput measurements in [docs/benchmarks](../docs/benchmarks/README.md) describe that earlier implementation.
 
@@ -18,6 +18,8 @@ target/release/altd-sim train-scratch \
 ```
 
 On an AMD GPU (built by `gpu/build.sh`), `train-scratch --gpu` simulates the generations with identical results. See [gpu/README.md](gpu/README.md).
+
+The `cli` feature (default) builds the command line. `wasm/build.sh` builds the crate for `wasm32-unknown-unknown` with `--no-default-features --features wasm` as a callable library for browsers and JavaScript runtimes, bit-identical to the native simulator, with the ray sensors optionally cast on WebGPU. See [wasm/README.md](wasm/README.md).
 
 `--threads N` sets the Rayon worker count; the default uses the CPU affinity mask. `--mode independent|lockstep` selects the scheduler. Exact native trigonometry requires x86 or x86_64. AVX2 acceleration is detected at runtime and has a scalar fallback.
 
@@ -136,6 +138,8 @@ Existing checkpoints can be continued with the new simulator when their shape ma
 - `godot_math`, `native_math`, `managed_trig`, and `double_math` reproduce the captured game's math routines.
 - `training` and `evolution` implement scoring, scheduling, reproduction, and vehicle reuse. `game_random` supports captured game RNG streams through `--game-rng-state`; ordinary seeded training retains the Python-compatible RNG.
 - `random_track` implements the game's track generation and redraw support. `training_tracks` samples training variants and prepares tracks in a bounded CPU queue.
+- `session` wraps `TrainingRunner` for embedding hosts (JSON options, seeding, flat car states, generation checkpoints); `wasm` exports it to JavaScript and adds the WebGPU raycaster (`wasm32` with the `wasm` feature only).
+- `native_math::engine_sin_cos` uses x87 `FSINCOS` on x86; other targets use the portable fdlibm port validated against it for |x| ≤ 16.
 
 Independent mode runs each car through a window to keep its state and network in cache, catching inactive cars up to the final callback. Lockstep advances all cars one tick at a time. Scenes requesting native shared broadphase use the tick-major path in either mode to retain native ordering.
 
@@ -149,7 +153,7 @@ python check_accuracy.py --label cpu-port \
   --assert-position 0 --assert-closed-loop-exact
 ```
 
-The imported regression fixtures cover recorded native vehicle/population transitions, sensors, statistics, runtime math, random tracks, and accelerated-query equivalence. CLI tests cover elimination, settings overrides, resumed parameter changes, and checkpoint shape/size validation. The accuracy checker normalizes the game's float32 JSON state before comparison and writes reports under `reports/`.
+The imported regression fixtures cover recorded native vehicle/population transitions, sensors, statistics, runtime math, random tracks, and accelerated-query equivalence. CLI tests cover elimination, settings overrides, resumed parameter changes, and checkpoint shape/size validation. The accuracy checker normalizes the game's float32 JSON state before comparison and writes reports under `reports/`. `wasm/test/run.mjs` compares the WebAssembly build, and its WebGPU raycaster, with a native reference in headless Chromium (see [wasm/README.md](wasm/README.md)).
 
 The experiment's [ROUND3.md](../experiments/driving_sim_rs_fidelity/ROUND3.md) and [ROUND4.md](../experiments/driving_sim_rs_fidelity/ROUND4.md) record the original capture evidence and remaining fidelity limits. Native body matrices are absent from older traces; passing these finite fixtures is not proof of complete state reconstruction.
 

@@ -31,6 +31,7 @@ impl TrainingRandom {
     pub fn reproduce(&mut self,agents:&[AgentResult],settings:&EvolutionSettings)->Generation {
         match self{Self::Python(r)=>reproduce(agents,settings,r),Self::Game(r)=>crate::evolution::reproduce_game(agents,settings,r)}
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn reproduce_with_scratch(&mut self, agents: &[AgentResult], settings: &EvolutionSettings, scratch: &mut Vec<f64>) -> Generation {
         match self {
             Self::Python(r) => crate::evolution::reproduce_with_scratch(agents, settings, r, scratch),
@@ -159,6 +160,29 @@ impl SensorLayout {
         scratch.invalidate();
         out.clear();
         out.extend(self.sensors.iter().map(|&sensor| car.sensor(world, sensor, scratch)));
+    }
+
+    /// The number of `Sensor::Raycast` entries.
+    pub fn ray_count(&self) -> usize {
+        self.sensors.iter().filter(|s| matches!(s, Sensor::Raycast { .. })).count()
+    }
+
+    /// `read_into` with the ray sensors' track raycasts supplied by an external
+    /// raycaster: one `[hit.x, hit.y, hit != 0, _]` per `Sensor::Raycast`, in
+    /// layout order, for the ray `TrainingRunner::ray_queries` produced.
+    pub fn read_into_with_hits(&self, world: &World, car: &Car, scratch: &mut SensorScratch, out: &mut Vec<f64>, hits: &[[f32; 4]]) {
+        scratch.invalidate();
+        out.clear();
+        let mut hits = hits.iter();
+        out.extend(self.sensors.iter().map(|&sensor| match sensor {
+            Sensor::Raycast { degrees, length } => {
+                let (end, length) = car.ray_end(degrees, length);
+                let h = hits.next().expect("one hit per ray sensor");
+                let hit = (h[2] != 0.0).then(|| V2::from(crate::godot_math::F2 { x: h[0], y: h[1] }));
+                Car::ray_value(car.position, end, length, hit)
+            }
+            other => car.sensor(world, other, scratch),
+        }));
     }
 }
 
@@ -419,6 +443,7 @@ impl TrainingAgent {
 /// and `agent_export`) in place, resizing them to the population. Retaining
 /// the vectors between windows keeps their pages mapped, and the indexed
 /// parallel fill avoids the linked-list concatenation of a `Result` collect.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_state_into(agents: &[TrainingAgent], vehicle: &crate::world::VehicleConfig, surfaces: &crate::gpu_sim::SurfaceTable,
                          cars: &mut Vec<crate::gpu_sim::GpuCar>, out: &mut Vec<crate::gpu_sim::GpuAgent>) -> Result<(), String> {
     cars.resize(agents.len(), crate::gpu_sim::GpuCar::zeroed());
@@ -465,36 +490,84 @@ impl Schedule<'_> {
         agent.update_stats(self.world, tick, self.stats_phase, self.eliminate_when_idle);
     }
     fn drive_agent(&self, index: usize, agent: &mut TrainingAgent, tick: u64, batch_index: usize) {
-        let was_active = agent.car.active;
         self.update_controls(index, agent, batch_index);
+        self.step_agent(agent, tick);
+    }
+    /// The physics step of `drive_agent`, with the agent's current controls.
+    fn step_agent(&self, agent: &mut TrainingAgent, tick: u64) {
+        let was_active = agent.car.active;
         let contact = agent.car.step(self.world, &agent.controls, DT, self.eliminate_on_wall);
         agent.pending_contact |= contact;
         if was_active && !agent.car.active {
             agent.deactivated_at = Some(tick);
         }
     }
-    fn update_controls(&self, index: usize, agent: &mut TrainingAgent, batch_index: usize) {
+    /// Whether agent `index` belongs to an inference batch due at `batch_index`.
+    fn infers(&self, index: usize, batch_index: usize) -> bool {
         let batch = index / self.batch_size;
-        if (batch + 8 - batch_index) % 8 < self.batches_per_tick {
-            if agent.car.active {
-                let scratch = &mut agent.scratch;
-                self.layout.read_into(self.world, &agent.car, &mut scratch.sensors, &mut scratch.inputs);
-                let outputs = agent.network.forward_into(&scratch.inputs, &mut scratch.forward);
-                let mut controls = Controls::default();
-                for (slot, &value) in self.outputs.iter().zip(outputs) {
-                    match slot {
-                        ControlSlot::Acceleration => controls.acceleration = value,
-                        ControlSlot::Steering => controls.steering = value,
-                        ControlSlot::Brake => controls.brake = value,
-                        ControlSlot::Handbrake => controls.handbrake = value,
-                        ControlSlot::Boost => controls.boost = value,
-                    }
-                }
-                agent.controls = controls;
-            }
+        (batch + 8 - batch_index) % 8 < self.batches_per_tick
+    }
+    fn update_controls(&self, index: usize, agent: &mut TrainingAgent, batch_index: usize) {
+        if self.infers(index, batch_index) && agent.car.active {
+            let scratch = &mut agent.scratch;
+            self.layout.read_into(self.world, &agent.car, &mut scratch.sensors, &mut scratch.inputs);
+            self.set_controls(agent);
         }
     }
+    /// The network forward of the read inputs into the agent's controls.
+    fn set_controls(&self, agent: &mut TrainingAgent) {
+        let scratch = &mut agent.scratch;
+        let outputs = agent.network.forward_into(&scratch.inputs, &mut scratch.forward);
+        let mut controls = Controls::default();
+        for (slot, &value) in self.outputs.iter().zip(outputs) {
+            match slot {
+                ControlSlot::Acceleration => controls.acceleration = value,
+                ControlSlot::Steering => controls.steering = value,
+                ControlSlot::Brake => controls.brake = value,
+                ControlSlot::Handbrake => controls.handbrake = value,
+                ControlSlot::Boost => controls.boost = value,
+            }
+        }
+        agent.controls = controls;
+    }
 }
+
+/// A window advanced tick by tick with the ray sensors served by an external
+/// raycaster (the WebGPU raycaster of the WebAssembly library). After
+/// `TrainingRunner::begin_ray_window`, each tick is `prepare_ray_tick`,
+/// `ray_queries`, and `finish_ray_tick` with the hits, until `prepare_ray_tick`
+/// returns false; `end_ray_window` then commits the window. With hits equal
+/// to the track's raycasts, the agents equal those of `advance`.
+pub struct RayWindow {
+    start_tick: u64,
+    start_batch: usize,
+    ticks: u64,
+    stop_when_inactive: bool,
+    time_limit: Option<f64>,
+    executed: u64,
+    finished: bool,
+    transition_without_drive: bool,
+    batch_index: usize,
+    /// The agents whose controls update in the prepared tick.
+    pub inferring: Vec<usize>,
+}
+
+impl RayWindow {
+    /// The tick the prepared step drives (`TrainingRunner::tick` plus the
+    /// executed count).
+    pub fn tick(&self) -> u64 { self.start_tick + self.executed }
+}
+
+/// Values per car in `TrainingRunner::car_states`, in `CAR_STATE_FIELDS` order.
+pub const CAR_STATE_STRIDE: usize = 14;
+/// `car_states` layout: position, rotation, velocity, angular velocity,
+/// active flag, distance score, lap count, best lap time (-1 without a lap),
+/// wall contacts, boost energy, the steering wheel angle in degrees, and the
+/// statistics update count.
+pub const CAR_STATE_FIELDS: [&str; CAR_STATE_STRIDE] = [
+    "x", "y", "rotation", "velocity_x", "velocity_y", "angular_velocity", "active", "score", "lap_count",
+    "best_lap_time", "collision_count", "boost", "wheel_angle", "update_count",
+];
 
 pub struct TrainingRunner {
     pub world: Arc<World>,
@@ -723,9 +796,133 @@ impl TrainingRunner {
     /// TrainGameManager checks elapsed time after stats and before driving.
     /// `time_limit_ticks` specifies the configured time limit in 1/60 seconds.
     pub fn advance_generation(&mut self, time_limit_ticks: u64) -> u64 {
+        let (ticks, time_limit) = self.generation_window(time_limit_ticks);
+        self.advance_window(ticks, true, Some(time_limit))
+    }
+
+    /// The remaining window of a generation with `time_limit_ticks`: the tick
+    /// bound and the time limit in seconds that `advance_generation` applies.
+    pub fn generation_window(&self, time_limit_ticks: u64) -> (u64, f64) {
         assert_eq!(self.stats_phase, 0, "fresh game generations use reset statistics counters");
         let bound = (time_limit_ticks / 6 + 2) * 6;
-        self.advance_window(bound.saturating_sub(self.tick), true, Some(time_limit_ticks as f64 / 60.0))
+        (bound.saturating_sub(self.tick), time_limit_ticks as f64 / 60.0)
+    }
+
+    /// Starts a `RayWindow` of up to `ticks` ticks (`advance_window` with an
+    /// external raycaster). Paused runners, native shared broadphase scenes,
+    /// and ray sensors without a BSP ray tree are not supported.
+    pub fn begin_ray_window(&mut self, ticks: u64, stop_when_inactive: bool, time_limit: Option<f64>) -> Result<RayWindow, String> {
+        if self.user_paused || self.physics.is_some() {
+            return Err("external raycasting does not model paused or native-broadphase windows".into());
+        }
+        if self.layout.ray_count() > 0 && self.world.track.ray_tree().is_none() {
+            return Err("the scene has no BSP raycaster; the ray sensors need its RayTree".into());
+        }
+        for agent in &mut self.agents {
+            agent.deactivated_at = None;
+        }
+        Ok(RayWindow {
+            start_tick: self.tick, start_batch: self.batch_index, ticks, stop_when_inactive, time_limit,
+            executed: 0, finished: false, transition_without_drive: false, batch_index: self.batch_index, inferring: Vec::new(),
+        })
+    }
+
+    /// Runs the statistics of the next tick and selects the agents that infer
+    /// in it. Returns false once the window is complete or stops before
+    /// driving (every car inactive, or the time limit reached).
+    pub fn prepare_ray_tick(&mut self, w: &mut RayWindow) -> bool {
+        if w.finished || w.executed >= w.ticks {
+            w.finished = true;
+            return false;
+        }
+        w.executed += 1;
+        let tick = w.tick();
+        w.batch_index = (w.start_batch + ((w.executed - 1) as usize % 8) * self.batches_per_tick()) % 8;
+        let mut agents = std::mem::take(&mut self.agents);
+        let stop = {
+            let schedule = self.schedule_for(agents.len());
+            agents.par_iter_mut().for_each(|agent| schedule.update_stats(agent, tick));
+            let stop = tick % 6 == self.stats_phase && {
+                let first = if self.stats_phase == 0 { 6 } else { self.stats_phase };
+                let elapsed = ((tick - first) / 6) as f64 * 0.1;
+                (w.stop_when_inactive && agents.iter().all(|a| !a.car.active)) || w.time_limit.is_some_and(|limit| elapsed >= limit)
+            };
+            if !stop {
+                w.inferring.clear();
+                w.inferring.extend(agents.iter().enumerate().filter(|(i, a)| schedule.infers(*i, w.batch_index) && a.car.active).map(|(i, _)| i));
+            }
+            stop
+        };
+        self.agents = agents;
+        if stop {
+            w.transition_without_drive = true;
+            w.finished = true;
+        }
+        !stop
+    }
+
+    /// The ray sensor segments of the inferring agents, `[start.x, start.y,
+    /// end.x, end.y]` in float32 as `RayTree::raycast` takes them: for each
+    /// agent of `w.inferring`, its `Sensor::Raycast` entries in layout order.
+    pub fn ray_queries(&self, w: &RayWindow, out: &mut Vec<[f32; 4]>) {
+        use crate::godot_math::F2;
+        out.clear();
+        for &i in &w.inferring {
+            let car = &self.agents[i].car;
+            let start = F2::from(car.position);
+            for sensor in &self.layout.sensors {
+                if let Sensor::Raycast { degrees, length } = *sensor {
+                    let end = F2::from(car.ray_end(degrees, length).0);
+                    out.push([start.x, start.y, end.x, end.y]);
+                }
+            }
+        }
+    }
+
+    /// Sets the inferring agents' controls from `hits` (one per query of
+    /// `ray_queries`, `[hit.x, hit.y, hit != 0, _]`), then drives every car.
+    pub fn finish_ray_tick(&mut self, w: &RayWindow, hits: &[[f32; 4]]) -> Result<(), String> {
+        let rays = self.layout.ray_count();
+        if hits.len() != w.inferring.len() * rays {
+            return Err(format!("expected {} ray hits, got {}", w.inferring.len() * rays, hits.len()));
+        }
+        let tick = w.tick();
+        let mut agents = std::mem::take(&mut self.agents);
+        {
+            let schedule = self.schedule_for(agents.len());
+            for (&i, hits) in w.inferring.iter().zip(hits.chunks(rays.max(1))) {
+                let agent = &mut agents[i];
+                let scratch = &mut agent.scratch;
+                schedule.layout.read_into_with_hits(schedule.world, &agent.car, &mut scratch.sensors, &mut scratch.inputs, hits);
+                schedule.set_controls(agent);
+            }
+            agents.par_iter_mut().for_each(|agent| schedule.step_agent(agent, tick));
+        }
+        self.agents = agents;
+        Ok(())
+    }
+
+    /// Commits the window: `tick` and the inference cursor advance as after
+    /// `advance`. Returns the executed ticks.
+    pub fn end_ray_window(&mut self, w: RayWindow) -> u64 {
+        let bpt = self.batches_per_tick();
+        self.tick = w.start_tick + w.executed;
+        self.batch_index = (w.start_batch + ((w.executed as usize - w.transition_without_drive as usize) % 8) * bpt) % 8;
+        w.executed
+    }
+
+    /// `CAR_STATE_STRIDE` values per agent (`CAR_STATE_FIELDS`), appended to `out`.
+    pub fn car_states(&self, out: &mut Vec<f64>) {
+        let steering = self.world.vehicle.wheels.iter().position(|w| w.steering);
+        for a in &self.agents {
+            let c = &a.car;
+            out.extend_from_slice(&[
+                c.position.x, c.position.y, c.rotation, c.velocity.x, c.velocity.y, c.angular_velocity,
+                c.active as u8 as f64, a.stats.total_score, a.stats.score.lap_count as f64,
+                a.stats.best_lap_time.unwrap_or(-1.0), c.collision_count as f64, c.boost_energy,
+                steering.map_or(0.0, |i| c.wheels[i].angle_deg), a.stats.update_count as f64,
+            ]);
+        }
     }
 
     fn advance_window(&mut self, ticks: u64, stop_when_inactive: bool, time_limit: Option<f64>) -> u64 {
@@ -840,6 +1037,7 @@ impl TrainingRunner {
 
     /// A GPU simulator for this runner's world, vehicle and sensors, with
     /// room for `capacity` agents.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn gpu_sim<'a>(&self, world: &crate::gpu::GpuWorld<'a>, capacity: usize) -> Result<crate::gpu_sim::GpuSim<'a>, String> {
         let vehicle = crate::gpu_sim::vehicle_desc(&self.world.vehicle)?;
         // The GPU path sensors sample the Curve2D only; without track.curve the
@@ -854,6 +1052,7 @@ impl TrainingRunner {
     }
 
     /// `advance_generation` on the GPU.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn advance_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim, world: &crate::gpu::GpuWorld, time_limit_ticks: u64) -> Result<u64, String> {
         assert_eq!(self.stats_phase, 0, "fresh game generations use reset statistics counters");
         let bound = (time_limit_ticks / 6 + 2) * 6;
@@ -863,6 +1062,7 @@ impl TrainingRunner {
     /// `advance_window` on the GPU: agents and cars are uploaded, advanced in
     /// the tick-major order and read back. Networks are uploaded when
     /// `sim.network_tag` differs from the generation.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn advance_window_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim, world: &crate::gpu::GpuWorld, ticks: u64,
                               stop_when_inactive: bool, time_limit: Option<f64>) -> Result<u64, String> {
         use crate::gpu_sim::*;
@@ -927,6 +1127,7 @@ impl TrainingRunner {
 
     /// The rest of `gpu_import` for the whole population: `cars` and `agents`
     /// hold what `advance_window_gpu` read back.
+    #[cfg(not(target_arch = "wasm32"))]
     fn import_state(&mut self, cars: &[crate::gpu_sim::GpuCar], agents: &[crate::gpu_sim::GpuAgent],
                     surfaces: &crate::gpu_sim::SurfaceTable) -> Result<(), String> {
         self.agents.par_iter_mut().zip(cars).zip(agents).try_for_each(|((a, c), g)| {
@@ -1022,6 +1223,7 @@ impl TrainingRunner {
     /// the GPU. Uploaded offspring stay in place for the next driving window,
     /// and the new agents take over the offspring networks without a copy
     /// (read them from `agents`; only the selection summary is returned).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn next_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim) -> Result<Turnover, String> {
         let mut profile = crate::training_profile::Profile::new("gpu_turnover");
         // The preceding upload is complete, so its host buffer can hold noise
@@ -1117,7 +1319,80 @@ mod tests {
         }
     }
 
+    /// Drives `runner` through a ray window whose hits come from the CPU ray tree.
+    fn advance_with_cpu_ray_window(runner: &mut TrainingRunner, ticks: u64, stop_when_inactive: bool, time_limit: Option<f64>) -> u64 {
+        use crate::godot_math::F2;
+        let world = runner.world.clone();
+        let tree = world.track.ray_tree().expect("the fixture has a BSP ray tree");
+        let mut window = runner.begin_ray_window(ticks, stop_when_inactive, time_limit).unwrap();
+        let mut queries = Vec::new();
+        let mut hits = Vec::new();
+        while runner.prepare_ray_tick(&mut window) {
+            runner.ray_queries(&window, &mut queries);
+            assert_eq!(queries.len(), window.inferring.len() * runner.layout.ray_count());
+            hits.clear();
+            hits.extend(queries.iter().map(|q| {
+                match tree.raycast(V2::new(q[0] as f64, q[1] as f64), V2::new(q[2] as f64, q[3] as f64)) {
+                    Some(hit) => { let h = F2::from(hit); [h.x, h.y, 1.0, 0.0] }
+                    None => [0.0; 4],
+                }
+            }));
+            runner.finish_ray_tick(&window, &hits).unwrap();
+        }
+        runner.end_ray_window(window)
+    }
+
+    fn assert_same_agents(a: &TrainingRunner, b: &TrainingRunner) {
+        assert_eq!((a.tick, a.batch_index, a.agents.len()), (b.tick, b.batch_index, b.agents.len()));
+        for (x, y) in a.agents.iter().zip(&b.agents) {
+            assert_eq!(agent_state(x), agent_state(y));
+        }
+        let (mut sa, mut sb) = (Vec::new(), Vec::new());
+        a.car_states(&mut sa);
+        b.car_states(&mut sb);
+        assert_eq!(sa.len(), a.agents.len() * CAR_STATE_STRIDE);
+        assert!(sa.iter().zip(&sb).all(|(p, q)| p.to_bits() == q.to_bits()));
+    }
+
+    /// The externally served ray window reproduces `advance` in both modes,
+    /// including partial windows, elimination stops and the time limit.
+    #[test]
+    fn ray_window_matches_advance() {
+        let seed = Network::xavier(&[20, 16, 5], &mut PyRandom::new(9));
+        for mode in [Mode::Independent, Mode::Lockstep] {
+            let mut a = autumn_runner(24);
+            a.mode = mode;
+            a.start(&seed);
+            let mut b = autumn_runner(24);
+            b.start(&seed);
+            assert_eq!(a.advance(75, false), advance_with_cpu_ray_window(&mut b, 75, false, None));
+            assert_same_agents(&a, &b);
+            assert_eq!(a.advance(0, false), advance_with_cpu_ray_window(&mut b, 0, false, None));
+            assert_same_agents(&a, &b);
+            // Two windows of a short generation: the time limit stops both before driving.
+            let (ticks, limit) = a.generation_window(600);
+            assert_eq!(a.advance_window(ticks, true, Some(limit)), advance_with_cpu_ray_window(&mut b, ticks, true, Some(limit)));
+            assert_same_agents(&a, &b);
+            // Stops at the limit, or earlier once every car is eliminated.
+            assert!(a.tick <= ticks + 75 && (a.tick > 500 || a.agents.iter().all(|x| !x.car.active)), "tick {}", a.tick);
+            a.next_generation();
+            b.next_generation();
+            assert_same_agents(&a, &b);
+            assert_eq!(a.advance_generation(180), advance_with_cpu_ray_window(&mut b, 200, true, Some(3.0)));
+            assert_same_agents(&a, &b);
+        }
+        // Every car eliminated on walls or idle: the inactive stop ends the window.
+        let mut a = autumn_runner(8);
+        a.start(&seed);
+        let mut b = autumn_runner(8);
+        b.start(&seed);
+        assert_eq!(a.advance(5400, true), advance_with_cpu_ray_window(&mut b, 5400, true, None));
+        assert!(a.agents.iter().all(|x| !x.car.active) && a.tick < 5400, "tick {}", a.tick);
+        assert_same_agents(&a, &b);
+    }
+
     /// The retained export buffers hold exactly what per-agent exports produce.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn export_state_into_matches_per_agent_export() {
         let mut runner = autumn_runner(24);

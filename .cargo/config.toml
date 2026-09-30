@@ -1,4 +1,10 @@
 # Rust never contracts a*b+c into FMA on its own, so native codegen keeps
 # the game arithmetic order while enabling native CPU optimizations.
-[build]
+# The flag is limited to x86 hosts: it is not valid for the wasm32 target.
+[target.'cfg(any(target_arch = "x86_64", target_arch = "x86"))']
 rustflags = ["-C", "target-cpu=native"]
+
+# The WebAssembly library (`--no-default-features --features wasm`). web-sys
+# still publishes its WebGPU bindings behind this cfg.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
