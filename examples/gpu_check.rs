@@ -173,7 +173,8 @@ fn check_math(gpu: &Gpu, n: usize, include_engine: bool) -> bool {
         let mut t = Tally::default();
         for i in 0..n {
             let want = network::game_tanh(input[i]);
-            t.record(err[i], want.to_bits() == out[i].to_bits(), || format!("{:e} cpu {want:e} gpu {:e}", input[i], out[i]));
+            t.record(err[i], want.to_bits() == out[i].to_bits(), || format!("{:e} ({:#018x}) cpu {want:e} ({:#018x}) gpu {:e} ({:#018x})",
+                input[i], input[i].to_bits(), want.to_bits(), out[i], out[i].to_bits()));
         }
         ok &= t.report("game_tanh");
     }
@@ -953,7 +954,9 @@ fn check_turnover(gpu: &Gpu) -> bool {
                     assert_eq!(expected.preserved_count, got.preserved_count);
                     assert_eq!(expected.rewards, got.rewards);
                     assert_eq!(cpu.rng.to_json(), on_gpu.rng.to_json());
-                    for (i, (a, b)) in expected.networks.iter().zip(&got.networks).enumerate() {
+                    // The GPU turnover's agents own the offspring it installed.
+                    assert_eq!(expected.networks.len(), on_gpu.agents.len());
+                    for (i, (a, b)) in expected.networks.iter().zip(on_gpu.agents.iter().map(|agent| &agent.network)).enumerate() {
                         tally.record(0, a.shape == b.shape && a.params.iter().map(|x| x.to_bits()).eq(b.params.iter().map(|x| x.to_bits())),
                             || format!("offspring {i}: game={game_rng} crossover={crossover} selection={selection} n={count}"));
                     }

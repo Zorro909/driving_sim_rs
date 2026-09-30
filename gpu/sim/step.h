@@ -141,15 +141,16 @@ __device__ inline Support polygon_supports(const World& w, const ShapeDev& shape
     const Vec2* normals = w.shape_normals + shape.first;
     float maximum = -INFINITY;
     uint32_t best = 0, edge = NONE, n = shape.count;
+    // Unrolled for constant indices; leaving at n skips the predicated no-op
+    // iterations (most track shapes have 3 or 4 points).
 #pragma unroll
     for (uint32_t i = 0; i < MAX_SHAPE_POINTS; i++) {
-        if (i < n) {
-            float projection = dot(local[i], direction);
-            bool higher = projection > maximum;
-            maximum = higher ? projection : maximum;
-            best = higher ? i : best;
-            edge = edge == NONE && (double)dot(normals[i], direction) > 0.99998 ? i : edge;
-        }
+        if (i >= n) break;
+        float projection = dot(local[i], direction);
+        bool higher = projection > maximum;
+        maximum = higher ? projection : maximum;
+        best = higher ? i : best;
+        edge = edge == NONE && (double)dot(normals[i], direction) > 0.99998 ? i : edge;
     }
     if (edge != NONE) return Support{{local[edge] + wall_offset, local[edge + 1 == n ? 0 : edge + 1] + wall_offset}, 2};
     return Support{{local[best] + wall_offset, Vec2{0, 0}}, 1};
@@ -308,9 +309,10 @@ __device__ inline Vec2 sat_pair(const World& w, const VehicleDesc& v, Car& car, 
         }
 #pragma unroll
         for (uint32_t i = 0; i < MAX_SHAPE_POINTS; i++) {
+            if (i >= n) break;  // constant indices keep `wall` in registers; iterations past n did nothing
             float d = dot(wall[i], axis);
-            min_b = i < n && d < min_b ? d : min_b;
-            max_b = i < n && d > max_b ? d : max_b;
+            min_b = d < min_b ? d : min_b;
+            max_b = d > max_b ? d : max_b;
         }
         float width_a = (max_a - min_a) * 0.5f, center_a = (min_a + max_a) * 0.5f;
         float dmin = (min_b - width_a) - center_a, dmax = (max_b + width_a) - center_a;
@@ -589,6 +591,11 @@ __device__ inline StepCarry step_begin(const World& w, const VehicleDesc& v, Car
         float drive_amount = (float)(control.acceleration * (control.acceleration > 0.0 ? 1.0 + (double)strength : 1.0));
         double steering_multiplier = 1.0 / (0.002 * (double)length(car.velocity) + 1.0);
         Vec2 body_x = car.basis_x, body_y = car.basis_y;
+        // godot_ease(handbrake, 0.3) takes one of two inputs per step (the
+        // control, or 0.0 for wheels without handbrake power), so each pow
+        // is evaluated at most once and shared by the wheels with that input.
+        double ease[2];
+        bool eased[2] = {false, false};
         for (uint32_t i = 0; i < v.wheel_count; i++) {
             const WheelDesc& spec = v.wheels[i];
             Vec2 position = transform_point(car.position, body_x, body_y, spec.position);
@@ -617,9 +624,13 @@ __device__ inline StepCarry step_begin(const World& w, const VehicleDesc& v, Car
             impulse = impulse + wheel_drive;
             torque += cross(offset, wheel_drive);
             float lateral_speed = dot(wheel_velocity, right);
-            double handbrake = spec.handbrake_off ? 0.0 : control.handbrake;
+            uint32_t off = spec.handbrake_off ? 1 : 0;
+            if (!eased[off]) {
+                ease[off] = godot_ease(off ? 0.0 : control.handbrake, 0.3);
+                eased[off] = true;
+            }
             double lateral_grip = 0.20000000298023224
-                + (0.8 + (0.1 - 0.8) * godot_ease(handbrake, 0.3))
+                + (0.8 + (0.1 - 0.8) * ease[off])
                     / (1.0 + dexp(((double)length(wheel_velocity) - 450.0) * 0.00800000037997961));
             float effective_grip = (float)((double)v.grip * lateral_grip);
             Vec2 lateral = right * (-effective_grip * lateral_speed) * surface.grip;
@@ -659,11 +670,18 @@ __device__ inline bool step_end(const World& w, const VehicleDesc& v, Car& car, 
     STEP_MARK(tc);
     uint32_t err = 0;
     static_assert(MAX_PAIRS <= 32, "pair mask");
-    CarFrame f = car_frame(v, car);
+    // The car frame (two normalizations) is only needed once a pair pushes;
+    // most steps have no penetrating pair. The basis does not change here.
+    CarFrame f;
+    bool framed = false;
     uint32_t made_contacts = 0;
     for (uint32_t ci = 0; ci < car.pair_count; ci++) {
         Vec2 push = push_of(ci);
         if (is_zero(push)) continue;
+        if (!framed) {
+            f = car_frame(v, car);
+            framed = true;
+        }
         uint32_t made = pair_contacts(w, v, car, f, ci, push, [&](const Contact& c) {
             STEP_MARK(tm);
             merge_contact(v, car, c);

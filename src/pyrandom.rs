@@ -178,8 +178,14 @@ impl PyRandom {
     }
 
     /// Reuse storage without clearing the elements that will be overwritten.
+    ///
+    /// The generator is sequential, but the Box-Muller transform of each
+    /// filled block runs on the thread pool while the next block is drawn, so
+    /// the transcendental work overlaps the draws instead of following them.
+    /// Every element sees the same operations as before: `fill_uniforms` on
+    /// consecutive blocks equals one call over the whole slice, and each pair
+    /// is transformed on its own.
     pub(crate) fn standard_normals_into(&mut self, count: usize, out: &mut Vec<f64>) {
-        use rayon::prelude::*;
         let mut profile = crate::training_profile::Profile::new("normal_draws");
         let cached = if count > 0 { self.gauss_next.take() } else { None };
         // Store each pair's uniforms in place, then transform the pairs in parallel.
@@ -187,18 +193,32 @@ impl PyRandom {
         let pairs = (count - offset).div_ceil(2);
         out.resize(offset + pairs * 2, 0.0);
         if let Some(z) = cached { out[0] = z; }
-        self.fill_uniforms(&mut out[offset..]);
-        profile.mark("uniform_draws");
-        out[offset..].par_chunks_exact_mut(2).with_min_len(4096).for_each(|pair| {
-            let x2pi = pair[0] * std::f64::consts::TAU;
-            let g2rad = (-2.0 * (1.0 - pair[1]).ln()).sqrt();
-            pair[0] = x2pi.cos() * g2rad;
-            pair[1] = x2pi.sin() * g2rad;
+        const BLOCK: usize = 1 << 16; // doubles per block (even), about a millisecond of transform
+        let body = &mut out[offset..];
+        rayon::scope(|scope| {
+            let mut rest = body;
+            while !rest.is_empty() {
+                let n = rest.len().min(BLOCK);
+                let (block, tail) = std::mem::take(&mut rest).split_at_mut(n);
+                self.fill_uniforms(block);
+                scope.spawn(move |_| Self::transform_pairs(block));
+                rest = tail;
+            }
         });
         if out.len() > count {
             self.gauss_next = out.pop();
         }
-        profile.mark("transform");
+        profile.mark("draws_and_transform");
+    }
+
+    /// Box-Muller on stored uniform pairs, in place (`random.gauss`).
+    fn transform_pairs(block: &mut [f64]) {
+        for pair in block.chunks_exact_mut(2) {
+            let x2pi = pair[0] * std::f64::consts::TAU;
+            let g2rad = (-2.0 * (1.0 - pair[1]).ln()).sqrt();
+            pair[0] = x2pi.cos() * g2rad;
+            pair[1] = x2pi.sin() * g2rad;
+        }
     }
 
     /// `random.getrandbits(k)` for `1 <= k <= 32`.
@@ -297,7 +317,8 @@ mod tests {
         let mut expected = PyRandom::new(123);
         let mut actual = expected.clone();
         let mut storage = vec![f64::NAN; 20000];
-        for count in [0, 1, 0, 7, 623, 624, 625, 10001, 2, 0, 3] {
+        // Counts around the pipelining block size (65536 doubles) and beyond several blocks.
+        for count in [0, 1, 0, 7, 623, 624, 625, 10001, 2, 0, 3, 65535, 65536, 65537, 131073, 300001] {
             actual.standard_normals_into(count, &mut storage);
             assert_eq!(storage.len(), count);
             for &value in &storage { assert_eq!((0.0 + value).to_bits(), expected.gauss(1.0).to_bits()); }

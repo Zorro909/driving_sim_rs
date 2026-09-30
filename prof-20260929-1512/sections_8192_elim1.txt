@@ -1,0 +1,16 @@
+  tick     1: live 8192/0, steps 8192/0
+altd_gpu window: 462 ticks, 8192 cars: stats 0.009 s, sensors 0.030 s, forward 0.061 s, step 0.036 s
+  ticks     1..: stats 0.009 sensors 0.030 forward 0.061 step 0.036
+  ticks   601..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  1201..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  1801..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  2401..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  3001..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  3601..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  4201..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  4801..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+  ticks  5401..: stats 0.000 sensors 0.000 forward 0.000 step 0.000
+altd_gpu step sections (3240377 car steps, 700155 solving, 2538375 pair updates, 0 full scans), us per car step: drive 15.17 validate 0.53 contacts+merge 4.26 active 0.68 solver 3.42 finish 2.86 (pairs 4.20, merge 0.28); SAT pairs 0.95 per step, axes 3.02 per pair, separated 0.76, wall points 6.43
+altd_gpu window: host thread cpu 0.146 s of 0.146 s wall (direct): launches 0.013 s, polls 0.126 s
+{"benchmark":"fixed_generation","cars":8192,"ticks":462,"eliminate":true,"sample":0,"warmup":false,"seconds":0.197761671,"digest":"3e8b9d70a06e1fd2","active":0}
+ALL OK

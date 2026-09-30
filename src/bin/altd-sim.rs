@@ -74,6 +74,78 @@ impl ScratchReward {
     }
 }
 
+/// Metric watched by `--stop-plateau`.
+#[derive(Clone, Copy, ValueEnum, PartialEq)]
+enum PlateauMetric {
+    /// Fastest completed lap of a generation.
+    Lap,
+    /// Best total_score of a generation.
+    Score,
+}
+
+/// Early-stop rules of one train-scratch invocation; any rule ends the run.
+#[derive(Clone, Copy)]
+struct StopRules {
+    score_above: Option<f64>,
+    lap_below: Option<f64>,
+    lapped_percent: Option<f64>,
+    plateau: Option<usize>,
+    plateau_metric: PlateauMetric,
+}
+
+/// Plateau bookkeeping; counts start with the invocation, not the run.
+struct StopState {
+    best_lap: Option<f64>,
+    best_score: f64,
+    stale: usize,
+}
+
+impl StopRules {
+    fn to_json(&self) -> Value {
+        json!({
+            "score_above": self.score_above, "lap_below": self.lap_below,
+            "lapped_percent": self.lapped_percent, "plateau": self.plateau,
+            "plateau_metric": match self.plateau_metric { PlateauMetric::Lap => "lap", PlateauMetric::Score => "score" },
+        })
+    }
+
+    /// Stop reason after `generation`, if a rule fired. Checked in a fixed order.
+    fn check(&self, state: &mut StopState, generation: usize, lap: Option<f64>, score: f64, lapped: usize,
+             population: usize, stop_request: bool) -> Option<Value> {
+        let improved = match self.plateau_metric {
+            PlateauMetric::Lap => lap.is_some_and(|t| state.best_lap.is_none_or(|best| t < best)),
+            PlateauMetric::Score => score > state.best_score,
+        };
+        if let Some(t) = lap { state.best_lap = Some(state.best_lap.map_or(t, |best| best.min(t))); }
+        state.best_score = state.best_score.max(score);
+        state.stale = if improved { 0 } else { state.stale + 1 };
+        let percent = 100.0 * lapped as f64 / population as f64;
+        let reason = |condition: &str, value: Value, threshold: Value| {
+            Some(json!({"condition": condition, "generation": generation, "value": value, "threshold": threshold}))
+        };
+        if stop_request {
+            return reason("stop_request", Value::Null, Value::Null);
+        }
+        if let (Some(limit), Some(t)) = (self.lap_below, lap) {
+            if t <= limit { return reason("lap_below", json!(t), json!(limit)); }
+        }
+        if let Some(limit) = self.score_above {
+            if score >= limit { return reason("score_above", json!(score), json!(limit)); }
+        }
+        if let Some(limit) = self.lapped_percent {
+            if percent >= limit { return reason("lapped_percent", json!(percent), json!(limit)); }
+        }
+        if let Some(limit) = self.plateau {
+            if state.stale >= limit {
+                let mut stop = reason("plateau", json!(state.stale), json!(limit)).unwrap();
+                stop["metric"] = self.to_json()["plateau_metric"].clone();
+                return Some(stop);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// benchmark_population.py: timed training ticks for a population.
@@ -206,9 +278,23 @@ enum Command {
         idle_eliminate: bool,
         #[arg(long, overrides_with = "idle_eliminate")]
         no_idle_eliminate: bool,
-        /// Write a resumable checkpoint every N generations (0 disables).
+        /// Write a resumable checkpoint every N generations and when training ends (0 disables).
         #[arg(long, default_value_t = 100)]
         checkpoint_every: usize,
+        /// Stop after a generation whose best total_score reaches this value.
+        #[arg(long)]
+        stop_score_above: Option<f64>,
+        /// Stop after a generation whose fastest lap is at most this many seconds.
+        #[arg(long)]
+        stop_lap_below: Option<f64>,
+        /// Stop after a generation in which at least this percentage of cars completed a lap.
+        #[arg(long)]
+        stop_lapped_percent: Option<f64>,
+        /// Stop once --plateau-metric has not improved for this many generations of this invocation.
+        #[arg(long)]
+        stop_plateau: Option<usize>,
+        #[arg(long, value_enum, default_value_t = PlateauMetric::Lap)]
+        plateau_metric: PlateauMetric,
         /// Continue from the checkpoint in --out-dir, allowing new settings with the same network shape.
         #[arg(long)]
         resume: bool,
@@ -638,7 +724,7 @@ fn compare_network(network_data: &Value, trace: &Value, first_tick: usize) -> Va
 }
 
 fn compare_sensors(world: &World, trace: &Value, model: &Value, trajectory: &Value, all_frames: bool) -> Value {
-    const KINDS: [(&str, &str); 7] = [
+    const ALL_KINDS: [(&str, &str); 8] = [
         ("AngVel", "angularVelocity"),
         ("Boost", "boostCapacity"),
         ("Dir", "correctDirection"),
@@ -646,8 +732,12 @@ fn compare_sensors(world: &World, trace: &Value, model: &Value, trajectory: &Val
         ("VelF", "velocityFront"),
         ("VelS", "velocitySide"),
         ("Curve", "trackCurvature"),
+        ("Wheel", "wheelAngle"),
     ];
     let frames = frames(trace);
+    // Only the sensors this trace recorded (rally vs. formula layouts differ).
+    let has_sensor = |name: &str| frames.iter().any(|f| f["sensors"].as_array().is_some_and(|s| s.iter().any(|i| i["name"] == name)));
+    let kinds: Vec<(&str, &str)> = ALL_KINDS.iter().copied().filter(|(n, _)| has_sensor(n)).collect();
     let source_index = |tick: usize, parity: usize| if tick % 2 == parity { tick - 1 } else { tick - 2 };
     let actual_of = |frame: &Value, name: &str| -> f64 {
         // {item["name"]: item["value"]}: the last duplicate wins.
@@ -675,13 +765,22 @@ fn compare_sensors(world: &World, trace: &Value, model: &Value, trajectory: &Val
         error
     };
     let parity = if residual(1) < residual(0) { 1 } else { 0 };
-    let vision: Vec<(String, f64, f64)> = model["vision"]
+    let mut vision: Vec<(String, f64, f64)> = model["vision"]
         .as_array()
         .unwrap()
         .iter()
         .map(|item| (item["angle"].to_string(), num(&item["angle"]), num(&item["length"])))
         .collect();
-    let mut errors: Vec<(String, Vec<f64>)> = KINDS.iter().map(|(n, _)| (n.to_string(), Vec::new())).collect();
+    if vision.is_empty() {
+        // model.json without vision: rays come from the trace sensor names, lengths from the game formula.
+        for item in frames.iter().find(|f| f["sensors"].as_array().is_some_and(|s| !s.is_empty())).map_or(&[][..], |f| f["sensors"].as_array().unwrap()) {
+            if let Some(label) = item["name"].as_str().and_then(|n| n.strip_prefix("↑ ")).and_then(|n| n.strip_suffix('°')) {
+                let degrees: f64 = label.parse().unwrap();
+                vision.push((label.to_string(), degrees, altd_sim::training::vision_length(degrees as f32) as f64));
+            }
+        }
+    }
+    let mut errors: Vec<(String, Vec<f64>)> = kinds.iter().map(|(n, _)| (n.to_string(), Vec::new())).collect();
     for (label, _, _) in &vision {
         let key = format!("vision_{label}");
         if !errors.iter().any(|(n, _)| *n == key) {
@@ -698,7 +797,7 @@ fn compare_sensors(world: &World, trace: &Value, model: &Value, trajectory: &Val
         let car = altd_sim::trace_state::car_from_frame(world, &frames[index],
             index.checked_sub(1).map(|i| &frames[i]), index.checked_sub(2).map(|i| &frames[i]));
         scratch.invalidate();
-        for (name, kind) in KINDS {
+        for &(name, kind) in &kinds {
             let value = car.sensor(world, Sensor::by_name(kind), &mut scratch) - actual_of(&frames[tick], name);
             push(&mut errors, name, value);
         }
@@ -1042,6 +1141,7 @@ struct ScratchConfig {
     game_rng_state: Option<PathBuf>,
     batch_count: usize,
     checkpoint_every: usize,
+    stop: StopRules,
     eliminate_on_wall: Option<bool>,
     idle_eliminate: Option<bool>,
     resume: bool,
@@ -1081,13 +1181,14 @@ fn install_checkpoint(runner: &mut TrainingRunner, config: &ScratchConfig, meta:
     generation
 }
 
-/// Mutation rate used to create generation `generation`.
+/// Mutation rate used to create generation `generation`. The final checkpoint's
+/// population, bred after the last generation, keeps the end rate.
 fn scheduled_rate(config: &ScratchConfig, generation: usize) -> f64 {
     let (start, end) = (config.mutation_start, config.mutation_end);
     if config.generations < 2 {
         return start;
     }
-    let t = generation as f64 / (config.generations - 1) as f64;
+    let t = (generation as f64 / (config.generations - 1) as f64).min(1.0);
     match config.schedule {
         Schedule::Geometric => start * (end / start).powf(t),
         Schedule::Linear => start + (end - start) * t,
@@ -1194,6 +1295,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
         "mutation_start": config.mutation_start, "mutation_end": config.mutation_end,
         "schedule": match config.schedule { Schedule::Geometric => "geometric", Schedule::Linear => "linear" },
         "seed": config.seed, "init_network": config.init_network, "batch_count": config.batch_count, "settings": settings.to_json(),
+        "stop": config.stop.to_json(),
     });
     if let Some(path)=&config.game_rng_state {run["game_rng_state"]=load(path);}
     if let Some(path)=&config.init_population {run["init_population"]=json!(path);}
@@ -1207,6 +1309,10 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
             dir.display()
         );
     }
+
+    // A request left over from an earlier invocation must not end this one.
+    let stop_request_path = dir.join("stop_request");
+    let _ = std::fs::remove_file(&stop_request_path);
 
     let started = Instant::now();
     let world = Arc::new(World::from_scene(&scene));
@@ -1291,6 +1397,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     );
 
     let fmt_lap = |lap: Option<f64>| lap.map_or("   -   ".to_string(), |t| format!("{t:7.2}"));
+    let mut stop_state = StopState { best_lap: None, best_score: f64::NEG_INFINITY, stale: 0 };
     for generation in first_generation..config.generations {
         let generation_started = Instant::now();
         let rate = runner.settings.mutation_rate;
@@ -1345,9 +1452,22 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
             }
         }
 
+        let stop_request = stop_request_path.exists();
+        let mut stop_reason = config.stop.check(&mut stop_state, generation, generation_best, best_score, lapped.len(),
+                                                config.population, stop_request);
+        if stop_request {
+            let _ = std::fs::remove_file(&stop_request_path);
+        }
+        if stop_reason.is_none() && generation + 1 == config.generations {
+            stop_reason = Some(json!({"condition": "generations", "generation": generation,
+                                      "value": generation + 1, "threshold": config.generations}));
+        }
+        let last = stop_reason.is_some();
+        let final_checkpoint = last && config.checkpoint_every > 0;
+
         let turnover_started = Instant::now();
-        let last = generation + 1 == config.generations;
-        if !last {
+        // Breed after the last generation too, so the final checkpoint continues exactly.
+        if !last || final_checkpoint {
             runner.settings.mutation_rate = scheduled_rate(config, generation + 1);
             if let Some(sim) = &mut gpu_sim {
                 runner.next_generation_gpu(sim).unwrap_or_else(|e| panic!("--gpu: {e}"));
@@ -1388,12 +1508,17 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
             if saved.is_null() { "" } else { "  * saved" },
         );
 
-        if !last && config.checkpoint_every > 0 && (generation + 1) % config.checkpoint_every == 0 {
+        if final_checkpoint || (!last && config.checkpoint_every > 0 && (generation + 1) % config.checkpoint_every == 0) {
             write_checkpoint(
                 dir,
                 &runner,
-                json!({"best_lap_s": best_lap.is_finite().then_some(best_lap), "best_lap_generation": best_lap_generation}),
+                json!({"best_lap_s": best_lap.is_finite().then_some(best_lap), "best_lap_generation": best_lap_generation,
+                       "stop_reason": if last { stop_reason.clone().unwrap() } else { Value::Null }}),
             );
+        }
+        if let Some(reason) = &stop_reason {
+            println!("stopped: {reason}");
+            break;
         }
     }
     println!(
@@ -1454,10 +1579,15 @@ fn main() {
             scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
             mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume,
             eliminate_on_wall, no_eliminate_on_wall, idle_eliminate, no_idle_eliminate, gpu,
+            stop_score_above, stop_lap_below, stop_lapped_percent, stop_plateau, plateau_metric,
         } => {
+            let stop = StopRules {
+                score_above: stop_score_above, lap_below: stop_lap_below, lapped_percent: stop_lapped_percent,
+                plateau: stop_plateau, plateau_metric,
+            };
             let config = ScratchConfig {
                 scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
-                mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume,
+                mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume, stop,
                 eliminate_on_wall: flag(eliminate_on_wall, no_eliminate_on_wall),
                 idle_eliminate: flag(idle_eliminate, no_idle_eliminate),
                 gpu,
@@ -1536,5 +1666,28 @@ mod scratch_reward_tests {
         let rewards = reward_values(&agents, &[ScratchReward::BestLapTime.spec()]);
         assert!(rewards[2] > rewards[1]);
         assert!(rewards[2] > rewards[0]);
+    }
+
+    #[test]
+    fn stop_rules_use_generation_laps_and_fixed_order() {
+        let rules = StopRules {
+            score_above: Some(50.0), lap_below: Some(40.0), lapped_percent: Some(25.0), plateau: Some(2),
+            plateau_metric: PlateauMetric::Lap,
+        };
+        let mut state = StopState { best_lap: None, best_score: f64::NEG_INFINITY, stale: 0 };
+        assert_eq!(rules.check(&mut state, 0, Some(41.0), 10.0, 1, 10, false), None);
+        // The all-time best lap does not satisfy lap_below; a later slower generation must not stop.
+        let reason = rules.check(&mut state, 1, Some(40.0), 60.0, 5, 10, false).unwrap();
+        assert_eq!(reason, json!({"condition": "lap_below", "generation": 1, "value": 40.0, "threshold": 40.0}));
+        assert_eq!(rules.check(&mut state, 2, Some(41.0), 60.0, 3, 10, true).unwrap()["condition"], "stop_request");
+        assert_eq!(rules.check(&mut state, 3, None, 60.0, 0, 10, false).unwrap()["condition"], "score_above");
+        let rules = StopRules { score_above: None, lap_below: None, ..rules };
+        assert_eq!(rules.check(&mut state, 4, Some(45.0), 0.0, 3, 10, false).unwrap()["condition"], "lapped_percent");
+        // Slower laps and lapless generations are stale; state.stale is 5 by now.
+        let rules = StopRules { lapped_percent: None, ..rules };
+        let reason = rules.check(&mut state, 5, Some(39.0), 0.0, 1, 10, false);
+        assert_eq!(reason, None, "a faster lap resets the plateau");
+        assert_eq!(rules.check(&mut state, 6, Some(39.0), 0.0, 1, 10, false), None, "ties do not improve");
+        assert_eq!(rules.check(&mut state, 7, None, 0.0, 0, 10, false).unwrap()["metric"], "lap");
     }
 }

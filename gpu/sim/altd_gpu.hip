@@ -211,37 +211,120 @@ __global__ void sensor_kernel(World w, VehicleDesc v, Sensors s, ReadMask m, Car
 }
 
 // `Network::forward_into` for the reading cars, then Controls(**outputs).
-// LANES lanes per car, one per neuron of the layer; each lane adds its
-// products in input order, then the bias, as the CPU does.
+// A block holds CARS_PER_BLOCK cars. Within a layer of `cols` outputs, thread
+// t computes output t % cols of the block's car t / cols, so the block's
+// CARS_PER_BLOCK * cols outputs occupy the first threads and the waves past
+// them skip the layer entirely. With one car per LANES threads, a 12-, 8- or
+// 5-wide layer would leave 4, 8 or 11 idle lanes in every wave, and idle
+// lanes still cost the double-precision issue slots that bound this kernel.
+// Each output adds its products in input order, then the bias, as the CPU does.
 constexpr int LANES = 16;
 constexpr int CARS_PER_BLOCK = 16;
-// One car per LANES lanes of the block; every lane must call it (barriers).
+// ALTD_FORWARD_DIAG (timing builds only, results are wrong): 1 skips the
+// activation, 2 reads one weight row for every input (no weight traffic),
+// 3 skips the products and applies the activation to an input, 4 skips both
+// (the layer loop's own cost), 5 additionally drops the per-layer barriers.
+#ifndef ALTD_FORWARD_DIAG
+#define ALTD_FORWARD_DIAG 0
+#endif
+#if ALTD_FORWARD_DIAG == 5
+#define FORWARD_LAYER_BARRIER() ((void)0)
+#else
+#define FORWARD_LAYER_BARRIER() __syncthreads()
+#endif
+// Weight rows are loaded ROW_CHUNK at a time, one chunk ahead of the products
+// that use them, and a layer's first chunk and bias during the previous
+// layer's activation. Every row's weights are a fresh cache line streamed
+// from memory, so without the lookahead each row waits for its own load.
+constexpr uint32_t ROW_CHUNK = 8;
+
+// Rows first .. first + ROW_CHUNK - 1 of output j (zero past `rows` or when
+// not `active`; nothing is read there).
+__device__ inline void load_rows(double (&w)[ROW_CHUNK], const double* __restrict__ matrix, uint32_t rows, uint32_t cols, uint32_t j,
+                                 uint32_t first, bool active) {
+#pragma unroll
+    for (uint32_t u = 0; u < ROW_CHUNK; u++) {
+        bool have = active && first + u < rows;
+#if ALTD_FORWARD_DIAG == 2
+        w[u] = have ? matrix[j] : 0.0;
+#else
+        w[u] = have ? matrix[(size_t)(first + u) * cols + j] : 0.0;
+#endif
+    }
+}
+
+// Every thread of the block must call it (barriers); `car` and `live` are the
+// caller's slot (threadIdx.x / LANES).
 __device__ inline void forward_car(const NetShape& shape, const double* __restrict__ params, size_t stride, bool live, uint32_t car,
                                    const double* __restrict__ inputs, Agent* agents) {
-    __shared__ double values[CARS_PER_BLOCK][MAX_WIDTH];
-    uint32_t slot = threadIdx.x / LANES, lane = threadIdx.x % LANES;
+    // Two activation buffers: a layer reads one and writes the other, so one
+    // barrier per layer orders the writes before the next layer's reads (the
+    // previous barrier already ordered this layer's reads before those writes).
+    // Row stride of MAX_WIDTH + 1 doubles: the cars of one wave read the same
+    // column at the same time, and rows 256 bytes apart would share LDS banks.
+    __shared__ double buffers[2][CARS_PER_BLOCK][MAX_WIDTH + 1];
+    __shared__ uint32_t slot_car[CARS_PER_BLOCK];
+    __shared__ uint32_t slot_live[CARS_PER_BLOCK];
+    uint32_t t = threadIdx.x, slot = t / LANES, lane = t % LANES;
     uint32_t n_in = shape.width[0];
-    for (uint32_t i = lane; live && i < n_in; i += LANES) values[slot][i] = inputs[(size_t)car * n_in + i];
+    if (lane == 0) {
+        slot_car[slot] = car;
+        slot_live[slot] = live;
+    }
+    for (uint32_t i = lane; live && i < n_in; i += LANES) buffers[0][slot][i] = inputs[(size_t)car * n_in + i];
     __syncthreads();
-    const double* own = params + (live ? (size_t)car * stride : 0);
+    uint32_t current = 0;  // the buffer holding this layer's inputs
+    // This thread's assignment for the current layer: car slot s, output j.
+    uint32_t rows = shape.width[0], cols = shape.width[1];
+    uint32_t s = t / cols, j = t % cols;
+    bool active = t < CARS_PER_BLOCK * cols && slot_live[s];
+    const double* matrix = active ? params + (size_t)slot_car[s] * stride : params;
+    double w[ROW_CHUNK];
+    load_rows(w, matrix, rows, cols, j, 0, active);
     size_t position = 0;
     for (uint32_t layer = 0; layer + 1 < shape.layers; layer++) {
-        uint32_t rows = shape.width[layer], cols = shape.width[layer + 1];
-        const double* matrix = own + position;
-        double out = 0.0;
-        if (live && lane < cols) {
-            double acc = 0.0;
-            for (uint32_t i = 0; i < rows; i++) acc += values[slot][i] * matrix[i * cols + lane];
-            out = game_tanh(acc + matrix[rows * cols + lane]);
+        double (&values)[CARS_PER_BLOCK][MAX_WIDTH + 1] = buffers[current];
+        double acc = 0.0, bias = 0.0, out = 0.0;
+        if (active) {
+            bias = matrix[(size_t)rows * cols + j];
+#if ALTD_FORWARD_DIAG == 3 || ALTD_FORWARD_DIAG >= 4
+            acc = values[s][j < rows ? j : 0];
+#else
+            for (uint32_t i = 0; i < rows; i += ROW_CHUNK) {
+                double next[ROW_CHUNK];
+                load_rows(next, matrix, rows, cols, j, i + ROW_CHUNK, true);
+#pragma unroll
+                for (uint32_t u = 0; u < ROW_CHUNK; u++)
+                    if (i + u < rows) acc += values[s][i + u] * w[u];
+#pragma unroll
+                for (uint32_t u = 0; u < ROW_CHUNK; u++) w[u] = next[u];
+            }
+#endif
         }
-        __syncthreads();
-        if (live && lane < cols) values[slot][lane] = out;
-        __syncthreads();
-        position += (size_t)(rows + 1) * cols;
+        // The next layer's assignment and first rows, issued before this
+        // layer's activation so their latency overlaps it.
+        bool has_next = layer + 2 < shape.layers;
+        uint32_t rows_n = cols, cols_n = has_next ? shape.width[layer + 2] : 1;
+        uint32_t s_n = t / cols_n, j_n = t % cols_n;
+        bool active_n = has_next && t < CARS_PER_BLOCK * cols_n && slot_live[s_n];
+        size_t position_n = position + (size_t)(rows + 1) * cols;
+        const double* matrix_n = active_n ? params + (size_t)slot_car[s_n] * stride + position_n : params;
+        load_rows(w, matrix_n, rows_n, cols_n, j_n, 0, active_n);
+        if (active) {
+#if ALTD_FORWARD_DIAG == 1 || ALTD_FORWARD_DIAG >= 4
+            out = acc + bias;
+#else
+            out = game_tanh(acc + bias);
+#endif
+        }
+        if (active) buffers[current ^ 1][s][j] = out;
+        FORWARD_LAYER_BARRIER();
+        current ^= 1;
+        rows = rows_n; cols = cols_n; s = s_n; j = j_n; active = active_n; matrix = matrix_n; position = position_n;
     }
     if (live && lane < 5) {
         int32_t src = shape.control_src[lane];
-        agents[car].controls[lane] = src >= 0 ? values[slot][src] : 0.0;
+        agents[car].controls[lane] = src >= 0 ? buffers[current][slot][src] : 0.0;
     }
 }
 
@@ -560,13 +643,33 @@ int altd_gpu_sim_networks(Sim* s, uint32_t layers, const uint32_t* width, uint32
 }
 
 // One thread per parameter preserves the CPU's left-to-right population sum.
-// Neighboring threads read neighboring parameters of each network.
-__global__ void population_mean_kernel(const double* params, size_t stride, uint32_t n, double* mean) {
-    size_t j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= stride) return;
+// Only `stride` such threads exist (a few dozen waves), so with one load in
+// flight per add the population's 8 bytes x n x stride stream far below the
+// memory bandwidth. Each block therefore stages MEAN_ROWS networks' slice of
+// its MEAN_COLS parameters in LDS with all MEAN_THREADS threads loading
+// (coalesced rows, many loads in flight), then the MEAN_COLS summing threads
+// add the staged rows in ascending network order, exactly as before.
+constexpr uint32_t MEAN_COLS = 64, MEAN_ROWS = 64, MEAN_THREADS = 256;
+
+__global__ void __launch_bounds__(MEAN_THREADS)
+population_mean_kernel(const double* params, size_t stride, uint32_t n, double* mean) {
+    __shared__ double tile[MEAN_ROWS][MEAN_COLS + 1];
+    uint32_t t = threadIdx.x;
+    size_t col0 = (size_t)blockIdx.x * MEAN_COLS;
+    bool sums = t < MEAN_COLS && col0 + t < stride;
     double sum = 0.0;
-    for (uint32_t i = 0; i < n; i++) sum += params[(size_t)i * stride + j];
-    mean[j] = sum / (double)n;
+    for (uint32_t row0 = 0; row0 < n; row0 += MEAN_ROWS) {
+        uint32_t rows = min(MEAN_ROWS, n - row0);
+        for (uint32_t e = t; e < rows * MEAN_COLS; e += MEAN_THREADS) {
+            uint32_t r = e / MEAN_COLS, c = e % MEAN_COLS;
+            if (col0 + c < stride) tile[r][c] = params[(size_t)(row0 + r) * stride + col0 + c];
+        }
+        __syncthreads();
+        if (sums)
+            for (uint32_t r = 0; r < rows; r++) sum += tile[r][t];
+        __syncthreads();
+    }
+    if (sums) mean[col0 + t] = sum / (double)n;
 }
 
 // Parallelize the expensive pow calls, then add their results in the exact
@@ -592,7 +695,7 @@ population_novelty_kernel(const double* params, size_t stride, const double* mea
 int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
     if (n != s->network_count || !s->params) return -1;
     if (n == 0) return 0;
-    population_mean_kernel<<<blocks(s->stride, 128), 128, 0, s->stream>>>(s->params, s->stride, n, s->mean);
+    population_mean_kernel<<<blocks(s->stride, MEAN_COLS), MEAN_THREADS, 0, s->stream>>>(s->params, s->stride, n, s->mean);
     population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->params, s->stride, s->mean, s->novelty);
     CHECK(hipGetLastError());
     CHECK(hipMemcpyAsync(novelty, s->novelty, sizeof(double) * n, hipMemcpyDeviceToHost, s->stream));

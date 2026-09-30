@@ -285,6 +285,32 @@ fn mutate_xavier_with(mut network: Network, rate: f64, normalize: bool, normals:
     network
 }
 
+/// `mutate_xavier_with` followed by `weight_decay` for a child that is a
+/// plain copy of `source` (crossover "none"): the copy, the mutation and the
+/// decay are one pass writing a fresh vector, instead of a clone and two
+/// read-modify-write passes. Each parameter sees the same operations in the
+/// same order: `p + (0.0 + z * deviation)`, then `* (1.0 - decay)` if decay
+/// is positive.
+fn mutated_copy(source: &Network, rate: f64, normalize: bool, normals: &[f64], decay: f64) -> Network {
+    let scale = rate * if normalize { mutation_factor(source, "xavier") } else { 1.0 };
+    let keep = 1.0 - decay;
+    let finish = move |v: f64| if decay > 0.0 { v * keep } else { v };
+    let mut params = Vec::with_capacity(source.params.len());
+    let mut position = 0;
+    for w in source.shape.windows(2) {
+        let (inputs, outputs) = (w[0], w[1]);
+        let deviation = (2.0 / (inputs + outputs) as f64).sqrt() * scale;
+        let weights = position..position + inputs * outputs;
+        params.extend(source.params[weights.clone()].iter().zip(&normals[weights]).map(|(&p, &z)| finish(p + (0.0 + z * deviation))));
+        position += inputs * outputs;
+        let bias_deviation = 0.1 * scale;
+        let biases = position..position + outputs;
+        params.extend(source.params[biases.clone()].iter().zip(&normals[biases]).map(|(&p, &z)| finish(p + (0.0 + z * bias_deviation))));
+        position += outputs;
+    }
+    Network { shape: source.shape.clone(), params }
+}
+
 pub fn weight_decay(mut network: Network, rate: f64) -> Network {
     if rate > 0.0 {
         let keep = 1.0 - rate;
@@ -394,41 +420,140 @@ pub(crate) fn reproduce_with_scratch(agents: &[AgentResult], settings: &Evolutio
     let preserved: Vec<Network> =
         ranked(&scores).into_iter().take(size.min(settings.population)).map(|i| agents[i].network.clone()).collect();
     profile.mark("selection");
-    let children = cross(&selected, settings.population.saturating_sub(preserved.len()), &settings.crossover, rng);
+    let count = settings.population.saturating_sub(preserved.len());
+    // Crossover "none" copies parents in order without random decisions; that
+    // copy is folded into the mutation pass below instead of materialized.
+    // Other algorithms build the children here, consuming the stream as before.
+    let copies = settings.crossover == "none";
+    if copies && count > 0 { assert!(!selected.is_empty(), "selection produced no parents"); }
+    let crossed: Vec<Network> = if copies { Vec::new() } else { cross(&selected, count, &settings.crossover, rng) };
+    let source = |i: usize| -> &Network { if copies { selected[i % selected.len()] } else { &crossed[i] } };
     profile.mark("crossover");
     let preserved_count = preserved.len();
     let mut networks = preserved;
     // Children draw their mutation noise one after another from the shared
     // stream; draw it all in order, then mutate the children in parallel.
     let mut draws = 0;
-    let offsets: Vec<usize> = children
-        .iter()
-        .map(|child| {
+    let offsets: Vec<usize> = (0..count)
+        .map(|i| {
             let start = draws;
             if settings.mutation_rate > 0.0 {
-                draws += child.params.len();
+                draws += source(i).params.len();
             }
             start
         })
         .collect();
     rng.standard_normals_into(draws, normals);
     profile.mark("normal_draws");
-    let mutated: Vec<Network> = children
-        .into_par_iter()
-        .zip(offsets)
-        .map(|(child, start)| {
-            let child = if settings.mutation_rate > 0.0 {
-                let normals = &normals[start..start + child.params.len()];
-                mutate_xavier_with(child, settings.mutation_rate, settings.adaptive_mutation, normals)
-            } else {
-                child
-            };
-            weight_decay(child, settings.weight_decay)
-        })
-        .collect();
+    let mutate = |child: Network, start: usize| {
+        let child = if settings.mutation_rate > 0.0 {
+            let normals = &normals[start..start + child.params.len()];
+            mutate_xavier_with(child, settings.mutation_rate, settings.adaptive_mutation, normals)
+        } else {
+            child
+        };
+        weight_decay(child, settings.weight_decay)
+    };
+    let mutated: Vec<Network> = if copies {
+        (0..count)
+            .into_par_iter()
+            .zip(offsets)
+            .map(|(i, start)| {
+                let parent = source(i);
+                if settings.mutation_rate > 0.0 {
+                    let normals = &normals[start..start + parent.params.len()];
+                    mutated_copy(parent, settings.mutation_rate, settings.adaptive_mutation, normals, settings.weight_decay)
+                } else {
+                    weight_decay(parent.clone(), settings.weight_decay)
+                }
+            })
+            .collect()
+    } else {
+        crossed.into_par_iter().zip(offsets).map(|(child, start)| mutate(child, start)).collect()
+    };
     networks.extend(mutated);
     profile.mark("mutation");
     Generation { networks, preserved_count, rewards: scores }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-fusion reproduction: clone every child, then mutate and decay it in place.
+    fn reproduce_reference(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom) -> Generation {
+        let scores = reward_values(agents, &settings.rewards);
+        let selected = select(agents, &scores, settings, rng);
+        let size = match settings.preserve_parents.as_str() {
+            "off" => 0,
+            "on_selection_size" => settings.selection_size,
+            "on_custom" => settings.preserve_parents_size,
+            other => panic!("unknown parent preservation mode: {other}"),
+        };
+        let preserved: Vec<Network> =
+            ranked(&scores).into_iter().take(size.min(settings.population)).map(|i| agents[i].network.clone()).collect();
+        let children = cross(&selected, settings.population.saturating_sub(preserved.len()), &settings.crossover, rng);
+        let preserved_count = preserved.len();
+        let mut networks = preserved;
+        for child in children {
+            let child = if settings.mutation_rate > 0.0 { mutate_xavier(&child, settings.mutation_rate, rng, settings.adaptive_mutation) } else { child };
+            networks.push(weight_decay(child, settings.weight_decay));
+        }
+        Generation { networks, preserved_count, rewards: scores }
+    }
+
+    #[test]
+    fn fused_copy_mutation_matches_sequential_reproduction() {
+        let shape = [6, 5, 4];
+        let mut seed = PyRandom::new(3);
+        let networks: Vec<Network> = (0..37).map(|_| Network::xavier(&shape, &mut seed)).collect();
+        let agents: Vec<AgentResult> = networks
+            .iter()
+            .enumerate()
+            .map(|(i, network)| {
+                let mut metrics: Metrics = [None; 14];
+                metrics[0] = Some(((i * 7919) % 23) as f64 * 0.5);
+                AgentResult { network, metrics, update_count: 10 + i as u64 }
+            })
+            .collect();
+        let mut variants = Vec::new();
+        for crossover in ["none", "single_point", "uniform"] {
+            for (mutation_rate, adaptive, weight_decay) in [(0.0, false, 0.0), (0.3, false, 0.0), (0.3, true, 0.0005000000237487257), (1e-9, true, 0.0)] {
+                for (selection_algorithm, preserve_parents, population) in [("best", "on_selection_size", 40), ("tournament", "on_custom", 33), ("roulette", "off", 5)] {
+                    variants.push(EvolutionSettings {
+                        population,
+                        selection_algorithm: selection_algorithm.into(),
+                        selection_size: 3,
+                        crossover: crossover.into(),
+                        mutation_rate,
+                        adaptive_mutation: adaptive,
+                        weight_decay,
+                        preserve_parents: preserve_parents.into(),
+                        preserve_parents_size: 2,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        let mut scratch = vec![f64::NAN; 5];
+        for (v, settings) in variants.iter().enumerate() {
+            let (mut a, mut b) = (PyRandom::new(11 + v as i64), PyRandom::new(11 + v as i64));
+            a.gauss(1.0); // a cached normal must survive both paths identically
+            b.gauss(1.0);
+            let expected = reproduce_reference(&agents, settings, &mut a);
+            let actual = reproduce_with_scratch(&agents, settings, &mut b, &mut scratch);
+            assert_eq!(actual.preserved_count, expected.preserved_count, "variant {v}");
+            assert_eq!(actual.rewards, expected.rewards, "variant {v}");
+            assert_eq!(actual.networks.len(), expected.networks.len(), "variant {v}");
+            for (i, (x, y)) in actual.networks.iter().zip(&expected.networks).enumerate() {
+                assert_eq!(x.shape, y.shape);
+                let (xb, yb): (Vec<u64>, Vec<u64>) = (x.params.iter().map(|p| p.to_bits()).collect(), y.params.iter().map(|p| p.to_bits()).collect());
+                assert_eq!(xb, yb, "variant {v} network {i}");
+            }
+            assert_eq!(a.to_json(), b.to_json(), "variant {v}: generator state");
+            assert_eq!(a.gauss(1.0).to_bits(), b.gauss(1.0).to_bits(), "variant {v}: next draw");
+        }
+    }
 }
 
 /// Reproduction using the original game's independent decision/normal streams.

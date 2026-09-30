@@ -57,6 +57,19 @@ Selection, crossover and mutation still run on the CPU. Python-compatible random
 
 The CPU owns the installed population and resets vehicles as before, so checkpoint serialization and CPU/GPU resume remain compatible. Rebuild the HIP library along with the Rust executable when updating these APIs.
 
+Host-side work between windows avoids population-sized copies where the result cannot depend on them:
+
+- Car and agent state is exported into staging vectors that the simulator retains between windows (`export_state_into`), filled in place by an indexed parallel loop. The previous per-window `collect` allocated, page-faulted and concatenated fresh vectors of 3,200 bytes per car.
+- With crossover `none`, each child is written once as `parent + noise` (then decayed), instead of cloning the parent and mutating the clone in place. The per-parameter operations and their order are unchanged (`p + (0.0 + z * deviation)`, then `* (1.0 - decay)` when the decay is positive).
+- `next_generation_gpu` hands the offspring to the new agents instead of cloning each network into its agent; it returns the selection summary (`Turnover`) and the installed networks are read from the agents.
+- `standard_normals_into` transforms each block of 65,536 uniform draws on the thread pool while the sequential generator fills the next block. Blocks see the same draws as one call over the whole range, and each pair is transformed on its own, so the values and the generator state are unchanged. The `ALTD_TRAIN_PROFILE` stage `normal_draws` now reports one phase, `draws_and_transform`.
+
+Kernel changes that keep every operation and its order: the forward pass pads its shared activation rows to avoid LDS bank conflicts between the cars of a wave; `step_begin` evaluates `godot_ease` once per distinct handbrake input instead of once per wheel; `step_end` computes the car frame only when a broad pair pushes; the SAT loops leave at the shape's point count instead of predicating the remaining iterations; and the population mean stages network rows in LDS with all threads loading, then adds them per parameter in the original network order.
+
+The forward kernel packs a layer's outputs densely across the block's cars (thread `t` computes output `t % cols` of car `t / cols`), so the waves past the block's `16 * cols` outputs skip the layer instead of every wave carrying idle lanes in the 12-, 8- and 5-wide layers. Weight rows are loaded eight at a time, one chunk ahead of the products that use them, and a layer's first chunk and bias are issued during the previous layer's activation: every row's weights are a fresh cache line from memory, and without the lookahead each row waited for its own load. The products are still added in input order. Activations alternate between two LDS buffers, so a layer needs one barrier instead of two. `-DALTD_FORWARD_DIAG=1|2|3|4|5` builds timing-only variants without the activation, without weight traffic, or without the products (`gpu/profile.sh` level 5 runs them).
+
+`game_tanh` on the device is branch-free: one `expm1` evaluation per lane on a selected argument, then selects, the scalar form of `tanh4` in `src/network_simd.rs`. The scalar version with one branch per range made a wave whose lanes fall in different ranges execute every taken branch, up to three inlined `expm1` evaluations per layer at the 1/32 double-precision rate. `-DALTD_TANH_BRANCHY` restores the scalar version for comparison; `gpu_check math` compares either against the CPU over millions of inputs including every threshold and special value.
+
 ### Split collision step
 
 The step splits into three kernels so that collision checks run in parallel:
@@ -90,6 +103,8 @@ ALTD_GPU_NETWORK=formula_network_template.json ALTD_GPU_MODEL=formula_trained_mo
 `schedules` checks partial windows, uneven populations, inference batch wrapping and statistics phases. `reuse` changes population and network shape while retaining the same GPU simulator, and checks graph reuse after replacing network weights.
 
 `novelty` checks the GPU population calculations against CPU results across network shapes and population sizes. `turnover` compares consecutive CPU/GPU generations, offspring parameters and complete RNG states across selection and crossover modes, both RNG backends, mutation settings and population resizing.
+
+`target/release/examples/host_bench` times the CPU stages of the GPU loop (state export, reproduction, installation) on the self-contained Autumn 04 fixture without a GPU; `ALTD_BENCH_CARS` sets the population.
 
 ## Repeatable benchmarks
 

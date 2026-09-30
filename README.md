@@ -29,7 +29,7 @@ Other commands are `train`, `compare-trace`, `compare-one-step`, `compare-closed
 
 `train-scratch` defaults to B06 Hard, 8,192 cars, 50,000 generations, and a 5,400-tick time limit. It starts with a random Xavier network of shape `20,16,16,16,16,12,12,8,5`. The network template supplies input/output names; its weights are ignored unless supplied through `--init-network`.
 
-Evolution defaults are tournament selection of 20 parents, no crossover, four preserved parents, adaptive mutation, no weight decay, and reward `total_score` multiplied by 100. Mutation decays geometrically from `--mutation-start 0.4` to `--mutation-end 0.0125`; `--schedule linear` selects a linear decay. `--generations` is the total target generation count, including when resuming. The resumed generation's mutation rate is calculated from the newly supplied schedule.
+Evolution defaults are tournament selection of 20 parents, no crossover, four preserved parents, adaptive mutation, no weight decay, and reward `total_score` multiplied by 100. Mutation decays geometrically from `--mutation-start 0.4` to `--mutation-end 0.0125`; `--schedule linear` selects a linear decay. `--generations` is the total target generation count, including when resuming. The resumed generation's mutation rate is calculated from the newly supplied schedule. Generations after the schedule's end use `--mutation-end`.
 
 `--reward distance` selects for distance along the track, the existing `total_score` metric. `--reward best-lap-time` selects for faster completed laps using `best_lap_performance`, the reciprocal of the car's best lap time. Explicit `--reward` replaces any rewards in `--settings`; when omitted, settings-file rewards are preserved, with distance as the default.
 
@@ -61,7 +61,22 @@ Each generation prints lap and score summaries. Lap crossings are interpolated w
 | `best_laps/gNNNNN_T.TTs.json`, `best.json` | Networks that set a new best lap, with input/output names and training metadata |
 | `checkpoint.json`, `checkpoint_gNNNNN.bin` | Population parameters, shape, population size, RNG state, generation, and best-lap record |
 
-Checkpoints are written at generation boundaries every `--checkpoint-every` generations, default 100. Zero disables checkpointing. Resuming replays work after the latest checkpoint, truncating the corresponding log entries.
+Checkpoints are written at generation boundaries every `--checkpoint-every` generations, default 100, and after the last generation when training stops on its own. Zero disables checkpointing. Resuming replays work after the latest checkpoint, truncating the corresponding log entries. Resuming a final checkpoint with a higher `--generations` continues exactly as an uninterrupted run would.
+
+### Stop conditions
+
+Training normally ends at `--generations`. These options end it earlier, after the first generation that meets any of them:
+
+| Option | Stops when |
+|---|---|
+| `--stop-score-above=S` | The generation's best distance score is at least `S` |
+| `--stop-lap-below=T` | The generation's fastest lap is at most `T` seconds |
+| `--stop-lapped-percent=P` | At least `P`% of cars completed a lap in the generation |
+| `--stop-plateau=N` | `--plateau-metric` (`lap`, the default, or `score`) has not improved for `N` generations |
+
+The plateau count starts at zero in each invocation, including a resume. For the lap metric, generations without a completed lap count as no improvement. Creating a file named `stop_request` in `--out-dir` ends training after the current generation; a request left over from before the trainer started is deleted and ignored.
+
+The last generation's checkpoint records why training ended in `stop_reason`, for example `{"condition": "lap_below", "generation": 812, "value": 38.412, "threshold": 38.5}`. The condition is one of `stop_request`, `lap_below`, `score_above`, `lapped_percent`, `plateau` (which adds `metric`), or `generations`, checked in that order. SIGTERM exits without a final checkpoint. Pass negative thresholds with `=`, as in `--stop-score-above=-100`.
 
 ## Resume with different settings
 

@@ -1,0 +1,9 @@
+  Name:                    AMD Ryzen 9 7950X 16-Core Processor
+  Marketing Name:          AMD Ryzen 9 7950X 16-Core Processor
+  Compute Unit:            32                                 
+  Name:                    gfx1100                            
+  Marketing Name:          AMD Radeon RX 7900 XTX             
+  Compute Unit:            96                                 
+  Wavefront Size:          32(0x20)                           
+      Name:                    amdgcn-amd-amdhsa--gfx1100         
+      Name:                    amdgcn-amd-amdhsa--gfx11-generic   

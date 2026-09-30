@@ -1,0 +1,24 @@
+  tick     1: live 262144/0, steps 262144/0
+  tick   601: live 262144/0, steps 262144/262144
+  tick  1201: live 262144/0, steps 262144/262144
+  tick  1801: live 262144/0, steps 262144/262144
+  tick  2401: live 262144/0, steps 262144/262144
+  tick  3001: live 262144/0, steps 262144/262144
+  tick  3601: live 262144/0, steps 262144/262144
+  tick  4201: live 262144/0, steps 262144/262144
+  tick  4801: live 262144/0, steps 262144/262144
+  tick  5401: live 262144/0, steps 262144/262144
+altd_gpu window: 5406 ticks, 262144 cars: stats 0.858 s, sensors 7.036 s, forward 24.200 s, step 5.757 s
+  ticks     1..: stats 0.083 sensors 0.501 forward 2.644 step 0.599
+  ticks   601..: stats 0.084 sensors 0.689 forward 2.671 step 0.540
+  ticks  1201..: stats 0.092 sensors 0.785 forward 2.683 step 0.582
+  ticks  1801..: stats 0.094 sensors 0.812 forward 2.699 step 0.609
+  ticks  2401..: stats 0.102 sensors 0.811 forward 2.699 step 0.655
+  ticks  3001..: stats 0.098 sensors 0.806 forward 2.694 step 0.672
+  ticks  3601..: stats 0.099 sensors 0.860 forward 2.696 step 0.655
+  ticks  4201..: stats 0.103 sensors 0.914 forward 2.695 step 0.704
+  ticks  4801..: stats 0.100 sensors 0.852 forward 2.696 step 0.734
+  ticks  5401..: stats 0.001 sensors 0.007 forward 0.022 step 0.006
+altd_gpu window: host thread cpu 37.794 s of 37.942 s wall (direct): launches 8.503 s, polls 28.510 s
+{"benchmark":"fixed_generation","cars":262144,"ticks":5406,"eliminate":false,"sample":0,"warmup":false,"seconds":39.411768012,"digest":"6ade42ca8ce33f4e","active":262144}
+ALL OK

@@ -415,6 +415,21 @@ impl TrainingAgent {
     }
 }
 
+/// Fills `cars` and `out` with the GPU state of `agents` (`Car::gpu_export`
+/// and `agent_export`) in place, resizing them to the population. Retaining
+/// the vectors between windows keeps their pages mapped, and the indexed
+/// parallel fill avoids the linked-list concatenation of a `Result` collect.
+pub fn export_state_into(agents: &[TrainingAgent], vehicle: &crate::world::VehicleConfig, surfaces: &crate::gpu_sim::SurfaceTable,
+                         cars: &mut Vec<crate::gpu_sim::GpuCar>, out: &mut Vec<crate::gpu_sim::GpuAgent>) -> Result<(), String> {
+    cars.resize(agents.len(), crate::gpu_sim::GpuCar::zeroed());
+    out.resize(agents.len(), crate::gpu_sim::GpuAgent::default());
+    agents.par_iter().zip(cars.par_iter_mut()).zip(out.par_iter_mut()).try_for_each(|((a, c), g)| {
+        *c = a.car.gpu_export(vehicle, surfaces)?;
+        *g = crate::gpu_sim::agent_export(a)?;
+        Ok::<(), String>(())
+    })
+}
+
 /// Which output slot of `Controls` each network output feeds.
 #[derive(Clone, Copy, Debug)]
 enum ControlSlot {
@@ -586,10 +601,11 @@ impl TrainingRunner {
     }
 
     fn install(&mut self, networks: &[Network], reused: bool) {
-        self.install_with_novelty(networks, reused, None);
+        self.install_with_novelty(networks.par_iter().cloned().collect(), reused, None);
     }
 
-    fn install_with_novelty(&mut self, networks: &[Network], reused: bool, novelty: Option<&[f64]>) {
+    /// Installs `networks`, which the new agents take over without copying.
+    fn install_with_novelty(&mut self, networks: Vec<Network>, reused: bool, novelty: Option<&[f64]>) {
         let mut profile = crate::training_profile::Profile::new("install");
         assert!(!networks.is_empty(), "a training generation needs at least one network");
         if let Some(values) = novelty { assert_eq!(values.len(), networks.len()); }
@@ -610,7 +626,7 @@ impl TrainingRunner {
             else { Car::new(world, position, rotation) }
         }).collect();
         profile.mark("vehicles");
-        self.agents = cars.into_par_iter().zip(networks.par_iter()).enumerate()
+        self.agents = cars.into_par_iter().zip(networks.into_par_iter()).enumerate()
             .map(|(i, (mut car, network))| {
                 // VehicleManager resets both new and reused instances.
                 car.queue_reset(position, rotation);
@@ -618,7 +634,7 @@ impl TrainingRunner {
                     network.params.iter().zip(&mean).map(|(&a, &b)| crate::double_math::pow(a - b, 2.0)).fold(0.0,|a,b|a+b).sqrt(),
                     |values| values[i]);
                 TrainingAgent {
-                    network: network.clone(),
+                    network,
                     car,
                     stats: TrainingStats::new(novelty),
                     controls: Controls::default(),
@@ -826,6 +842,13 @@ impl TrainingRunner {
     /// room for `capacity` agents.
     pub fn gpu_sim<'a>(&self, world: &crate::gpu::GpuWorld<'a>, capacity: usize) -> Result<crate::gpu_sim::GpuSim<'a>, String> {
         let vehicle = crate::gpu_sim::vehicle_desc(&self.world.vehicle)?;
+        // The GPU path sensors sample the Curve2D only; without track.curve the
+        // CPU falls back to the baked path, which the GPU does not implement.
+        let path_sensor = self.layout.sensors.iter().any(|s| matches!(s, Sensor::CorrectDirection | Sensor::TrackCurvature { .. }));
+        if path_sensor && self.world.track.curve.is_none() && self.world.track.path.len() >= 2 {
+            return Err("the scene has no track.curve (Curve2D control points), which the correct_direction and \
+                        track_curvature sensors need on the GPU; add the curve to the scene or train without --gpu".into());
+        }
         let sensors: Vec<_> = self.layout.sensors.iter().map(crate::gpu_sim::sensor_desc).collect();
         Ok(crate::gpu_sim::GpuSim::new(world, &vehicle, &sensors, capacity))
     }
@@ -868,8 +891,10 @@ impl TrainingRunner {
             profile.mark("networks");
             sim.network_tag = Some(self.generation);
         }
-        let mut cars = self.agents.par_iter().map(|a| a.car.gpu_export(vehicle, surfaces)).collect::<Result<Vec<_>, _>>()?;
-        let mut agents = self.agents.par_iter().map(agent_export).collect::<Result<Vec<_>, _>>()?;
+        // Retained staging buffers: filling them in place avoids allocating,
+        // page-faulting and concatenating population-sized vectors per window.
+        let (mut cars, mut agents) = sim.take_state_buffers();
+        export_state_into(&self.agents, vehicle, surfaces, &mut cars, &mut agents)?;
         profile.mark("export_state");
         sim.upload(&cars, Some(&agents));
         profile.mark("upload_state");
@@ -891,16 +916,24 @@ impl TrainingRunner {
         // The upload has finished. Read back into the same allocations.
         sim.download(Some(&mut cars), Some(&mut agents));
         profile.mark("download_state");
-        self.agents.par_iter_mut().zip(&cars).zip(&agents).try_for_each(|((a, c), g)| {
-            a.car.gpu_import(c, surfaces)?;
-            agent_import(g, a);
-            Ok::<(), String>(())
-        })?;
+        self.import_state(&cars, &agents, surfaces)?;
         profile.mark("import_state");
+        sim.return_state_buffers(cars, agents);
         let bpt = self.batches_per_tick();
         self.tick += executed;
         self.batch_index = (self.batch_index + ((executed as usize - transition_without_drive as usize) % 8) * bpt) % 8;
         Ok(executed)
+    }
+
+    /// The rest of `gpu_import` for the whole population: `cars` and `agents`
+    /// hold what `advance_window_gpu` read back.
+    fn import_state(&mut self, cars: &[crate::gpu_sim::GpuCar], agents: &[crate::gpu_sim::GpuAgent],
+                    surfaces: &crate::gpu_sim::SurfaceTable) -> Result<(), String> {
+        self.agents.par_iter_mut().zip(cars).zip(agents).try_for_each(|((a, c), g)| {
+            a.car.gpu_import(c, surfaces)?;
+            crate::gpu_sim::agent_import(g, a);
+            Ok::<(), String>(())
+        })
     }
 
     fn schedule_for(&self, count: usize) -> Schedule<'_> {
@@ -982,26 +1015,118 @@ impl TrainingRunner {
     }
 
     /// Reproduce with the same RNG stream, then compute population novelty on
-    /// the GPU. Uploaded offspring stay in place for the next driving window.
-    pub fn next_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim) -> Result<Generation, String> {
+    /// the GPU. Uploaded offspring stay in place for the next driving window,
+    /// and the new agents take over the offspring networks without a copy
+    /// (read them from `agents`; only the selection summary is returned).
+    pub fn next_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim) -> Result<Turnover, String> {
         let mut profile = crate::training_profile::Profile::new("gpu_turnover");
         // The preceding upload is complete, so its host buffer can hold noise
         // until reproduction finishes. Refilling it then uploads the offspring.
         let mut scratch = sim.take_parameter_buffer();
         let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        let generation = self.rng.reproduce_with_scratch(&results, &self.settings, &mut scratch);
+        let Generation { networks, preserved_count, rewards } = self.rng.reproduce_with_scratch(&results, &self.settings, &mut scratch);
         sim.return_parameter_buffer(scratch);
         profile.mark("reproduce");
         let src = std::array::from_fn(|c| self.outputs.iter().rposition(|&slot| slot as usize == c).map_or(-1, |j| j as i32));
-        sim.upload_networks(&generation.networks, src)?;
+        sim.upload_networks(&networks, src)?;
         profile.mark("networks");
         let novelty = sim.novelty();
         profile.mark("novelty");
-        self.install_with_novelty(&generation.networks, true, Some(&novelty));
+        self.install_with_novelty(networks, true, Some(&novelty));
         self.stats_phase = 0;
         self.generation += 1;
         sim.network_tag = Some(self.generation);
         profile.mark("install");
-        Ok(generation)
+        Ok(Turnover { preserved_count, rewards })
+    }
+}
+
+/// The selection summary of a GPU turnover (`Generation` without the
+/// offspring, which the installed agents own).
+pub struct Turnover {
+    pub preserved_count: usize,
+    pub rewards: Vec<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(path: &str) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// A self-contained fixture: Autumn 04 with the formula vehicle.
+    fn autumn_runner(population: usize) -> TrainingRunner {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let scene = load(&format!("{root}/scenes_exact/autumn_04_formula_scene.json"));
+        let template = load(&format!("{root}/formula_network_template.json"));
+        let model = load(&format!("{root}/formula_trained_model_exact.json"));
+        let spawn = &load(&format!("{root}/traces/autumn_04_spawn.json"))["frames"][0];
+        let outputs: Vec<String> = template["outputs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect();
+        let settings = EvolutionSettings { population, selection_size: 3, preserve_parents_size: 2, mutation_rate: 0.3, weight_decay: 0.0, ..Default::default() };
+        TrainingRunner::new(
+            Arc::new(World::from_scene(&scene)), crate::world::vector(&spawn["position"]), spawn["rotation"].as_f64().unwrap(),
+            SensorLayout::from_exports(&template, &model), &outputs, settings, PyRandom::new(5), 2, 0, true, true,
+        )
+    }
+
+    fn agent_state(a: &TrainingAgent) -> String {
+        let c = &a.car;
+        format!("{:?} {:?} {:?} {:?} {} {} {} {:?} {:?} {:?} {:?} {:?}",
+            c.position, c.velocity, c.acceleration, c.body_basis, c.active, c.tick, c.collision_count, c.wheels,
+            a.controls, a.pending_contact, a.deactivated_at, a.stats)
+    }
+
+    /// Installing owned networks must leave the same agents as the cloning
+    /// path, including reused vehicles, statistics and network ownership.
+    #[test]
+    fn owned_install_matches_cloning_install() {
+        let mut a = autumn_runner(24);
+        let mut b = autumn_runner(24);
+        let seed = Network::xavier(&[20, 16, 5], &mut PyRandom::new(9));
+        a.start(&seed);
+        b.start(&seed);
+        a.advance(90, false);
+        b.advance(90, false);
+        let results: Vec<AgentResult> = a.agents.iter().map(TrainingAgent::result).collect();
+        let generation = a.rng.clone().reproduce(&results, &a.settings);
+        a.install(&generation.networks, true);
+        b.install_with_novelty(generation.networks.clone(), true, None);
+        assert_eq!(a.agents.len(), b.agents.len());
+        for (x, y) in a.agents.iter().zip(&b.agents) {
+            assert_eq!(x.network, y.network);
+            assert_eq!(agent_state(x), agent_state(y));
+        }
+        // With supplied novelty values the same agents result, novelty aside.
+        let novelty: Vec<f64> = (0..generation.networks.len()).map(|i| i as f64 * 0.25).collect();
+        let mut c = autumn_runner(24);
+        c.start(&seed);
+        c.advance(90, false);
+        c.install_with_novelty(generation.networks.clone(), true, Some(&novelty));
+        for (i, (x, y)) in a.agents.iter().zip(&c.agents).enumerate() {
+            assert_eq!(x.network, y.network);
+            assert_eq!(y.stats.network_novelty, novelty[i]);
+            let mut stats = y.stats.clone();
+            stats.network_novelty = x.stats.network_novelty;
+            assert_eq!(format!("{:?}", x.stats), format!("{stats:?}"));
+        }
+    }
+
+    /// The retained export buffers hold exactly what per-agent exports produce.
+    #[test]
+    fn export_state_into_matches_per_agent_export() {
+        let mut runner = autumn_runner(24);
+        runner.start(&Network::xavier(&[20, 16, 5], &mut PyRandom::new(9)));
+        runner.advance(150, false);
+        let surfaces = crate::gpu_sim::SurfaceTable::new(&runner.world.vehicle);
+        let (mut cars, mut agents) = (vec![crate::gpu_sim::GpuCar::zeroed(); 3], Vec::new());
+        export_state_into(&runner.agents, &runner.world.vehicle, &surfaces, &mut cars, &mut agents).unwrap();
+        assert_eq!((cars.len(), agents.len()), (24, 24));
+        for (i, a) in runner.agents.iter().enumerate() {
+            let car = a.car.gpu_export(&runner.world.vehicle, &surfaces).unwrap();
+            assert_eq!(format!("{:?}", cars[i]), format!("{car:?}"));
+            assert_eq!(format!("{:?}", agents[i]), format!("{:?}", crate::gpu_sim::agent_export(a).unwrap()));
+        }
     }
 }

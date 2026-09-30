@@ -1,0 +1,4 @@
+{"benchmark":"fixed_generation","cars":8192,"ticks":462,"eliminate":true,"sample":0,"warmup":true,"seconds":0.178188297,"digest":"3e8b9d70a06e1fd2","active":0}
+{"benchmark":"fixed_generation","cars":8192,"ticks":462,"eliminate":true,"sample":1,"warmup":false,"seconds":0.139392239,"digest":"3e8b9d70a06e1fd2","active":0}
+{"benchmark":"fixed_generation","cars":8192,"ticks":462,"eliminate":true,"sample":2,"warmup":false,"seconds":0.139780667,"digest":"3e8b9d70a06e1fd2","active":0}
+ALL OK

@@ -388,7 +388,11 @@ __device__ inline double game_expm1(double x) {
     double inverse = dfrom((uint64_t)(0x3ff - k) << 52);
     return k < 20 ? (x - e + (1.0 - inverse)) * twopk : (x - (e + inverse) + 1.0) * twopk;
 }
-__device__ inline double game_tanh(double value) {
+// The scalar tanh, one branch per range. A wave whose lanes fall in different
+// ranges executes every taken branch in turn, and the three expm1 call sites
+// are inlined separately, so the double-precision work (1/32 rate on RDNA3)
+// runs up to three times per layer. Kept for comparison: -DALTD_TANH_BRANCHY.
+__device__ inline double game_tanh_branchy(double value) {
     double x = fabs(value);
     uint32_t high = (uint32_t)(dbits(x) >> 32);
     double t;
@@ -401,6 +405,89 @@ __device__ inline double game_tanh(double value) {
         double u = game_expm1(-2.0 * x); t = -u / (u + 2.0);
     } else t = x;
     return signbit(value) ? -t : t;
+}
+
+// ---- branch-free game_tanh ------------------------------------------------
+// One expm1 evaluation per lane on a selected argument, then selects, so the
+// lanes of a wave never serialize the tanh ranges or the expm1 cases. Each
+// lane's selected expression is exactly what the scalar code evaluates on
+// that path; unselected values are computed and dropped. This is the scalar
+// form of `tanh4`/`expm1_tanh` in src/network_simd.rs, whose CPU tests
+// compare it with the scalar functions bit for bit over every branch,
+// threshold and special value.
+
+// 2^k by exponent-field arithmetic, as the scalar code.
+__device__ inline double pow2_of(int32_t k) {
+    return dfrom((uint64_t)(int64_t)(k + 0x3ff) << 52);
+}
+
+// `game_expm1` for the arguments `game_tanh` selects: finite, below 709.78
+// when positive, so the overflow block of the scalar code never returns early.
+// The integer k is kept as an integer for its comparisons and powers of two
+// (the scalar code's `k as f64` only enters the two reduction products).
+__device__ inline double expm1_lane(double x) {
+    uint32_t h = (uint32_t)(dbits(x) >> 32) & 0x7fffffffu;
+    bool negative = signbit(x);
+    bool reduce = h > 0x3fd62e42u, tiny = h < 0x3c900000u, near = h < 0x3ff0a2b2u;
+    // k = +-1 near ln 2, else trunc(x / ln 2 +- 0.5); 0 without reduction.
+    double rounded = 1.44269504088896338700 * x + (negative ? -0.5 : 0.5);
+    int32_t ki = reduce ? (near ? (negative ? -1 : 1) : __double2int_rz(rounded)) : 0;
+    double k = (double)ki;
+    // For k = +-1, x - k*ln2_hi and k*ln2_lo equal the scalar x -+ ln2_hi, +-ln2_lo exactly.
+    double hi = x - k * 6.93147180369123816490e-1;
+    double lo = k * 1.90821492927058770002e-10;
+    double xr = reduce ? hi - lo : x;
+    double c = reduce ? (hi - xr) - lo : 0.0;
+    double hfx = 0.5 * xr;
+    double hxs = xr * hfx;
+    double p = hxs * -2.01099218183624371326e-7;
+    p = hxs * (4.00821782732936239552e-6 + p);
+    p = hxs * (-7.93650757867487942473e-5 + p);
+    p = hxs * (1.58730158725481460165e-3 + p);
+    p = hxs * (-3.33333333333331316428e-2 + p);
+    double r1 = 1.0 + p;
+    double t = 3.0 - r1 * hfx;
+    double e = hxs * ((r1 - t) / (6.0 - xr * t));
+    double k0 = xr - (xr * e - hxs);
+    e = (xr * (e - c) - c) - hxs;
+    double xme = xr - e;
+    double km1 = 0.5 * xme - 0.5;
+    double k1 = xr < -0.25 ? -2.0 * (e - (xr + 0.5)) : 1.0 + 2.0 * xme;
+    double twopk = pow2_of(ki), inverse = pow2_of(-ki);
+    // k < 0 || k > 56 (k == 1024 needs x > 709, outside the domain).
+    bool far = ki < 0 || ki > 56;
+    double far_value = (xme + 1.0) * twopk - 1.0;
+    double below20 = (xme + (1.0 - inverse)) * twopk;
+    double from20 = ((xr - (e + inverse)) + 1.0) * twopk;
+    double general = far ? far_value : (ki < 20 ? below20 : from20);
+    double result = ki == 0 ? k0 : (ki == -1 ? km1 : (ki == 1 ? k1 : general));
+    return tiny ? x : result;
+}
+
+__device__ inline double game_tanh(double value) {
+#ifdef ALTD_TANH_BRANCHY
+    return game_tanh_branchy(value);
+#else
+    double x = fabs(value);
+    uint32_t h = (uint32_t)(dbits(x) >> 32);
+    // Above 0x40340000 (|x| > 20, infinities, NaN) the scalar path stays a
+    // branch: NaN must keep its payload, and a NaN routed through the selects
+    // below can lose it on this hardware (fabs folded into the 32-bit select
+    // as a float source modifier, which quiets or canonicalizes under IEEE
+    // mode). Finite lanes never take it during inference.
+    if (h > 0x40340000u) {
+        double t = 1.0 - 0.0 / x;
+        return signbit(value) ? -t : t;
+    }
+    bool big = h > 0x3fe193eau, mid = h > 0x3fd058aeu, normal = h > 0x000fffffu;
+    double t = expm1_lane(mid ? 2.0 * x : -2.0 * x);
+    double d = t + 2.0;
+    // The range's own division: 2 / (t + 2) for the large range, t / (t + 2)
+    // otherwise; the small range's (-t) / (t + 2) is the exact negation.
+    double q = (big ? 2.0 : t) / d;
+    double result = big ? 1.0 - q : (mid ? q : (normal ? -q : x));
+    return signbit(value) ? -result : result;
+#endif
 }
 
 }  // namespace altd

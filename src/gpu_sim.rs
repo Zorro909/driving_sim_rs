@@ -759,6 +759,10 @@ pub struct GpuSim<'a> {
     pub network_tag: Option<u64>,
     network_count: usize,
     parameter_buffer: Vec<f64>,
+    /// Host staging buffers for car and agent state, retained between windows
+    /// so their pages stay mapped and no per-window allocation is needed.
+    car_buffer: Vec<GpuCar>,
+    agent_buffer: Vec<GpuAgent>,
 }
 
 /// Arguments of `altd_gpu_sim_window` (gpu/sim/altd_gpu.hip).
@@ -797,7 +801,20 @@ impl<'a> GpuSim<'a> {
         assert!(sensors.len() <= MAX_SENSORS);
         let handle = unsafe { create(world.handle(), vehicle, sensors.as_ptr(), sensors.len() as u32, capacity as u32) };
         assert!(!handle.is_null(), "altd_gpu_sim_create failed");
-        GpuSim { gpu, handle, sensor_count: sensors.len(), cars: 0, network_tag: None, network_count: 0, parameter_buffer: Vec::new() }
+        GpuSim {
+            gpu, handle, sensor_count: sensors.len(), cars: 0, network_tag: None, network_count: 0,
+            parameter_buffer: Vec::new(), car_buffer: Vec::new(), agent_buffer: Vec::new(),
+        }
+    }
+
+    /// The retained host state buffers (empty on first use); return them with
+    /// `return_state_buffers` so the next window reuses the allocations.
+    pub(crate) fn take_state_buffers(&mut self) -> (Vec<GpuCar>, Vec<GpuAgent>) {
+        (std::mem::take(&mut self.car_buffer), std::mem::take(&mut self.agent_buffer))
+    }
+    pub(crate) fn return_state_buffers(&mut self, cars: Vec<GpuCar>, agents: Vec<GpuAgent>) {
+        self.car_buffer = cars;
+        self.agent_buffer = agents;
     }
 
     pub fn upload(&mut self, cars: &[GpuCar], agents: Option<&[GpuAgent]>) {

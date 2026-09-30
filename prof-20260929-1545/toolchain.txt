@@ -1,0 +1,7 @@
+HIP version: 7.1.52802-9999
+clang version 20.0.0.rocm
+Target: x86_64-redhat-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib64/rocm/llvm/bin
+
+[37mROCk module is loaded[0m
