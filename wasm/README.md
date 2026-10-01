@@ -12,7 +12,22 @@ cargo install wasm-bindgen-cli --version "$(wasm/bindgen-version.sh)"   # must m
 wasm/build.sh                                                           # writes wasm/pkg
 ```
 
-`wasm/build.sh` runs `cargo rustc --release --lib --crate-type cdylib --target wasm32-unknown-unknown --no-default-features --features wasm`, then `wasm-bindgen --target web` (`TARGET=nodejs|bundler|deno` selects another flavour, `PROFILE=dev` skips optimizations) and `wasm-opt -O3` when it is installed. The output is `wasm/pkg/altd_sim.js`, `altd_sim_bg.wasm` and TypeScript declarations, about 1.5 MB with `wasm-opt`. Native builds emit only `rlib`, avoiding Cargo output collisions between release test and CLI builds.
+`wasm/build.sh` builds the ordinary package at `wasm/pkg` with the normal Rust toolchain and precompiled standard library. `TARGET=nodejs|bundler|deno` and `PROFILE=dev` remain supported for this package.
+
+The threaded package uses its own Cargo target directory and the dated nightly in `wasm/thread-toolchain`. Install its components once:
+
+```sh
+rustup toolchain install nightly-2025-11-15 --component rust-src --target wasm32-unknown-unknown
+THREADS=1 wasm/build.sh                         # writes wasm/pkg-threads
+```
+
+Both packages use `--locked`, the same profile, and `wasm-bindgen --target web`. The script rejects other bindgen targets for threads. `features.json` records the source fingerprint, thread capability, toolchain, optimizer, profile, binding version, and memory ceiling. Publish packages with matching source, profile and binding version. `OUT` changes the package destination; the script replaces it only when it is empty or holds an earlier package. `THREAD_TARGET_DIR` changes the threaded Cargo directory.
+
+The threaded command rebuilds `std` and `panic_abort` with atomics and bulk memory. It imports shared memory, exports the TLS metadata required by wasm-bindgen, and keeps `web_sys_unstable_apis`. These settings apply only to that build. Memory stays memory32, with a 1 GiB growth ceiling and abort panics. Extra workers each need about 2 MiB of stack plus TLS; the page's preview module has separate memory.
+
+Release optimization uses `wasm-opt -O3`, with `--enable-threads --enable-bulk-memory` for shared memory. The tested optimizer is Binaryen 130. The validated combination is nightly-2025-11-15, wasm-bindgen 0.2.129, wasm-bindgen-rayon 1.3.0 with `no-bundler`, and Binaryen 130. The adapter prints a warning about positional initializer arguments in its child workers; that published helper still initializes correctly with this binding version.
+
+`TEST_THREADS=1` enables the test-only `testThreadIndices` diagnostic; do not distribute those packages.
 
 `.cargo/config.toml` limits `-C target-cpu=native` to x86 hosts and passes `--cfg=web_sys_unstable_apis` to the wasm target, which web-sys still needs for its WebGPU bindings.
 
@@ -100,7 +115,25 @@ An object or JSON string; every key is optional (`src/session.rs` `SessionOption
 | `advanceWithGpuRays(raycaster, ticks, stopWhenInactive)`, `advanceGenerationWithGpuRays(raycaster, timeLimitTicks)` | The same windows with the ray sensors cast on WebGPU; promises of the executed ticks                                                                                                                                                                 |
 | `gpuRaysChecked()`, `gpuRayMismatches()`                                                                            | Counters of `gpuVerifyEvery`                                                                                                                                                                                                                         |
 
-Errors from options, indices and shapes reject as JavaScript errors. Invalid scene, network or model files hit the library's own assertions, which abort the module; the console panic hook prints the message. A `Simulation` runs on the calling thread (a worker keeps a page responsive); rayon's parallel loops run inline on this target.
+Errors from options, indices and shapes reject as JavaScript errors. Invalid scene, network or model files hit the library's own assertions, which abort the module; the console panic hook prints the message. A `Simulation` runs on its calling coordinator. The ordinary package runs Rayon inline. The threaded package dispatches its existing Rust loops to the initialized pool.
+
+### Threaded initialization
+
+Serve the document, modules and worker scripts with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` over HTTPS or localhost. CSP must allow `worker-src 'self' blob:` and `script-src 'self' 'wasm-unsafe-eval'`. Keep the complete `snippets` directory with each generated module.
+
+Initialize inside a dedicated coordinator worker, before track conversion, world construction or any other Rayon operation:
+
+```js
+const lib = await import("./pkg-threads/altd_sim.js");
+await lib.default({ module_or_path: "./pkg-threads/altd_sim_bg.wasm" });
+await lib.initThreadPool(4);
+console.log(lib.cpuThreadCount()); // 4, query only after initialization
+// Now construct Simulation, start or restore it, and optionally verify WebGPU.
+```
+
+The global pool is fixed for the worker's lifetime. Pausing can retain it; stopping requires terminating the coordinator and its children. A failed or timed-out pool must be discarded before loading the ordinary package in a fresh coordinator. Do not run simulation calls on a partially initialized instance.
+
+The webapp probes WASM threads and isolation, reserves one reported logical CPU for the coordinator/page, and caps the pool at eight. A missing or invalid hardware-concurrency value defaults to two logical CPUs, so the pool gets one worker. The `start` command's test override accepts 1 through 64 workers without changing saved runs. WebGPU uses the same initialized CPU pool for evolution, verification and CPU recovery.
 
 ### Full WebGPU training
 
@@ -200,6 +233,20 @@ done
 ```
 
 The division fixture contains 1,049,732 native results, including signed zero, subnormal boundaries, infinities, and random operands across all exponent ranges. `DIVISION_FIXTURE` makes the browser test the production division helper against those raw bit patterns. The added Rally scenarios use 33 cars, different batch counts and elimination settings, and a larger network; their checked-in references come from `wasm_reference`.
+
+### Threaded integration and measurements
+
+```sh
+PATH=/path/to/binaryen-130/bin:$PATH wasm/test/build-threads.sh
+NO_GPU=1 PAGE=threads.html THREADS=2 node wasm/test/run.mjs
+NO_GPU=1 PAGE=threads.html THREADS=4 BROWSER=firefox node wasm/test/run.mjs
+GPU=hardware PAGE=threads.html THREADS=2 node wasm/test/run.mjs
+NO_GPU=1 PAGE=threads.html BENCHMARK=1 THREADS=8 node wasm/test/run.mjs
+```
+
+The test builder writes optimized diagnostic packages under `target/wasm-thread-test`, leaving distributable packages alone, and writes a native reference under `target`. The worker checks shared memory, actual child workers and distinct Rayon worker indices. `PACKAGE_BASE=target/public-packages` can select a separately built package pair without diagnostic exports; indices are then omitted while full serial/threaded comparisons still run. It compares states, sensors, controls, metrics, summaries, rewards and checkpoint bytes through three turnovers in both scheduling modes, including serial/threaded checkpoint exchange.
+
+The expanded native comparison exposes existing last-bit native/serial differences, while threaded and serial WASM match exactly. Reports contain both comparisons; `STRICT_NATIVE=1` treats any native difference as a failure. The older checked-in native state reference still passes. See [the implementation validation and benchmarks](../reports/wasm-rayon-20261001/README.md) for exact counts and limits. No floating-point or RNG algorithms changed in the threading integration.
 
 ## Portability notes
 

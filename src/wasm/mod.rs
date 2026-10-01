@@ -19,6 +19,46 @@ use wasm_bindgen::prelude::*;
 pub mod gpu;
 pub mod sim;
 
+#[cfg(feature = "wasm-threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+/// Query only after initThreadPool has completed in a threaded package.
+#[wasm_bindgen(js_name = cpuThreadCount)]
+pub fn cpu_thread_count() -> usize {
+    #[cfg(feature = "wasm-threads")]
+    { rayon::current_num_threads() }
+    #[cfg(not(feature = "wasm-threads"))]
+    { 1 }
+}
+
+/// Integration tests use a barrier to prove work executes on every pool worker.
+#[cfg(feature = "wasm-thread-test")]
+#[wasm_bindgen(js_name = testThreadIndices)]
+pub fn test_thread_indices() -> Vec<u32> {
+    #[cfg(feature = "wasm-threads")]
+    {
+        use std::sync::{Barrier, Mutex};
+        let count = rayon::current_num_threads();
+        let barrier = Barrier::new(count);
+        let indices = Mutex::new(Vec::with_capacity(count));
+        rayon::scope(|scope| {
+            for _ in 0..count {
+                let barrier = &barrier;
+                let indices = &indices;
+                scope.spawn(move |_| {
+                    indices.lock().unwrap().push(rayon::current_thread_index().unwrap() as u32);
+                    barrier.wait();
+                });
+            }
+        });
+        let mut indices = indices.into_inner().unwrap();
+        indices.sort_unstable();
+        indices
+    }
+    #[cfg(not(feature = "wasm-threads"))]
+    { vec![0] }
+}
+
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();

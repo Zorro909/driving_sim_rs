@@ -34,7 +34,11 @@ const server = createServer(async (request, response) => {
     if (!file.startsWith(root)) { response.writeHead(403).end(); return; }
     try {
         const body = await readFile(file);
-        response.writeHead(200, { 'content-type': types[path.extname(file)] ?? 'application/octet-stream' }).end(body);
+        response.writeHead(200, {
+            'Cross-Origin-Opener-Policy': 'same-origin',
+            'Cross-Origin-Embedder-Policy': 'require-corp',
+            'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'",
+            'content-type': types[path.extname(file)] ?? 'application/octet-stream' }).end(body);
     } catch {
         response.writeHead(404).end();
     }
@@ -42,7 +46,9 @@ const server = createServer(async (request, response) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;
 
-const { chromium } = loadPlaywright();
+const browserType = process.env.BROWSER || 'chromium';
+const browserLauncher = loadPlaywright()[browserType];
+if (!browserLauncher) throw new Error(`unknown browser: ${browserType}`);
 const gpuMode = process.env.NO_GPU ? 'none' : process.env.GPU || 'software';
 if (!['none', 'hardware', 'software'].includes(gpuMode)) throw new Error(`unknown GPU mode: ${gpuMode}`);
 const args = gpuMode === 'none' ? [] : [
@@ -52,13 +58,18 @@ const args = gpuMode === 'none' ? [] : [
         ? ['--use-angle=vulkan', '--disable-vulkan-surface', '--enable-webgpu-developer-features']
         : ['--enable-unsafe-swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader']),
 ];
-const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, args });
+const browser = await browserLauncher.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, args: browserType === 'chromium' ? args : [] });
 let report;
 try {
     const page = await browser.newPage();
     await page.addInitScript((mode) => { window.altdGpuMode = mode; }, gpuMode);
     await page.addInitScript((fixture) => { window.altdDivisionFixture = fixture; }, process.env.DIVISION_FIXTURE);
     await page.addInitScript((options) => { window.altdTestOptions = options; }, {
+        threads: Number(process.env.THREADS || 2),
+        packageBase: process.env.PACKAGE_BASE,
+        strictNative: process.env.STRICT_NATIVE === '1',
+        gpuMode,
+        benchmark: process.env.BENCHMARK === '1',
         scenario: process.env.SCENARIO || 'wasm/test/scenario.json',
         reference: process.env.REFERENCE || 'wasm/test/reference.json',
         verifyRays: Number(process.env.VERIFY_RAYS || 4000),

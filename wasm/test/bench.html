@@ -2,12 +2,4 @@
 <meta charset="utf-8">
 <title>WebGPU simulation profile</title>
 <pre id="output">Profiling WebGPU simulation...</pre>
-<script type="module">
-import { run } from './bench.js';
-try {
-    window.altdReport=await run(new URL('../../',import.meta.url).href);
-} catch(error) {
-    window.altdReport={ok:false,error:String(error.stack||error)};
-}
-document.querySelector('#output').textContent=JSON.stringify(window.altdReport,null,2);
-</script>
+<script type="module" src="./entry.js" data-test="./bench.js"></script>

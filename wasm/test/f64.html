@@ -9,17 +9,6 @@
 <h1>altd_sim soft-float test</h1>
 <p>Compares the WGSL binary64 library (src/wasm/sim/f64.wgsl) and math ports with the CPU.</p>
 <pre id="output">running…</pre>
-<script type="module">
-import { run } from './f64-test.js';
-const out = document.getElementById("output");
-try {
-    const report = await run(new URL('../../', import.meta.url).href);
-    out.textContent = JSON.stringify(report, null, 2);
-    window.altdReport = report;
-} catch (error) {
-    out.textContent = 'failed: ' + (error && error.stack || error);
-    window.altdReport = { error: String(error && error.stack || error) };
-}
-</script>
+<script type="module" src="./entry.js" data-test="./f64-test.js"></script>
 </body>
 </html>

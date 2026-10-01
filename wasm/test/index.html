@@ -9,17 +9,6 @@
 <h1>altd_sim WebAssembly test</h1>
 <p>Runs the CPU scenario against the native reference and, when WebGPU is available, the WebGPU raycaster against the CPU.</p>
 <pre id="output">running…</pre>
-<script type="module">
-import { run } from './test.js';
-const out = document.getElementById("output");
-try {
-    const report = await run(new URL('../../', import.meta.url).href);
-    out.textContent = JSON.stringify(report, null, 2);
-    window.altdReport = report;
-} catch (error) {
-    out.textContent = 'failed: ' + (error && error.stack || error);
-    window.altdReport = { error: String(error && error.stack || error) };
-}
-</script>
+<script type="module" src="./entry.js" data-test="./test.js"></script>
 </body>
 </html>

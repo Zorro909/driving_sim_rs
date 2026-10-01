@@ -1,0 +1,65 @@
+{
+  "ok": true,
+  "isolated": true,
+  "shared": true,
+  "threads": 1,
+  "threaded": true,
+  "children": 1,
+  "sharedChildMemories": 1,
+  "indices": [
+    0
+  ],
+  "memoryBytes": 13172736,
+  "startupMs": 33.105000004172325,
+  "parity": {
+    "independent": {
+      "values": 1744559,
+      "mismatches": 0,
+      "first": null,
+      "native": {
+        "values": 1744559,
+        "mismatches": 19542,
+        "first": {
+          "path": "/0/state/controls/0/0",
+          "actual": "3fcc9ad9f7527311",
+          "expected": "3fcc9ad9f752730f"
+        }
+      },
+      "serialNative": {
+        "values": 1744559,
+        "mismatches": 19542,
+        "first": {
+          "path": "/0/state/controls/0/0",
+          "actual": "3fcc9ad9f7527311",
+          "expected": "3fcc9ad9f752730f"
+        }
+      }
+    },
+    "lockstep": {
+      "values": 1744559,
+      "mismatches": 0,
+      "first": null,
+      "native": {
+        "values": 1744559,
+        "mismatches": 19542,
+        "first": {
+          "path": "/0/state/controls/0/0",
+          "actual": "3fcc9ad9f7527311",
+          "expected": "3fcc9ad9f752730f"
+        }
+      },
+      "serialNative": {
+        "values": 1744559,
+        "mismatches": 19542,
+        "first": {
+          "path": "/0/state/controls/0/0",
+          "actual": "3fcc9ad9f7527311",
+          "expected": "3fcc9ad9f752730f"
+        }
+      }
+    }
+  },
+  "messageLatencyMs": 41.780029296875,
+  "browser": "153.0.8010.12",
+  "gpuMode": "none"
+}
