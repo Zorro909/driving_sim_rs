@@ -31,6 +31,12 @@ impl TrainingRandom {
     pub fn reproduce(&mut self,agents:&[AgentResult],settings:&EvolutionSettings)->Generation {
         match self{Self::Python(r)=>reproduce(agents,settings,r),Self::Game(r)=>crate::evolution::reproduce_game(agents,settings,r)}
     }
+    fn reproduce_scored(&mut self, agents: &[AgentResult], scores: Vec<f64>, settings: &EvolutionSettings, scratch: &mut Vec<f64>) -> Generation {
+        match self {
+            Self::Python(r) => crate::evolution::reproduce_scored_with_scratch(agents, scores, settings, r, scratch),
+            Self::Game(r) => crate::evolution::reproduce_game_scored(agents, scores, settings, r),
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     fn reproduce_with_scratch(&mut self, agents: &[AgentResult], settings: &EvolutionSettings, scratch: &mut Vec<f64>) -> Generation {
         match self {
@@ -443,7 +449,6 @@ impl TrainingAgent {
 /// and `agent_export`) in place, resizing them to the population. Retaining
 /// the vectors between windows keeps their pages mapped, and the indexed
 /// parallel fill avoids the linked-list concatenation of a `Result` collect.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn export_state_into(agents: &[TrainingAgent], vehicle: &crate::world::VehicleConfig, surfaces: &crate::gpu_sim::SurfaceTable,
                          cars: &mut Vec<crate::gpu_sim::GpuCar>, out: &mut Vec<crate::gpu_sim::GpuAgent>) -> Result<(), String> {
     cars.resize(agents.len(), crate::gpu_sim::GpuCar::zeroed());
@@ -724,6 +729,30 @@ impl TrainingRunner {
         else if let Some(physics)=self.physics.as_mut() {
             physics.resize(world,&mut self.agents.iter_mut().map(|a|&mut a.car).collect::<Vec<_>>(),retained);
         }
+        self.settle_reset();
+        profile.mark("passive_reset");
+    }
+
+    /// Reset an evaluation without replacing networks or advancing evolution.
+    /// Random training uses independent cars; native shared redraw replay is separate.
+    pub fn reset_evaluation(&mut self) {
+        assert!(!self.world.track.native_broadphase, "track batches require independent cars");
+        let (position, rotation) = (self.position, self.rotation);
+        self.agents.par_iter_mut().for_each(|agent| {
+            let novelty = agent.stats.network_novelty;
+            agent.car.queue_reset(position, rotation);
+            agent.stats = TrainingStats::new(novelty);
+            agent.controls = Controls::default();
+            agent.pending_contact = false;
+            agent.deactivated_at = None;
+            agent.scratch.sensors = SensorScratch::default();
+        });
+        self.stats_phase = 0;
+        self.settle_reset();
+    }
+
+    fn settle_reset(&mut self) {
+        let world = &*self.world;
         Self::advance_physics(world,&mut self.agents,&mut self.physics,self.eliminate_on_wall,false,0);
         // Reset above represents the first _IntegrateForces callback applying
         // the pending spawn request. StartNextGeneration runs on the sixth
@@ -738,7 +767,6 @@ impl TrainingRunner {
         }
         self.tick = 0;
         self.batch_index = 0;
-        profile.mark("passive_reset");
     }
 
     fn advance_physics(world:&World,agents:&mut[TrainingAgent],physics:&mut Option<crate::simulation::SharedPhysics>,eliminate:bool,drive:bool,tick:u64) {
@@ -1127,8 +1155,7 @@ impl TrainingRunner {
 
     /// The rest of `gpu_import` for the whole population: `cars` and `agents`
     /// hold what `advance_window_gpu` read back.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn import_state(&mut self, cars: &[crate::gpu_sim::GpuCar], agents: &[crate::gpu_sim::GpuAgent],
+    pub(crate) fn import_state(&mut self, cars: &[crate::gpu_sim::GpuCar], agents: &[crate::gpu_sim::GpuAgent],
                     surfaces: &crate::gpu_sim::SurfaceTable) -> Result<(), String> {
         self.agents.par_iter_mut().zip(cars).zip(agents).try_for_each(|((a, c), g)| {
             a.car.gpu_import(c, surfaces)?;
@@ -1219,18 +1246,38 @@ impl TrainingRunner {
         generation
     }
 
+    pub fn next_generation_with_fitness(&mut self, scores: Vec<f64>) -> Generation {
+        let results: Vec<_> = self.agents.iter().map(TrainingAgent::result).collect();
+        let generation = self.rng.reproduce_scored(&results, scores, &self.settings, &mut Vec::new());
+        self.install_next(&generation);
+        generation
+    }
+
     /// Reproduce with the same RNG stream, then compute population novelty on
     /// the GPU. Uploaded offspring stay in place for the next driving window,
     /// and the new agents take over the offspring networks without a copy
     /// (read them from `agents`; only the selection summary is returned).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn next_generation_gpu(&mut self, sim: &mut crate::gpu_sim::GpuSim) -> Result<Turnover, String> {
+        self.next_generation_gpu_scored(sim, None)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn next_generation_gpu_with_fitness(&mut self, sim: &mut crate::gpu_sim::GpuSim, scores: Vec<f64>) -> Result<Turnover, String> {
+        self.next_generation_gpu_scored(sim, Some(scores))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn next_generation_gpu_scored(&mut self, sim: &mut crate::gpu_sim::GpuSim, scores: Option<Vec<f64>>) -> Result<Turnover, String> {
         let mut profile = crate::training_profile::Profile::new("gpu_turnover");
         // The preceding upload is complete, so its host buffer can hold noise
         // until reproduction finishes. Refilling it then uploads the offspring.
         let mut scratch = sim.take_parameter_buffer();
         let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        let Generation { networks, preserved_count, rewards } = self.rng.reproduce_with_scratch(&results, &self.settings, &mut scratch);
+        let Generation { networks, preserved_count, rewards } = match scores {
+            Some(scores) => self.rng.reproduce_scored(&results, scores, &self.settings, &mut scratch),
+            None => self.rng.reproduce_with_scratch(&results, &self.settings, &mut scratch),
+        };
         sim.return_parameter_buffer(scratch);
         profile.mark("reproduce");
         let src = std::array::from_fn(|c| self.outputs.iter().rposition(|&slot| slot as usize == c).map_or(-1, |j| j as i32));

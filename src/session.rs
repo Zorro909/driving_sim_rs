@@ -64,7 +64,38 @@ pub struct Session {
     pub options: SessionOptions,
     network: Value,
     output_names: Vec<String>,
+    boundary: Option<Boundary>,
 }
+
+/// The population and RNG as the current generation began: what a
+/// checkpoint saves. Kept as a copy so saving never touches the running cars.
+#[derive(Clone)]
+struct Boundary {
+    generation: u64,
+    tick: u64,
+    shape: Vec<usize>,
+    rng: TrainingRandom,
+    /// Every network's parameters, car after car.
+    params: Vec<f64>,
+}
+
+/// Per-generation statistics hosts read instead of the full car states.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationSummary {
+    /// The first car with the highest distance score.
+    pub best_index: usize,
+    pub best_score: f64,
+    /// Cars with at least one completed lap.
+    pub lapped: usize,
+    pub active: usize,
+    /// The best lap of the generation: `(car, seconds)`.
+    pub lap_index: Option<usize>,
+    pub lap_time: Option<f64>,
+}
+
+/// `checkpoint_bytes` magic: format 1.
+const CHECKPOINT_MAGIC: &[u8; 8] = b"ALTDCKP1";
 
 fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
     value.as_array().ok_or_else(|| format!("missing {what}"))?
@@ -107,7 +138,7 @@ impl Session {
             PyRandom::new(options.seed), options.batch_count, options.stats_phase, options.eliminate_on_wall, options.eliminate_when_idle,
         );
         runner.mode = mode;
-        Ok(Session { runner, options, network: network.clone(), output_names })
+        Ok(Session { runner, options, network: network.clone(), output_names, boundary: None })
     }
 
     /// The network export's `shape` (or `summary.shape`), if any.
@@ -123,6 +154,7 @@ impl Session {
             let seed = Network::try_from_game_export(&self.network)?;
             self.check_shape(&seed.shape)?;
             self.runner.start(&seed);
+            self.snapshot();
             Ok(())
         } else {
             let shape = self.template_shape().ok_or("the network export has neither weights nor a shape; use start_with_shape")?;
@@ -136,6 +168,7 @@ impl Session {
         self.check_shape(shape)?;
         let seed = self.runner.rng.xavier(shape);
         self.runner.start(&seed);
+        self.snapshot();
         Ok(())
     }
 
@@ -183,7 +216,35 @@ impl Session {
     pub fn next_generation(&mut self) -> Result<(usize, Vec<f64>), String> {
         self.require_started()?;
         let generation = self.runner.next_generation();
+        self.snapshot();
         Ok((generation.preserved_count, generation.rewards))
+    }
+
+    /// Change the settings used by the next reproduction without resetting
+    /// cars, generation statistics or the training RNG. Population changes
+    /// take effect when `next_generation` installs the new population.
+    pub fn set_evolution_settings(&mut self, text: &str) -> Result<(), String> {
+        let settings: EvolutionSettings = serde_json::from_str(text)
+            .map_err(|e| format!("invalid evolution settings: {e}"))?;
+        if settings.population == 0 || settings.selection_size == 0 {
+            return Err("population and selection_size must be positive".into());
+        }
+        if !["best", "tournament", "roulette"].contains(&settings.selection_algorithm.as_str())
+            || !["none", "single_point", "uniform"].contains(&settings.crossover.as_str())
+            || !["off", "on_selection_size", "on_custom"].contains(&settings.preserve_parents.as_str()) {
+            return Err("unknown selection, crossover or preservation mode".into());
+        }
+        if !settings.mutation_rate.is_finite() || !(0.0..=10.0).contains(&settings.mutation_rate)
+            || !settings.weight_decay.is_finite() || !(0.0..=1.0).contains(&settings.weight_decay) {
+            return Err("mutation_rate must be in 0..10 and weight_decay in 0..1".into());
+        }
+        if settings.rewards.is_empty() || settings.rewards.iter().any(|r|
+            crate::evolution::metric_index(&r.metric).is_none()
+            || !["default", "average"].contains(&r.kind.as_str())) {
+            return Err("invalid reward metric or type".into());
+        }
+        self.runner.settings = settings;
+        Ok(())
     }
 
     /// `CAR_STATE_STRIDE` values per car (`training::CAR_STATE_FIELDS`).
@@ -269,25 +330,130 @@ impl Session {
     pub fn restore_checkpoint(&mut self, value: &Value) -> Result<(), String> {
         let shape: Vec<usize> = value["shape"].as_array().ok_or("missing shape")?
             .iter().map(|v| v.as_u64().map(|n| n as usize).ok_or("invalid shape")).collect::<Result<_, _>>()?;
-        self.check_shape(&shape)?;
         let generation = value["generation"].as_u64().ok_or("missing generation")?;
+        self.check_shape(&shape)?;
         let size = crate::network::parameter_count(&shape);
-        let mut networks = Vec::new();
+        let mut params = Vec::new();
         for (i, row) in value["networks"].as_array().ok_or("missing networks")?.iter().enumerate() {
-            let params: Vec<f64> = row.as_array().ok_or("invalid network")?.iter().map(|v| v.as_f64().ok_or("invalid parameter")).collect::<Result<_, _>>()?;
-            if params.len() != size {
-                return Err(format!("network {i} has {} parameters, shape {shape:?} needs {size}", params.len()));
+            let row = row.as_array().ok_or("invalid network")?;
+            if row.len() != size {
+                return Err(format!("network {i} has {} parameters, shape {shape:?} needs {size}", row.len()));
             }
-            networks.push(Network::from_vector(&shape, params));
+            for v in row {
+                params.push(v.as_f64().ok_or("invalid parameter")?);
+            }
         }
-        if networks.is_empty() {
+        let rng = (!value["rng"].is_null()).then(|| TrainingRandom::from_json(&value["rng"]));
+        self.restore(&shape, generation, params, rng)
+    }
+
+    fn restore(&mut self, shape: &[usize], generation: u64, params: Vec<f64>, rng: Option<TrainingRandom>) -> Result<(), String> {
+        self.check_shape(shape)?;
+        let size = crate::network::parameter_count(shape);
+        if params.is_empty() {
             return Err("the checkpoint has no networks".into());
         }
-        if !value["rng"].is_null() {
-            self.runner.rng = TrainingRandom::from_json(&value["rng"]);
+        if params.len() % size != 0 {
+            return Err(format!("the checkpoint has {} parameters, not a multiple of the {size} of shape {shape:?}", params.len()));
+        }
+        let networks: Vec<Network> = params.chunks(size).map(|p| Network::from_vector(shape, p.to_vec())).collect();
+        if let Some(rng) = rng {
+            self.runner.rng = rng;
         }
         self.runner.resume(&networks, generation);
+        self.snapshot();
         Ok(())
+    }
+
+    /// Records the generation that just began as the checkpoint boundary.
+    fn snapshot(&mut self) {
+        let agents = &self.runner.agents;
+        let Some(first) = agents.first() else { return };
+        let mut params = Vec::with_capacity(agents.len() * first.network.params.len());
+        for a in agents {
+            params.extend_from_slice(&a.network.params);
+        }
+        self.boundary = Some(Boundary {
+            generation: self.runner.generation, tick: self.runner.tick, shape: first.network.shape.clone(),
+            rng: self.runner.rng.clone(), params,
+        });
+    }
+
+    /// The generation boundary `checkpoint_bytes` saves: `(generation, tick)`.
+    pub fn boundary(&self) -> Option<(u64, u64)> {
+        self.boundary.as_ref().map(|b| (b.generation, b.tick))
+    }
+
+    /// The boundary of the current generation in a compact binary form:
+    /// `ALTDCKP1`, then little-endian u32 generation, tick, population,
+    /// layer count and RNG JSON length, the u32 shape, the RNG JSON, zero
+    /// padding to a multiple of 8 bytes and every network's f64 parameters.
+    pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, String> {
+        let b = self.boundary.as_ref().ok_or("the session has not started")?;
+        let rng = b.rng.to_json().to_string();
+        let size = crate::network::parameter_count(&b.shape);
+        let header = [b.generation, b.tick, (b.params.len() / size) as u64, b.shape.len() as u64, rng.len() as u64];
+        let mut out = Vec::with_capacity(64 + rng.len() + b.params.len() * 8);
+        out.extend_from_slice(CHECKPOINT_MAGIC);
+        for n in header.iter().copied().chain(b.shape.iter().map(|&n| n as u64)) {
+            out.extend_from_slice(&u32::try_from(n).map_err(|_| "checkpoint field exceeds u32")?.to_le_bytes());
+        }
+        out.extend_from_slice(rng.as_bytes());
+        out.resize(out.len().next_multiple_of(8), 0);
+        for p in &b.params {
+            out.extend_from_slice(&p.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Restores a `checkpoint_bytes` checkpoint (see `restore_checkpoint`).
+    pub fn restore_checkpoint_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let invalid = || "invalid binary checkpoint".to_string();
+        if bytes.len() < 28 || &bytes[..8] != CHECKPOINT_MAGIC {
+            return Err(invalid());
+        }
+        let word = |i: usize| -> Result<usize, String> {
+            let at = 8 + i * 4;
+            bytes.get(at..at + 4).map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize).ok_or_else(invalid)
+        };
+        let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
+        let shape: Vec<usize> = (0..layers).map(|i| word(5 + i)).collect::<Result<_, _>>()?;
+        let rng_at = 8 + (5 + layers) * 4;
+        let rng_text = bytes.get(rng_at..rng_at + rng_len).ok_or_else(invalid)?;
+        let rng: Value = serde_json::from_slice(rng_text).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
+        let params_at = (rng_at + rng_len).next_multiple_of(8);
+        let size = if shape.len() >= 2 { crate::network::parameter_count(&shape) } else { 0 };
+        let data = bytes.get(params_at..).ok_or_else(invalid)?;
+        if data.len() != population * size * 8 {
+            return Err(format!("the checkpoint holds {} bytes of parameters, {population} networks of shape {shape:?} need {}", data.len(), population * size * 8));
+        }
+        let params = data.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap())).collect();
+        self.restore(&shape, generation, params, (!rng.is_null()).then(|| TrainingRandom::from_json(&rng)))
+    }
+
+    /// Statistics of the current generation (see `GenerationSummary`).
+    pub fn generation_summary(&self) -> GenerationSummary {
+        let agents = &self.runner.agents;
+        let mut best = 0;
+        for (i, a) in agents.iter().enumerate() {
+            if a.stats.total_score > agents[best].stats.total_score {
+                best = i;
+            }
+        }
+        let lap = self.best_lap();
+        GenerationSummary {
+            best_index: best,
+            best_score: agents.get(best).map_or(f64::NAN, |a| a.stats.total_score),
+            lapped: agents.iter().filter(|a| a.stats.score.lap_count >= 1).count(),
+            active: self.active_count(),
+            lap_index: lap.map(|l| l.0),
+            lap_time: lap.map(|l| l.1),
+        }
+    }
+
+    /// Cars that still drive.
+    pub fn active_count(&self) -> usize {
+        self.runner.agents.iter().filter(|a| a.car.active).count()
     }
 
     /// Wall segments `[x0, y0, x1, y1]...` for drawing.
@@ -311,6 +477,20 @@ impl Session {
 
     pub fn spawn(&self) -> Spawn {
         Spawn { position: [self.runner.position.x, self.runner.position.y], rotation: self.runner.rotation }
+    }
+
+    /// Selects the track the next installed generation drives, spawning at
+    /// the scene's reset pose. Call it at a generation boundary, before
+    /// `next_generation`; the vehicle must not change.
+    pub fn replace_track(&mut self, scene: &Value) -> Result<(), String> {
+        let position = scene.get("reset_position").map(crate::world::vector).ok_or("the scene has no reset_position")?;
+        let rotation = scene.get("reset_rotation").and_then(Value::as_f64).ok_or("the scene has no reset_rotation")?;
+        let world = Arc::new(World::from_scene(scene));
+        if world.track.native_broadphase != self.runner.world.track.native_broadphase {
+            return Err("a replacement track must keep the broadphase mode".into());
+        }
+        self.runner.replace_track(world, V2::new(position.x, position.y), rotation);
+        Ok(())
     }
 }
 
@@ -336,6 +516,30 @@ mod tests {
         assert_eq!((o.population, o.seed, o.batch_count, o.eliminate_on_wall, o.eliminate_when_idle, o.mode.as_str()), (Some(8), 3, 1, true, false, "lockstep"));
         assert!(SessionOptions::from_json(r#"{"populaton": 8}"#).is_err());
         assert!(SessionOptions::from_json("{}").unwrap().population.is_none());
+    }
+
+    #[test]
+    fn evolution_updates_preserve_statistics_and_rng_until_turnover() {
+        let mut s = autumn(r#"{"population":6,"seed":5,"eliminateOnWall":true}"#);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(120).unwrap();
+        let states = s.car_states();
+        let rng = s.runner.rng.to_json();
+        let generation = s.runner.generation;
+        s.set_evolution_settings(r#"{"population":9,"mutation_rate":0.1,"weight_decay":0}"#).unwrap();
+        assert_eq!(s.car_states(), states);
+        assert_eq!(s.runner.rng.to_json(), rng);
+        assert_eq!(s.runner.generation, generation);
+        assert!(s.set_evolution_settings(r#"{"mutation_rate":-1}"#).is_err());
+        assert!(s.set_evolution_settings(r#"{"selection_algorithm":"unknown"}"#).is_err());
+        assert!(s.set_evolution_settings(r#"{"rewards":[{"metric":"unknown","weight":100,"type":"default"}]}"#).is_err());
+        assert!(s.set_evolution_settings(r#"{"population":0}"#).is_err());
+        assert!(s.set_evolution_settings(r#"{"mutaton_rate":0.1}"#).is_err());
+        assert_eq!(s.runner.settings.mutation_rate, 0.1);
+        let (_, rewards) = s.next_generation().unwrap();
+        assert_eq!(rewards.len(), 6);
+        assert_eq!(s.runner.agents.len(), 9);
+        assert_eq!(s.runner.generation, generation + 1);
     }
 
     #[test]
@@ -371,6 +575,39 @@ mod tests {
         assert!(s.set_network_json(1, r#"{"shape":[20,5],"weights":[[[0.0,0,0,0,0]]],"biases":[[0,0,0,0,0]]}"#).is_err());
         assert!(s.set_network_json(1, &Network::xavier(&[20, 5], &mut PyRandom::new(1)).to_json().to_string()).is_err());
         assert_eq!(s.network_json(1).unwrap(), t.network_json(0).unwrap());
+    }
+
+    #[test]
+    fn binary_checkpoints_save_the_generation_boundary() {
+        let options = r#"{"population": 6, "seed": 5, "eliminateOnWall": true, "eliminateWhenIdle": true,
+            "settings": {"selection_size": 3, "mutation_rate": 0.3, "weight_decay": 0.0}}"#;
+        let mut s = autumn(options);
+        assert!(s.checkpoint_bytes().is_err());
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(240).unwrap();
+        let summary = s.generation_summary();
+        let states = s.car_states();
+        let best = (0..6).fold(0, |b, i| if states[i * CAR_STATE_STRIDE + 7] > states[b * CAR_STATE_STRIDE + 7] { i } else { b });
+        assert_eq!((summary.best_index, summary.best_score), (best, states[best * CAR_STATE_STRIDE + 7]));
+        assert_eq!(summary.active, (0..6).filter(|i| states[i * CAR_STATE_STRIDE + 6] == 1.0).count());
+        assert_eq!(summary.active, s.active_count());
+        s.next_generation().unwrap();
+        // The boundary is the checkpoint of the generation that just began,
+        // however far that generation has since advanced.
+        let json = s.checkpoint().unwrap();
+        s.advance(120, false).unwrap();
+        let bytes = s.checkpoint_bytes().unwrap();
+        assert_eq!(&bytes[..8], b"ALTDCKP1");
+        assert_eq!(s.boundary(), Some((1, 0)));
+        let mut t = autumn(options);
+        t.restore_checkpoint_bytes(&bytes).unwrap();
+        assert_eq!(t.checkpoint().unwrap(), json);
+        assert_eq!(t.checkpoint_bytes().unwrap(), bytes);
+        let mut u = autumn(options);
+        u.restore_checkpoint(&json).unwrap();
+        assert_eq!(u.checkpoint_bytes().unwrap(), bytes);
+        assert!(t.restore_checkpoint_bytes(&bytes[..bytes.len() - 8]).is_err());
+        assert!(t.restore_checkpoint_bytes(b"ALTDCKP0").is_err());
     }
 
     #[test]

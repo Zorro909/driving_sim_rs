@@ -301,6 +301,9 @@ __device__ inline uint32_t integer_kind(uint64_t bits) {
     return (bits & (bit - 1)) ? 0 : ((bits & bit) ? 1 : 2);
 }
 __device__ inline double dpow(double x, double y) {
+    // pow(1, y) is 1 for every y, NaN included, as the paths below also give;
+    // answering first skips the logarithm, e.g. for godot_ease(0, curve).
+    if (dbits(x) == dbits(1.0)) return 1.0;
     const uint64_t SIGN = 1ull << 63;
     uint64_t ix = dbits(x), iy = dbits(y);
     uint32_t topx = (uint32_t)(ix >> 52), topy = (uint32_t)(iy >> 52);

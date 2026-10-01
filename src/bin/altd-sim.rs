@@ -4,7 +4,8 @@
 //! arithmetic follows the original game runtime.
 
 use altd_sim::car::{Car, Controls, Sensor, SensorScratch, DT};
-use altd_sim::evolution::{reward_values, EvolutionSettings, RewardSpec, METRIC_NAMES};
+use altd_sim::batch_evaluation::BatchEvaluation;
+use altd_sim::evolution::{EvolutionSettings, RewardSpec, METRIC_NAMES};
 use altd_sim::network::{parameter_count, Network};
 use altd_sim::pymath::{py_max, py_min, py_pow, py_remainder, py_sum};
 use altd_sim::pyrandom::PyRandom;
@@ -57,9 +58,21 @@ struct TrackOptions {
     /// Number of prepared tracks queued by the CPU producer, including with --gpu.
     #[arg(long, default_value_t = 8)]
     track_buffer_size: usize,
+    /// Evaluate the unchanged population on this many random tracks before breeding.
+    /// Resume restores the checkpoint value when omitted.
+    #[arg(long)]
+    tracks_per_generation: Option<usize>,
 }
 
 impl TrackOptions {
+    fn count(&self, checkpoint: Option<&Value>) -> usize {
+        let count = self.tracks_per_generation.unwrap_or_else(|| checkpoint
+            .and_then(|value| value["tracks_per_generation"].as_u64()).unwrap_or(1) as usize);
+        assert!(count > 0, "--tracks-per-generation must be positive");
+        assert!(self.track_mode == TrackMode::Random || count == 1,
+                "--tracks-per-generation above 1 requires --track-mode random");
+        count
+    }
     fn settings(&self) -> Option<RandomTrainingTrackSettings> {
         if self.track_mode == TrackMode::Fixed {
             assert!(self.random_track_settings.is_none(), "--random-track-settings requires --track-mode random");
@@ -320,6 +333,9 @@ enum Command {
         /// Write a resumable checkpoint every N generations and when training ends (0 disables).
         #[arg(long, default_value_t = 100)]
         checkpoint_every: usize,
+        /// Export the final complete batch fitness leader before reproduction.
+        #[arg(long)]
+        save_final_candidate: bool,
         /// Stop after a generation whose best total_score reaches this value.
         #[arg(long)]
         stop_score_above: Option<f64>,
@@ -341,6 +357,17 @@ enum Command {
         /// ALTD_GPU_LIB overrides the library path).
         #[arg(long)]
         gpu: bool,
+    },
+    /// Evaluate frozen weights on an immutable shared suite without breeding.
+    Evaluate {
+        #[arg(long)]
+        network: PathBuf,
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        suite: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
     },
     /// compare_game_trace.py: open-loop replay of recorded controls.
     CompareTrace {
@@ -1079,8 +1106,9 @@ fn train(
     settings.population = population;
     let started = Instant::now();
     let track_settings = tracks.settings();
+    let track_count = tracks.count(None);
     let track_buffer = track_settings.as_ref().map(|settings| {
-        TrainingTrackBuffer::new(scene.clone(), settings.clone(), seed, 0, tracks.track_buffer_size, false)
+        TrainingTrackBuffer::new_batched(scene.clone(), settings.clone(), seed, 0, tracks.track_buffer_size, false, track_count)
             .unwrap_or_else(|e| panic!("random tracks: {e}"))
     });
     let mut current_track = track_buffer.as_ref().map(|b| b.next_track().unwrap_or_else(|e| panic!("random tracks: {e}")));
@@ -1114,28 +1142,41 @@ fn train(
     let mut simulated_ticks = 0u64;
     let mut simulate_seconds = 0.0;
     for generation in 0..generations {
-        let tick_started = Instant::now();
-        runner.advance_generation(ticks);
-        simulate_seconds += tick_started.elapsed().as_secs_f64();
-        simulated_ticks += runner.tick;
-        let results = runner.results();
-        let rewards = reward_values(&results, &settings.rewards);
+        let mut batch = BatchEvaluation::new(population);
+        let mut track_reports = Vec::new();
+        let mut generation_ticks = 0;
+        for track_index in 0..track_count {
+            if track_index > 0 {
+                let track = track_buffer.as_ref().unwrap().next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
+                runner.replace_track(track.world.clone(), track.position, track.rotation);
+                runner.reset_evaluation();
+                current_track = Some(track);
+            }
+            if let Some(track) = &current_track { assert_eq!((track.generation, track.track_index), (generation as u64, track_index)); }
+            let tick_started = Instant::now();
+            runner.advance_generation(ticks);
+            simulate_seconds += tick_started.elapsed().as_secs_f64();
+            simulated_ticks += runner.tick;
+            generation_ticks += runner.tick;
+            batch.record(&runner.results(), &settings.rewards);
+            track_reports.push(json!({"track_index": track_index, "ticks": runner.tick,
+                "track": current_track.as_ref().map(|t| &t.track)}));
+        }
+        let summary = batch.finish();
         let first_max = |values: &[f64]| (1..values.len()).fold(0, |best, i| if values[i] > values[best] { i } else { best });
-        let leader = first_max(&rewards);
-        let scores: Vec<f64> = results.iter().map(|r| r.metrics[0].unwrap()).collect();
-        let best_raw = first_max(&scores);
-        if scores[best_raw] > best_score {
-            best_score = scores[best_raw];
-            best_network = results[best_raw].network.clone();
+        let leader = first_max(&summary.fitness);
+        let best_raw = first_max(&summary.mean_scores);
+        if summary.mean_scores[best_raw] > best_score {
+            best_score = summary.mean_scores[best_raw];
+            best_network = runner.agents[best_raw].network.clone();
         }
         history.push(json!({
-            "generation": generation,
-            "ticks": runner.tick,
-            "best_reward": rewards[leader],
-            "best_score": scores[best_raw],
-            "mean_score": py_sum(scores.iter().copied()) / scores.len() as f64,
-            "total_collision_updates": py_sum(results.iter().map(|r| r.metrics[11].unwrap())),
-            "track": current_track.as_ref().map(|t| &t.track),
+            "generation": generation, "ticks": generation_ticks, "tracks_per_generation": track_count,
+            "best_reward": summary.fitness[leader], "best_score": summary.mean_scores[best_raw],
+            "mean_score": py_sum(summary.mean_scores.iter().copied()) / population as f64,
+            "total_collision_updates": py_sum(summary.metric_totals.iter().map(|r| r[11])),
+            "lapped_all_tracks": summary.lapped_all_tracks, "best_batch_mean_lap_s": summary.best_mean_lap_s,
+            "track": track_reports[0]["track"], "tracks": track_reports,
         }));
         if generation + 1 < generations {
             if let Some(buffer) = &track_buffer {
@@ -1143,7 +1184,8 @@ fn train(
                 runner.replace_track(track.world.clone(), track.position, track.rotation);
                 current_track = Some(track);
             }
-            runner.next_generation();
+            if track_count == 1 { runner.next_generation(); }
+            else { runner.next_generation_with_fitness(summary.fitness); }
         }
     }
     let total_seconds = started.elapsed().as_secs_f64();
@@ -1153,7 +1195,7 @@ fn train(
     let output = json!({
         "seed": seed,
         "settings": settings.to_json(),
-        "ticks_limit": ticks,
+        "ticks_limit": ticks, "tracks_per_generation": track_count, "track_seed_version": 2,
         "eliminate_on_wall": eliminate_on_wall,
         "idle_eliminate": idle_eliminate,
         "history": history,
@@ -1201,6 +1243,7 @@ struct ScratchConfig {
     game_rng_state: Option<PathBuf>,
     batch_count: usize,
     checkpoint_every: usize,
+    save_final_candidate: bool,
     stop: StopRules,
     eliminate_on_wall: Option<bool>,
     idle_eliminate: Option<bool>,
@@ -1301,6 +1344,29 @@ fn elimination_options(settings: &Value, wall: Option<bool>, idle: Option<bool>)
     (wall.unwrap_or_else(|| truthy("eliminate")), idle.unwrap_or_else(|| truthy("idle_eliminate")))
 }
 
+fn activate_prepared_track<'a>(runner: &mut TrainingRunner, mut track: altd_sim::training_tracks::PreparedTrainingTrack,
+                              gpu: Option<&'a altd_sim::gpu::Gpu>, sim: &mut Option<altd_sim::gpu_sim::GpuSim<'a>>,
+                              world: &mut Option<altd_sim::gpu::GpuWorld<'a>>) -> altd_sim::training_tracks::PreparedTrainingTrack {
+    runner.replace_track(track.world.clone(), track.position, track.rotation);
+    if let (Some(gpu), Some(sim)) = (gpu, sim.as_mut()) {
+        let next = altd_sim::gpu::GpuWorld::from_prepared(gpu, track.gpu_world.take().expect("buffered GPU track arrays"));
+        sim.set_world(&next);
+        *world = Some(next);
+    }
+    track
+}
+
+fn write_progress(dir: &Path, generation: usize, track_index: usize, completed: usize, count: usize) {
+    let progress = json!({"pid": std::process::id(), "generation": generation,
+                          "track_index": track_index, "tracks_completed": completed,
+                          "tracks_per_generation": count, "evaluating": completed < count});
+    write_atomic(&dir.join("progress.json"), progress.to_string().as_bytes());
+}
+
+fn final_candidate_leader(fitness: &[f64]) -> usize {
+    (0..fitness.len()).fold(0, |best, i| if fitness[i] > fitness[best] { i } else { best })
+}
+
 fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let (scene, network_data, model) = (load(&config.scene), load(&config.network), load(&config.model));
     let track_settings = config.tracks.settings();
@@ -1380,6 +1446,9 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let stop_request_path = dir.join("stop_request");
     let _ = std::fs::remove_file(&stop_request_path);
 
+    let track_count = config.tracks.count(if config.resume { checkpoint.as_ref() } else { None });
+    run["tracks_per_generation"] = json!(track_count);
+    run["track_seed_version"] = json!(2);
     let started = Instant::now();
     let restored_meta = if config.resume { checkpoint.as_ref() } else { initial_population_meta.as_ref() };
     let starting_generation = restored_meta.and_then(|m| m["generation"].as_u64()).unwrap_or(0);
@@ -1388,7 +1457,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     } else { config.seed };
     run["random_track_seed"] = track_settings.as_ref().map_or(Value::Null, |_| json!(track_seed));
     let track_buffer = track_settings.as_ref().map(|settings| {
-        TrainingTrackBuffer::new(scene.clone(), settings.clone(), track_seed, starting_generation, config.tracks.track_buffer_size, config.gpu)
+        TrainingTrackBuffer::new_batched(scene.clone(), settings.clone(), track_seed, starting_generation, config.tracks.track_buffer_size, config.gpu, track_count)
             .unwrap_or_else(|e| panic!("random tracks: {e}"))
     });
     let mut current_track = track_buffer.as_ref().map(|b| b.next_track().unwrap_or_else(|e| panic!("random tracks: {e}")));
@@ -1437,6 +1506,7 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let log_path = dir.join("log.jsonl");
     let mut best_lap = f64::INFINITY;
     let mut best_lap_generation: Option<u64> = None;
+    let mut best_network_file = Value::Null;
     let first_generation = if let Some(mut meta) = checkpoint.filter(|_| config.resume) {
         let generation = install_checkpoint(&mut runner, config, &mut meta, dir);
         // Persist legacy metadata before run.json adopts the new options.
@@ -1451,6 +1521,26 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
             .map(|line| format!("{line}\n"))
             .collect();
         write_atomic(&log_path, kept.as_bytes());
+        best_network_file = meta["best_network_file"].clone();
+        if best_network_file.is_null() {
+            best_network_file = kept.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter_map(|row| row["saved"].as_str().map(str::to_owned)).last().map_or(Value::Null, |name| json!(name));
+        }
+        if let Some(name) = best_network_file.as_str() {
+            if let Ok(bytes) = std::fs::read(dir.join(name)) { write_atomic(&dir.join("best.json"), &bytes); }
+            else { let _ = std::fs::remove_file(dir.join("best.json")); }
+        } else { let _ = std::fs::remove_file(dir.join("best.json")); }
+        for artifact_dir in ["tracks", "best_laps"] {
+            if let Ok(files) = std::fs::read_dir(dir.join(artifact_dir)) {
+                for file in files.flatten() {
+                    let name = file.file_name().to_string_lossy().into_owned();
+                    let prefix = name.strip_prefix('g').and_then(|name| name.split(['_', '.']).next());
+                    if prefix.and_then(|value| value.parse::<u64>().ok()).is_some_and(|value| value >= generation) {
+                        let _ = std::fs::remove_file(file.path());
+                    }
+                }
+            }
+        }
         println!("resumed {} at generation {generation}", dir.display());
         generation as usize
     } else if let Some(path) = &config.init_population {
@@ -1485,149 +1575,165 @@ fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
     let mut stop_state = StopState { best_lap: None, best_score: f64::NEG_INFINITY, stale: 0 };
     for generation in first_generation..config.generations {
         let generation_started = Instant::now();
-        let track_file = current_track.as_ref().map(|track| {
-            assert_eq!(track.generation, generation as u64, "track buffer generation differs from population");
-            let name = format!("tracks/g{generation:05}.track.json");
-            std::fs::create_dir_all(dir.join("tracks")).expect("track directory");
-            write_atomic(&dir.join(&name), (serde_json::to_string(&track.track).unwrap() + "\n").as_bytes());
-            name
-        });
-        let generation_track_config = current_track.as_ref().map(|t| t.track.config.clone());
         let rate = runner.settings.mutation_rate;
-        match (&mut gpu_sim, &gpu_world) {
-            (Some(sim), Some(world)) => {
-                runner.advance_generation_gpu(sim, world, config.ticks).unwrap_or_else(|e| panic!("--gpu: {e}"));
+        let mut batch = BatchEvaluation::new(config.population);
+        let mut track_reports = Vec::new();
+        let mut simulated_ticks = 0u64;
+        let mut active_cars = 0usize;
+        let mut lap_time_sum = 0.0;
+        let mut lap_count = 0usize;
+        let mut median_lap = None;
+        let mut saved = Value::Null;
+        let mut generation_best: Option<f64> = None;
+        for track_index in 0..track_count {
+            if track_index > 0 {
+                let track = track_buffer.as_ref().unwrap().next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
+                current_track = Some(activate_prepared_track(&mut runner, track, gpu.as_ref(), &mut gpu_sim, &mut gpu_world));
+                runner.reset_evaluation();
             }
-            _ => {
-                runner.advance_generation(config.ticks);
+            write_progress(dir, generation, track_index, track_index, track_count);
+            let track_file = current_track.as_ref().map(|track| {
+                assert_eq!((track.generation, track.track_index), (generation as u64, track_index));
+                let name = if track_count == 1 { format!("tracks/g{generation:05}.track.json") }
+                           else { format!("tracks/g{generation:05}_t{track_index:03}.track.json") };
+                std::fs::create_dir_all(dir.join("tracks")).expect("track directory");
+                write_atomic(&dir.join(&name), (serde_json::to_string(&track.track).unwrap() + "\n").as_bytes());
+                name
+            });
+            let track_config = current_track.as_ref().map(|track| track.track.config.clone());
+            match (&mut gpu_sim, &gpu_world) {
+                (Some(sim), Some(world)) => { runner.advance_generation_gpu(sim, world, config.ticks).unwrap_or_else(|e| panic!("--gpu: {e}")); }
+                _ => { runner.advance_generation(config.ticks); }
             }
+            simulated_ticks += runner.tick;
+            let active = runner.agents.iter().filter(|agent| agent.car.active).count();
+            active_cars += active;
+            let laps: Vec<Option<f64>> = runner.agents.iter().map(|a| a.stats.best_lap_time.filter(|&t| t > 0.0)).collect();
+            let scores: Vec<f64> = runner.agents.iter().map(|a| a.stats.total_score).collect();
+            let lapped: Vec<f64> = laps.iter().flatten().copied().collect();
+            let leader = (0..laps.len()).filter(|&i| laps[i].is_some()).fold(None, |best: Option<usize>, i| match best {
+                Some(b) if (laps[b], -scores[b]) <= (laps[i], -scores[i]) => Some(b),
+                _ => Some(i),
+            });
+            let track_best = leader.map(|i| laps[i].unwrap());
+            if let Some(lap) = track_best { generation_best = Some(generation_best.map_or(lap, |best| best.min(lap))); }
+            batch.record(&runner.results(), &runner.settings.rewards);
+            track_reports.push(json!({"track_index": track_index, "track_file": track_file, "track_config": track_config,
+                "simulated_ticks": runner.tick, "active_cars": active, "lapped_cars": lapped.len(), "best_lap_s": track_best,
+                "best_score": scores.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                "mean_score": py_sum(scores.iter().copied()) / scores.len() as f64}));
+            lap_time_sum += py_sum(lapped.iter().copied());
+            lap_count += lapped.len();
+            if track_count == 1 && !lapped.is_empty() {
+                let mut sorted = lapped;
+                sorted.sort_by(f64::total_cmp);
+                median_lap = Some(sorted[sorted.len() / 2]);
+            }
+            if let (Some(i), Some(lap)) = (leader, track_best) {
+                if lap < best_lap {
+                    best_lap = lap;
+                    best_lap_generation = Some(generation as u64);
+                    let mut export = runner.agents[i].network.to_json();
+                    export["inputs"] = network_data["inputs"].clone();
+                    export["outputs"] = network_data["outputs"].clone();
+                    export["training"] = json!({
+                        "generation": generation, "car": i, "inference_batch": i / config.population.div_ceil(8),
+                        "reused_vehicle": generation > 0, "best_lap_s": lap, "total_score": scores[i],
+                        "mutation_rate": rate, "track": run["track"], "seed": config.seed,
+                        "track_file": track_file, "track_config": track_config,
+                        "track_index": track_index, "tracks_per_generation": track_count,
+                    });
+                    let text = serde_json::to_string_pretty(&export).unwrap() + "\n";
+                    let name = if track_count == 1 { format!("g{generation:05}_{lap:.2}s.json") }
+                               else { format!("g{generation:05}_t{track_index:03}_{lap:.2}s.json") };
+                    write_atomic(&best_dir.join(&name), text.as_bytes());
+                    write_atomic(&dir.join("best.json"), text.as_bytes());
+                    saved = json!(format!("best_laps/{name}"));
+                    best_network_file = saved.clone();
+                }
+            }
+            write_progress(dir, generation, track_index, track_index + 1, track_count);
         }
         let simulate_seconds = generation_started.elapsed().as_secs_f64();
-        let simulated_ticks = runner.tick;
-        let simulated_seconds = simulated_ticks as f64 / 60.0;
-        let active_cars = runner.agents.iter().filter(|agent| agent.car.active).count();
-
-        let laps: Vec<Option<f64>> =
-            runner.agents.iter().map(|a| a.stats.best_lap_time.filter(|&t| t > 0.0)).collect();
-        let scores: Vec<f64> = runner.agents.iter().map(|a| a.stats.total_score).collect();
-        let lapped: Vec<f64> = laps.iter().flatten().copied().collect();
-        // Fastest lap; ties go to the higher score, then the first car.
-        let leader = (0..laps.len()).filter(|&i| laps[i].is_some()).fold(None, |best: Option<usize>, i| match best {
-            Some(b) if (laps[b], -scores[b]) <= (laps[i], -scores[i]) => Some(b),
-            _ => Some(i),
-        });
-        let generation_best = leader.map(|i| laps[i].unwrap());
-        let mean_lap = (!lapped.is_empty()).then(|| py_sum(lapped.iter().copied()) / lapped.len() as f64);
-        let mut sorted = lapped.clone();
-        sorted.sort_by(f64::total_cmp);
-        let median_lap = (!sorted.is_empty()).then(|| sorted[sorted.len() / 2]);
-        let best_score = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mean_score = py_sum(scores.iter().copied()) / scores.len() as f64;
-
-        let mut saved = Value::Null;
-        if let (Some(i), Some(lap)) = (leader, generation_best) {
-            if lap < best_lap {
-                best_lap = lap;
-                best_lap_generation = Some(generation as u64);
-                let mut export = runner.agents[i].network.to_json();
-                export["inputs"] = network_data["inputs"].clone();
-                export["outputs"] = network_data["outputs"].clone();
-                export["training"] = json!({
-                    "generation": generation, "car": i, "inference_batch": i / config.population.div_ceil(8),
-                    "reused_vehicle": generation > 0, "best_lap_s": lap, "total_score": scores[i],
-                    "mutation_rate": rate, "track": run["track"], "seed": config.seed,
-                    "track_file": track_file, "track_config": generation_track_config,
-                });
-                let text = serde_json::to_string_pretty(&export).unwrap() + "\n";
-                let name = format!("g{generation:05}_{lap:.2}s.json");
-                write_atomic(&best_dir.join(&name), text.as_bytes());
-                write_atomic(&dir.join("best.json"), text.as_bytes());
-                saved = json!(format!("best_laps/{name}"));
-            }
-        }
-
+        let summary = batch.finish();
+        let best_score = summary.mean_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mean_score = py_sum(summary.mean_scores.iter().copied()) / config.population as f64;
+        let mean_lap = (lap_count > 0).then(|| lap_time_sum / lap_count as f64);
+        let batch_lap = if track_count == 1 { generation_best } else { summary.best_mean_lap_s };
+        let lapped_count = summary.lapped_all_tracks;
         let stop_request = stop_request_path.exists();
-        let mut stop_reason = config.stop.check(&mut stop_state, generation, generation_best, best_score, lapped.len(),
+        let mut stop_reason = config.stop.check(&mut stop_state, generation, batch_lap, best_score, lapped_count,
                                                 config.population, stop_request);
-        if stop_request {
-            let _ = std::fs::remove_file(&stop_request_path);
-        }
+        if stop_request { let _ = std::fs::remove_file(&stop_request_path); }
         if stop_reason.is_none() && generation + 1 == config.generations {
             stop_reason = Some(json!({"condition": "generations", "generation": generation,
                                       "value": generation + 1, "threshold": config.generations}));
         }
         let last = stop_reason.is_some();
         let final_checkpoint = last && config.checkpoint_every > 0;
-
+        let candidate = if last && config.save_final_candidate {
+            let leader = final_candidate_leader(&summary.fitness);
+            let mut export = runner.agents[leader].network.to_json();
+            export["schema_version"] = json!(1);
+            export["inputs"] = network_data["inputs"].clone();
+            export["outputs"] = network_data["outputs"].clone();
+            export["training"] = json!({"generation": generation, "car": leader,
+                "selection_rule": "complete-batch-fitness-lowest-index-tie", "fitness": summary.fitness[leader],
+                "rewards": runner.settings.to_json()["rewards"], "total_score": summary.mean_scores[leader],
+                "metric_totals": summary.metric_totals[leader], "update_count": summary.update_counts[leader],
+                "lapped_tracks": summary.lap_counts[leader], "tracks_per_generation": track_count,
+                "best_lap_s": if track_count == 1 { runner.agents[leader].stats.best_lap_time } else { None },
+                "mutation_rate": rate, "seed": config.seed});
+            let bytes = (serde_json::to_string_pretty(&export).unwrap() + "\n").into_bytes();
+            write_atomic(&dir.join("candidate.json"), &bytes);
+            json!({"file": "candidate.json", "sha256": altd_sim::evaluation::sha256(&bytes), "generation": generation})
+        } else { Value::Null };
         let turnover_started = Instant::now();
-        // Breed after the last generation too, so the final checkpoint continues exactly.
         if !last || final_checkpoint {
             runner.settings.mutation_rate = scheduled_rate(config, generation + 1);
             if let Some(buffer) = &track_buffer {
-                let mut track = buffer.next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
-                runner.replace_track(track.world.clone(), track.position, track.rotation);
-                if let (Some(gpu), Some(sim)) = (&gpu, &mut gpu_sim) {
-                    let world = altd_sim::gpu::GpuWorld::from_prepared(gpu, track.gpu_world.take().expect("buffered GPU track arrays"));
-                    sim.set_world(&world);
-                    gpu_world = Some(world);
-                }
-                current_track = Some(track);
+                let track = buffer.next_track().unwrap_or_else(|e| panic!("random tracks: {e}"));
+                current_track = Some(activate_prepared_track(&mut runner, track, gpu.as_ref(), &mut gpu_sim, &mut gpu_world));
             }
             if let Some(sim) = &mut gpu_sim {
-                runner.next_generation_gpu(sim).unwrap_or_else(|e| panic!("--gpu: {e}"));
-            } else {
-                runner.next_generation();
-            }
+                if track_count == 1 { runner.next_generation_gpu(sim) }
+                else { runner.next_generation_gpu_with_fitness(sim, summary.fitness.clone()) }.unwrap_or_else(|e| panic!("--gpu: {e}"));
+            } else if track_count == 1 { runner.next_generation(); }
+            else { runner.next_generation_with_fitness(summary.fitness.clone()); }
         }
         let turnover_seconds = turnover_started.elapsed().as_secs_f64();
         let wall = generation_started.elapsed().as_secs_f64();
         let record = json!({
-            "generation": generation,
-            "track_file": track_file,
-            "track_config": generation_track_config,
-            "mutation_rate": rate,
-            "best_lap_s": generation_best,
-            "mean_best_lap_s": mean_lap,
-            "median_best_lap_s": median_lap,
-            "lapped_cars": lapped.len(),
-            "best_score": best_score,
-            "mean_score": mean_score,
-            "all_time_best_lap_s": best_lap.is_finite().then_some(best_lap),
-            "all_time_best_lap_generation": best_lap_generation,
-            "saved": saved,
-            "simulate_seconds": simulate_seconds,
-            "simulated_ticks": simulated_ticks,
-            "active_cars": active_cars,
-            "turnover_seconds": turnover_seconds,
-            "car_seconds_per_second": simulated_seconds * config.population as f64 / wall,
+            "schema_version": 2, "generation": generation, "tracks_per_generation": track_count,
+            "tracks": track_reports, "track_file": track_reports[0]["track_file"], "track_config": track_reports[0]["track_config"],
+            "mutation_rate": rate, "best_lap_s": generation_best, "best_batch_mean_lap_s": batch_lap,
+            "mean_best_lap_s": mean_lap, "median_best_lap_s": median_lap,
+            "lapped_cars": lapped_count, "lapped_all_tracks": lapped_count,
+            "best_score": best_score, "best_mean_score": best_score, "mean_score": mean_score,
+            "best_fitness": summary.fitness.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            "mean_fitness": py_sum(summary.fitness.iter().copied()) / config.population as f64,
+            "total_metric_values": (0..14).map(|metric| py_sum(summary.metric_totals.iter().map(|row| row[metric]))).collect::<Vec<_>>(),
+            "total_update_count": summary.update_counts.iter().sum::<u64>(),
+            "all_time_best_lap_s": best_lap.is_finite().then_some(best_lap), "all_time_best_lap_generation": best_lap_generation,
+            "saved": saved, "simulate_seconds": simulate_seconds, "simulated_ticks": simulated_ticks,
+            "active_cars": active_cars / track_count, "turnover_seconds": turnover_seconds,
+            "car_seconds_per_second": simulated_ticks as f64 / 60.0 * config.population as f64 / wall,
         });
         writeln!(log, "{record}").and_then(|_| log.flush()).expect("write log");
-        println!(
-            "gen {generation:5}  mut {rate:.5}  best lap {}  avg best lap {}  lapped {:5}/{}  score {:8.1}/{:7.1}  all-time {}{}  {wall:5.2} s",
-            fmt_lap(generation_best),
-            fmt_lap(mean_lap),
-            lapped.len(),
-            config.population,
-            best_score,
-            mean_score,
-            fmt_lap(best_lap.is_finite().then_some(best_lap)),
-            if saved.is_null() { "" } else { "  * saved" },
-        );
-
+        println!("gen {generation:5}  tracks {track_count}  mut {rate:.5}  best lap {}  batch lap {}  lapped {lapped_count}/{}  score {best_score:.1}/{mean_score:.1}  {wall:.2} s",
+                 fmt_lap(generation_best), fmt_lap(batch_lap), config.population);
         if final_checkpoint || (!last && config.checkpoint_every > 0 && (generation + 1) % config.checkpoint_every == 0) {
-            write_checkpoint(
-                dir,
-                &runner,
-                json!({"best_lap_s": best_lap.is_finite().then_some(best_lap), "best_lap_generation": best_lap_generation,
-                       "random_tracks": track_settings.as_ref().map(|settings| json!({"seed": track_seed, "settings": settings})),
-                       "stop_reason": if last { stop_reason.clone().unwrap() } else { Value::Null }}),
-            );
+            write_checkpoint(dir, &runner, json!({
+                "best_lap_s": best_lap.is_finite().then_some(best_lap), "best_lap_generation": best_lap_generation,
+                "best_network_file": best_network_file, "tracks_per_generation": track_count, "track_seed_version": 2,
+                "random_tracks": track_settings.as_ref().map(|settings| json!({"seed": track_seed, "settings": settings})),
+                "stop_reason": if last { stop_reason.clone().unwrap() } else { Value::Null },
+                "candidate": candidate,
+            }));
         }
-        if let Some(reason) = &stop_reason {
-            println!("stopped: {reason}");
-            break;
-        }
+        if let Some(reason) = &stop_reason { println!("stopped: {reason}"); break; }
     }
+    let _ = std::fs::remove_file(dir.join("progress.json"));
     println!(
         "done: best lap {} (generation {}), {:.1} h",
         fmt_lap(best_lap.is_finite().then_some(best_lap)),
@@ -1691,7 +1797,7 @@ fn main() {
         Command::TrainScratch {
             tracks,
             scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
-            mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume,
+            mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, save_final_candidate, resume,
             eliminate_on_wall, no_eliminate_on_wall, idle_eliminate, no_idle_eliminate, gpu,
             stop_score_above, stop_lap_below, stop_lapped_percent, stop_plateau, plateau_metric,
         } => {
@@ -1702,12 +1808,18 @@ fn main() {
             let config = ScratchConfig {
                 tracks,
                 scene, spawn_trace, network, model, out_dir, shape, population, generations, ticks, mutation_start,
-                mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, resume, stop,
+                mutation_end, schedule, settings, reward, seed, init_network, init_population, game_rng_state, batch_count, checkpoint_every, save_final_candidate, resume, stop,
                 eliminate_on_wall: flag(eliminate_on_wall, no_eliminate_on_wall),
                 idle_eliminate: flag(idle_eliminate, no_idle_eliminate),
                 gpu,
             };
             train_scratch(&config, mode, threads);
+        }
+        Command::Evaluate { network, model, suite, report } => {
+            match altd_sim::evaluation::evaluate(&network, &model, &suite, &report) {
+                Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                Err(error) => { eprintln!("evaluation: {error}"); std::process::exit(1); }
+            }
         }
         Command::CompareTrace { scene, trace, report, start_index, end_index } => {
             let world = World::from_scene(&load(&scene));
@@ -1751,7 +1863,13 @@ fn main() {
 #[cfg(test)]
 mod scratch_reward_tests {
     use super::*;
-    use altd_sim::{evolution::{reproduce, AgentResult}, training::TrainingStats};
+    use altd_sim::{evolution::{reproduce, reward_values, AgentResult}, training::TrainingStats};
+
+    #[test]
+    fn final_candidate_selection_breaks_ties_by_population_index() {
+        assert_eq!(final_candidate_leader(&[1.0, 3.0, 3.0, 2.0]), 1);
+        assert_eq!(final_candidate_leader(&[0.0, 0.0, 0.0]), 0);
+    }
 
     #[test]
     fn reward_choice_changes_the_preserved_parent() {
@@ -1781,6 +1899,28 @@ mod scratch_reward_tests {
         let rewards = reward_values(&agents, &[ScratchReward::BestLapTime.spec()]);
         assert!(rewards[2] > rewards[1]);
         assert!(rewards[2] > rewards[0]);
+    }
+
+    #[test]
+    fn batch_stop_conditions_require_one_driver_to_succeed_across_all_tracks() {
+        let network = Network::from_vector(&[1, 1], vec![0.0; 2]);
+        let mut batch = BatchEvaluation::new(2);
+        for track in 0..2 {
+            let results: Vec<_> = (0..2).map(|i| {
+                let mut metrics = [Some(0.0); 14];
+                metrics[0] = Some(if i == track { 100.0 } else { 0.0 });
+                metrics[12] = if i == track { Some(0.1) } else { None };
+                AgentResult { network: &network, metrics, update_count: 10 }
+            }).collect();
+            batch.record(&results, &[ScratchReward::Distance.spec()]);
+        }
+        let summary = batch.finish();
+        let rules = StopRules { score_above: Some(75.0), lap_below: Some(15.0),
+            lapped_percent: Some(50.0), plateau: None, plateau_metric: PlateauMetric::Lap };
+        let mut state = StopState { best_lap: None, best_score: f64::NEG_INFINITY, stale: 0 };
+        assert_eq!(rules.check(&mut state, 0, summary.best_mean_lap_s,
+            summary.mean_scores.into_iter().fold(f64::NEG_INFINITY, f64::max),
+            summary.lapped_all_tracks, 2, false), None);
     }
 
     #[test]

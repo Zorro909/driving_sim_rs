@@ -181,12 +181,29 @@ pub struct SensorScratch {
     pub stamps: RayStamps,
     /// `(sensor point, offset)` of the last path projection for this car pose.
     path_cache: Option<(V2, f64)>,
+    /// Fixed ray geometry survives pose changes. The cursor makes ordered
+    /// training reads an indexed lookup instead of a search.
+    ray_geometry: Vec<(u32, u32, F2)>,
+    ray_cursor: usize,
 }
 
 impl SensorScratch {
     /// Forget cached path projections (call when the car moves).
     pub fn invalidate(&mut self) {
         self.path_cache = None;
+        self.ray_cursor = 0;
+    }
+    fn ray_local(&mut self, degrees: f64, length: f64) -> F2 {
+        let key=((degrees as f32).to_bits(),(length as f32).to_bits());
+        let cursor=self.ray_cursor;
+        self.ray_cursor=self.ray_cursor.saturating_add(1);
+        if let Some(&(angle,len,local))=self.ray_geometry.get(cursor) {
+            if (angle,len)==key { return local; }
+        }
+        if let Some(&(_,_,local))=self.ray_geometry.iter().find(|&&(a,l,_)|(a,l)==key) { return local; }
+        let local=Car::ray_local(degrees,length);
+        if self.ray_geometry.len()<64 { self.ray_geometry.push((key.0,key.1,local)); }
+        local
     }
 }
 
@@ -595,11 +612,14 @@ impl Car {
     /// The world-space end of the ray sensor of `degrees` and `length`, and
     /// the float32 length. The ray runs from `position` to it.
     pub fn ray_end(&self, degrees: f64, length: f64) -> (V2, f32) {
+        let local=Self::ray_local(degrees,length);
+        (godot_math::transform_point(self.position, self.body_basis, local.into()), length as f32)
+    }
+    fn ray_local(degrees: f64, length: f64) -> F2 {
         assert!(length > 0.0, "ray length must be positive");
         let length = length as f32;
         let angle = (degrees as f32 - 90.0f32) * (std::f32::consts::PI / 180.0);
-        let local = F2 { x: crate::native_math::cos(angle) * length, y: crate::native_math::sin(angle) * length };
-        (godot_math::transform_point(self.position, self.body_basis, local.into()), length)
+        F2 { x: crate::native_math::cos(angle) * length, y: crate::native_math::sin(angle) * length }
     }
 
     /// The ray sensor reading for `hit`, the track's raycast from `start` to
@@ -631,7 +651,9 @@ impl Car {
         let track = &world.track;
         match sensor {
             Sensor::Raycast { degrees, length } => {
-                let (end, length) = self.ray_end(degrees, length);
+                let local=scratch.ray_local(degrees,length);
+                let end=godot_math::transform_point(self.position,self.body_basis,local.into());
+                let length=length as f32;
                 Self::ray_value(self.position, end, length, track.raycast(self.position, end, &mut scratch.stamps))
             }
             Sensor::DistanceFromWall { max_distance } => {
@@ -707,7 +729,6 @@ impl Car {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Car {
     /// The GPU car state (`gpu_sim::GpuCar`) with its collision scratch;
     /// errors on states the GPU port does not model.

@@ -4,6 +4,7 @@ pub mod car;
 pub mod collision;
 mod broadphase;
 pub mod evolution;
+pub mod batch_evaluation;
 pub mod network;
 #[cfg(target_arch = "x86_64")]
 mod network_simd;
@@ -29,8 +30,8 @@ pub mod game_random;
 pub mod simulation;
 
 pub mod random_track;
-// The buffered training producer uses native threads and prepares HIP worlds.
-#[cfg(not(target_arch = "wasm32"))]
+// Random training tracks. The buffered producer uses native threads and
+// prepares HIP worlds, so the WebAssembly target keeps only track selection.
 pub mod training_tracks;
 
 pub mod double_math;
@@ -44,10 +45,12 @@ pub mod session;
 /// dlopen, so the WebAssembly target leaves it out.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_sim;
 
 /// The WebAssembly library (`--target wasm32-unknown-unknown --features wasm`):
 /// JavaScript bindings and the WebGPU raycaster.
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub mod wasm;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod evaluation;

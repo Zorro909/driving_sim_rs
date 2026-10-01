@@ -17,6 +17,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 pub mod gpu;
+pub mod sim;
 
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -37,6 +38,50 @@ fn parse(text: &str, what: &str) -> Result<serde_json::Value, JsError> {
     serde_json::from_str(text).map_err(|e| js_error(format!("{what}: {e}")))
 }
 
+fn vehicle_template(text: &str) -> Result<serde_json::Value, JsError> {
+    let template = parse(text, "vehicle template")?;
+    if !template["vehicle"].is_object() || !template["physics"].is_object() {
+        return Err(js_error("the vehicle template needs vehicle and physics sections"));
+    }
+    Ok(template)
+}
+
+/// Converts a track the game saved (the JSON inside a `.track` file) into a
+/// training scene for independent cars, with the vehicle and physics of
+/// `templateJson`. Malformed or open tracks are reported as errors.
+#[wasm_bindgen(js_name = trackScene)]
+pub fn track_scene(track_json: &str, name: &str, template_json: &str) -> Result<String, JsError> {
+    let saved = parse(track_json, "track file")?;
+    let template = vehicle_template(template_json)?;
+    let scene = crate::random_track::saved_track_scene(&saved, name, &template).map_err(js_error)?;
+    Ok(scene.to_string())
+}
+
+/// The random training track of `generation` (0 for the first) in a run with
+/// `seed`: `settingsJson` holds `RandomTrainingTrackSettings`. The scene uses
+/// the game's TileMap position and independent cars.
+#[wasm_bindgen(js_name = randomTrackScene)]
+pub fn random_track_scene(template_json: &str, settings_json: &str, seed: f64, generation: u32) -> Result<String, JsError> {
+    use crate::training_tracks::{training_scene, RandomTrainingTrackSettings};
+    let template = vehicle_template(template_json)?;
+    let settings: RandomTrainingTrackSettings =
+        serde_json::from_str(settings_json).map_err(|e| js_error(format!("random track settings: {e}")))?;
+    settings.validate().map_err(js_error)?;
+    if seed.fract() != 0.0 || seed.abs() > 9_007_199_254_740_991.0 {
+        return Err(js_error("the track seed must be a safe integer"));
+    }
+    let generator = match template["runtime"]["hashcode_seed"].as_u64() {
+        Some(hash) => Some(crate::random_track::TrackGenerator::new(
+            u32::try_from(hash).map_err(|_| js_error("HashCode seed exceeds u32"))?,
+        )),
+        None => None,
+    };
+    let (_, mut scene) =
+        training_scene(&template, &settings, generator.as_ref(), seed as i64, generation as u64).map_err(js_error)?;
+    crate::random_track::place_tile_map(&mut scene, crate::random_track::GAME_TILE_MAP_POSITION);
+    Ok(scene.to_string())
+}
+
 fn to_js(value: &serde_json::Value) -> Result<JsValue, JsError> {
     js_sys::JSON::parse(&value.to_string()).map_err(|e| js_error(format!("{e:?}")))
 }
@@ -46,6 +91,8 @@ pub(crate) struct Shared {
     pub session: RefCell<Session>,
     /// A WebGPU window is between its promise's creation and settlement.
     pub busy: Cell<bool>,
+    /// Changes made through the CPU session invalidate resident GPU state.
+    pub revision: Cell<u64>,
     pub gpu_rays_checked: Cell<u64>,
     pub gpu_ray_mismatches: Cell<u64>,
 }
@@ -59,6 +106,13 @@ pub struct Simulation {
 
 #[wasm_bindgen]
 impl Simulation {
+    /// Changes the next reproduction's settings, retaining the population's
+    /// current statistics and RNG. See `Session::set_evolution_settings`.
+    #[wasm_bindgen(js_name = setEvolutionSettings)]
+    pub fn set_evolution_settings(&self, json: &str) -> Result<(), JsError> {
+        self.session_mut()?.set_evolution_settings(json).map_err(js_error)
+    }
+
     /// `sceneJson`, `networkJson` (inputs, outputs, optional weights) and
     /// `modelJson` are the files the CLI takes; `options` is an object or
     /// JSON string of `SessionOptions` (see wasm/README.md).
@@ -75,7 +129,7 @@ impl Simulation {
         let session = Session::new(&parse(scene_json, "scene")?, &parse(network_json, "network")?, &parse(model_json, "model")?, options)
             .map_err(js_error)?;
         Ok(Simulation {
-            shared: Rc::new(Shared { session: RefCell::new(session), busy: Cell::new(false), gpu_rays_checked: Cell::new(0), gpu_ray_mismatches: Cell::new(0) }),
+            shared: Rc::new(Shared { session: RefCell::new(session), busy: Cell::new(false), revision: Cell::new(0), gpu_rays_checked: Cell::new(0), gpu_ray_mismatches: Cell::new(0) }),
         })
     }
 
@@ -87,7 +141,17 @@ impl Simulation {
         if self.shared.busy.get() {
             return Err(js_error("a WebGPU window is in flight; await its promise first"));
         }
+        self.shared.revision.set(self.shared.revision.get().wrapping_add(1));
         Ok(self.shared.session.borrow_mut())
+    }
+
+    /// Selects the track the next generation drives: call it after the last
+    /// window of a generation and before `nextGeneration`. The scene must use
+    /// the same vehicle.
+    #[wasm_bindgen(js_name = replaceTrack)]
+    pub fn replace_track(&self, scene_json: &str) -> Result<(), JsError> {
+        let scene = parse(scene_json, "scene")?;
+        self.session_mut()?.replace_track(&scene).map_err(js_error)
     }
 
     /// Installs the first generation from the network export's weights, or
@@ -253,7 +317,51 @@ impl Simulation {
         }
     }
 
-    /// A generation-boundary checkpoint (generation, RNG, networks) as JSON.
+    /// Statistics of the generation so far: `{bestIndex, bestScore, lapped,
+    /// active, lapIndex, lapTime}` (lap fields null without a lap).
+    #[wasm_bindgen(js_name = generationSummary)]
+    pub fn generation_summary(&self) -> Result<JsValue, JsError> {
+        let s = self.session().generation_summary();
+        let result = js_sys::Object::new();
+        let set = |key: &str, value: JsValue| js_sys::Reflect::set(&result, &key.into(), &value).map(|_| ()).map_err(|e| js_error(format!("{e:?}")));
+        let number = |v: Option<f64>| v.map_or(JsValue::NULL, JsValue::from);
+        set("bestIndex", JsValue::from(s.best_index as u32))?;
+        set("bestScore", JsValue::from(s.best_score))?;
+        set("lapped", JsValue::from(s.lapped as u32))?;
+        set("active", JsValue::from(s.active as u32))?;
+        set("lapIndex", number(s.lap_index.map(|i| i as f64)))?;
+        set("lapTime", number(s.lap_time))?;
+        Ok(result.into())
+    }
+
+    /// Cars that still drive.
+    #[wasm_bindgen(getter, js_name = activeCount)]
+    pub fn active_count(&self) -> u32 {
+        self.session().active_count() as u32
+    }
+
+    /// The checkpoint of the current generation's start in the binary form
+    /// of `Session::checkpoint_bytes`. The session keeps that boundary as a
+    /// copy, so hosts request the bytes only when they save.
+    #[wasm_bindgen(js_name = checkpointBytes)]
+    pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, JsError> {
+        self.session().checkpoint_bytes().map_err(js_error)
+    }
+
+    /// Restores a `checkpointBytes` checkpoint.
+    #[wasm_bindgen(js_name = restoreCheckpointBytes)]
+    pub fn restore_checkpoint_bytes(&self, bytes: &[u8]) -> Result<(), JsError> {
+        self.session_mut()?.restore_checkpoint_bytes(bytes).map_err(js_error)
+    }
+
+    /// The generation `checkpointBytes` saves.
+    #[wasm_bindgen(getter, js_name = checkpointGeneration)]
+    pub fn checkpoint_generation(&self) -> Option<u32> {
+        self.session().boundary().map(|(g, _)| g as u32)
+    }
+
+    /// A checkpoint of the current state (generation, RNG, networks) as JSON.
+    /// Call it at a generation boundary; `checkpointBytes` is the compact form.
     #[wasm_bindgen(js_name = checkpointJson)]
     pub fn checkpoint_json(&self) -> Result<String, JsError> {
         self.session().checkpoint().map(|v| v.to_string()).map_err(js_error)

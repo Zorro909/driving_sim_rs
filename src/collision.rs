@@ -587,7 +587,6 @@ pub fn solve_wall_contacts(
     SolveResult { velocity: v.into(), angular_velocity: w as f64, bias_velocity: bv.into(), bias_angular: bw as f64, collided: !contacts.is_empty() }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl CollisionScratch {
     /// Fills the scratch fields of a GPU car (gpu/sim/state.h) and its
     /// retained contacts; errors on states the GPU port does not model.

@@ -1,11 +1,15 @@
 //! CPU generation and bounded prefetch of tracks for independent training cars.
 use crate::game_random::GameRandom;
 use crate::random_track::{self, GeneratedTrack, RandomTrackConfig, TrackGenerator};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::vec2::V2;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::world::World;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{mpsc, Arc};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
 /// A fixed setting or uniformly sampled choices.
@@ -158,8 +162,10 @@ impl RandomTrainingTrackSettings {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PreparedTrainingTrack {
     pub generation: u64,
+    pub track_index: usize,
     pub track: GeneratedTrack,
     pub world: Arc<World>,
     pub position: V2,
@@ -180,14 +186,26 @@ fn track_state(seed: i64, generation: u64) -> [u64; 4] {
     })
 }
 
-fn prepare(
+/// The track and independent-car scene for `generation` of a run with `seed`.
+/// Validate `settings` first.
+pub fn training_scene(
     template: &Value,
     settings: &RandomTrainingTrackSettings,
     generator: Option<&TrackGenerator>,
     seed: i64,
     generation: u64,
-) -> Result<PreparedTrainingTrack, String> {
-    let mut rng = GameRandom::new(track_state(seed, generation), 0);
+) -> Result<(GeneratedTrack, Value), String> {
+    training_scene_at(template, settings, generator, seed, generation, 0)
+}
+
+/// Track zero preserves the historical seed stream; other slots have independent streams.
+pub fn training_scene_at(template: &Value, settings: &RandomTrainingTrackSettings,
+                         generator: Option<&TrackGenerator>, seed: i64, generation: u64,
+                         track_index: usize) -> Result<(GeneratedTrack, Value), String> {
+    let slot_seed = if track_index == 0 { seed } else {
+        ((seed as u64) ^ (track_index as u64).wrapping_mul(0xa0761d6478bd642f)) as i64
+    };
+    let mut rng = GameRandom::new(track_state(slot_seed, generation), 0);
     // The game may shorten failed paths. Retry rather than violate the user's
     // minimum; keep both configuration sampling and generation bounded.
     for _ in 0..16 {
@@ -206,21 +224,36 @@ fn prepare(
             // CLI training uses independent cars on both backends. Native shared
             // TileMap redraw replay remains available through TrainingRunner.
             scene["track"]["native_broadphase"] = Value::Bool(false);
-            let position = crate::world::vector(&scene["reset_position"]);
-            let rotation = scene["reset_rotation"].as_f64().unwrap();
-            return Ok(PreparedTrainingTrack {
-                generation,
-                track,
-                world: Arc::new(World::from_scene(&scene)),
-                position,
-                rotation,
-                gpu_world: None,
-            });
+            return Ok((track, scene));
         }
     }
     Err(format!("could not generate track for generation {generation} within the requested settings after 16 attempts"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare(
+    template: &Value,
+    settings: &RandomTrainingTrackSettings,
+    generator: Option<&TrackGenerator>,
+    seed: i64,
+    generation: u64,
+    track_index: usize,
+) -> Result<PreparedTrainingTrack, String> {
+    let (track, scene) = training_scene_at(template, settings, generator, seed, generation, track_index)?;
+    let position = crate::world::vector(&scene["reset_position"]);
+    let rotation = scene["reset_rotation"].as_f64().unwrap();
+    Ok(PreparedTrainingTrack {
+        generation,
+        track_index,
+        track,
+        world: Arc::new(World::from_scene(&scene)),
+        position,
+        rotation,
+        gpu_world: None,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// A dedicated CPU producer prepares geometry and spatial queries while the
 /// simulator consumes tracks. The queue is bounded and never reuses a track
 /// when empty: the consumer waits for the next generation or receives an error.
@@ -229,6 +262,7 @@ pub struct TrainingTrackBuffer {
     worker: Option<JoinHandle<()>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TrainingTrackBuffer {
     pub fn new(
         template: Value,
@@ -238,10 +272,17 @@ impl TrainingTrackBuffer {
         capacity: usize,
         prepare_gpu: bool,
     ) -> Result<Self, String> {
+        Self::new_batched(template, settings, seed, first_generation, capacity, prepare_gpu, 1)
+    }
+
+    pub fn new_batched(template: Value, settings: RandomTrainingTrackSettings, seed: i64,
+                       first_generation: u64, capacity: usize, prepare_gpu: bool,
+                       tracks_per_generation: usize) -> Result<Self, String> {
         settings.validate()?;
         if capacity == 0 {
             return Err("track buffer size must be positive".into());
         }
+        if tracks_per_generation == 0 { return Err("tracks per generation must be positive".into()); }
         let hash_seed = template["runtime"]["hashcode_seed"]
             .as_u64()
             .map(u32::try_from)
@@ -253,8 +294,9 @@ impl TrainingTrackBuffer {
             .spawn(move || {
                 let generator = hash_seed.map(TrackGenerator::new);
                 for generation in first_generation..u64::MAX {
+                  for track_index in 0..tracks_per_generation {
                     let result =
-                        prepare(&template, &settings, generator.as_ref(), seed, generation)
+                        prepare(&template, &settings, generator.as_ref(), seed, generation, track_index)
                             .and_then(|mut track| {
                                 if prepare_gpu {
                                     track.gpu_world =
@@ -264,8 +306,9 @@ impl TrainingTrackBuffer {
                             });
                     let failed = result.is_err();
                     if sender.send(result).is_err() || failed {
-                        break;
+                        return;
                     }
+                  }
                 }
             })
             .map_err(|e| format!("could not start CPU track producer: {e}"))?;
@@ -284,6 +327,7 @@ impl TrainingTrackBuffer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for TrainingTrackBuffer {
     fn drop(&mut self) {
         // Disconnect first to release a producer blocked on a full queue.

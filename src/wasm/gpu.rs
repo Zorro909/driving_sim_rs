@@ -219,14 +219,19 @@ fn navigator_gpu() -> Result<web_sys::Gpu, JsValue> {
 
 /// Requests a WebGPU adapter and device: a promise of a `GPUDevice`.
 #[wasm_bindgen(js_name = requestGpuDevice)]
-pub fn request_gpu_device() -> Promise {
-    future_to_promise(async {
+pub fn request_gpu_device(require_hardware: Option<bool>) -> Promise {
+    future_to_promise(async move {
         let gpu = navigator_gpu()?;
         let adapter = JsFuture::from(gpu.request_adapter()).await?;
         if adapter.is_null() || adapter.is_undefined() {
             return Err(error("WebGPU: no adapter"));
         }
         let adapter: GpuAdapter = adapter.unchecked_into();
+        if require_hardware.unwrap_or(false) {
+            let info=js_sys::Reflect::get(adapter.as_ref(),&JsValue::from_str("info"))?;
+            let fallback=js_sys::Reflect::get(&info,&JsValue::from_str("isFallbackAdapter"))?.as_bool().unwrap_or(false);
+            if fallback { return Err(error("WebGPU training needs a hardware adapter; the software adapter runs on the CPU")); }
+        }
         JsFuture::from(adapter.request_device()).await.map(JsValue::from)
     })
 }
@@ -391,6 +396,7 @@ pub(crate) fn advance_window(shared: Rc<Shared>, raycaster: Rc<Raycaster>, ticks
 }
 
 async fn run_window(shared: &Shared, raycaster: &Raycaster, ticks: u64, stop_when_inactive: bool, time_limit_ticks: Option<u64>) -> Result<u64, JsValue> {
+    shared.revision.set(shared.revision.get().wrapping_add(1));
     let (mut window, verify_every) = {
         let mut session = shared.session.borrow_mut();
         if !session.started() {

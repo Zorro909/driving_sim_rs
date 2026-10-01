@@ -6,7 +6,8 @@
 // Chromium (npm i -g playwright && npx playwright install chromium).
 // CHROMIUM=/path/to/chrome overrides the browser; GPU=hardware uses Vulkan
 // and rejects software adapters, GPU=software selects SwiftShader (default).
-// NO_GPU=1 runs only the CPU comparison.
+// NO_GPU=1 runs only the CPU comparison. PAGE=f64.html runs the soft-float
+// unit test (wasm/test/f64.html) instead of the simulator comparison.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -48,7 +49,7 @@ const args = gpuMode === 'none' ? [] : [
     '--enable-unsafe-webgpu', '--enable-blink-features=WebGPU', '--ignore-gpu-blocklist',
     '--enable-features=Vulkan',
     ...(gpuMode === 'hardware'
-        ? ['--use-angle=vulkan', '--disable-vulkan-surface']
+        ? ['--use-angle=vulkan', '--disable-vulkan-surface', '--enable-webgpu-developer-features']
         : ['--enable-unsafe-swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader']),
 ];
 const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, args });
@@ -63,11 +64,21 @@ try {
         verifyRays: Number(process.env.VERIFY_RAYS || 4000),
         verifyPoints: Number(process.env.VERIFY_POINTS || 4000),
         verifySeed: Number(process.env.VERIFY_SEED || 7),
+        f64Count: Number(process.env.F64_COUNT || 0),
         tickCheck: Number(process.env.TICK_CHECK || 0),
+        verify: process.env.VERIFY_SIM==='1',
+        population: Number(process.env.POPULATION || 0),
+        populations: (process.env.POPULATIONS || '').split(',').filter(Boolean).map(Number),
+        ticks: Number(process.env.TICKS || 0),
+        step: Number(process.env.STEP || 0),
+        keepAlive: process.env.KEEP_ALIVE === '1',
+        load: Number(process.env.LOAD || 0),
+        patches: process.env.PATCHES ? JSON.parse(process.env.PATCHES) : [],
+        kernels: process.env.KERNELS ? process.env.KERNELS.split(',') : undefined,
     });
     page.on('console', (message) => { if (message.type() === 'error' || message.type() === 'warning') console.error(`[browser ${message.type()}] ${message.text()}`); });
     page.on('pageerror', (error) => console.error(`[browser error] ${error}`));
-    await page.goto(`http://127.0.0.1:${port}/wasm/test/index.html`);
+    await page.goto(`http://127.0.0.1:${port}/wasm/test/${process.env.PAGE || 'index.html'}`);
     await page.waitForFunction(() => window.altdReport !== undefined, null, { timeout: 600000 });
     report = await page.evaluate(() => window.altdReport);
     report.browser = browser.version();

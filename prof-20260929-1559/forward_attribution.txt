@@ -1,5 +1,0 @@
-current: altd_gpu window: 5406 ticks, 32768 cars: stats 0.178 s, sensors 1.135 s, forward 2.617 s, step 1.004 s
-branchy: altd_gpu window: 5406 ticks, 32768 cars: stats 0.177 s, sensors 1.130 s, forward 2.860 s, step 1.001 s
-diag1: altd_gpu window: 5406 ticks, 32768 cars: stats 0.173 s, sensors 0.480 s, forward 1.797 s, step 1.233 s
-diag2: altd_gpu window: 5406 ticks, 32768 cars: stats 0.183 s, sensors 0.951 s, forward 2.217 s, step 1.113 s
-diag3: altd_gpu window: 5406 ticks, 32768 cars: stats 0.161 s, sensors 0.949 s, forward 1.589 s, step 1.104 s

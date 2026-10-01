@@ -84,14 +84,7 @@ impl Gpu {
     }
 }
 
-/// `RayNode` of gpu/sim/world.h.
-#[repr(C, align(16))]
-#[derive(Clone, Copy)]
-pub struct RayNode {
-    pub links: [u32; 4],
-    pub own: [f32; 4],
-    pub subtree: [f32; 4],
-}
+pub use crate::gpu_sim::RayNode;
 
 /// Query selectors of `altd_gpu_query`.
 #[repr(i32)]

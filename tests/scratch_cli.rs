@@ -92,13 +92,61 @@ fn random_tracks_change_each_generation_and_resume_the_same_sequence() {
 }
 
 #[test]
+fn track_batches_resume_and_allow_stage_count_changes_without_reseeding() {
+    let workspace = Workspace::new("track-batches");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
+    let options = ["--track-mode", "random", "--ticks", "12"];
+    success(run(root, "continuous", &[options.as_slice(), &["--tracks-per-generation", "3", "--generations", "4", "--track-buffer-size", "1"]].concat()));
+    success(run(root, "resumed", &[options.as_slice(), &["--tracks-per-generation", "3", "--generations", "2", "--track-buffer-size", "4"]].concat()));
+    // Omitted count restores the checkpoint; a changed seed must not change tracks.
+    success(run(root, "resumed", &[options.as_slice(), &["--resume", "--generations", "4", "--seed", "987"]].concat()));
+    for (a, b) in logs(root, "continuous").iter().zip(logs(root, "resumed")) {
+        assert_eq!(a["tracks_per_generation"], 3);
+        assert_eq!(a["tracks"], b["tracks"]);
+        for key in ["best_score", "mean_score", "best_fitness", "lapped_all_tracks", "simulated_ticks"] { assert_eq!(a[key], b[key], "{key}"); }
+        assert_eq!(a["tracks"].as_array().unwrap().len(), 3);
+        for track in a["tracks"].as_array().unwrap() {
+            let name = track["track_file"].as_str().unwrap();
+            assert_eq!(load(root.join("continuous").join(name)), load(root.join("resumed").join(name)));
+        }
+    }
+    let a = load(root.join("continuous/checkpoint.json"));
+    let b = load(root.join("resumed/checkpoint.json"));
+    assert_eq!(a["generation"], 4);
+    assert_eq!(a["rng"], b["rng"]);
+    assert_eq!(fs::read(root.join("continuous").join(a["population_file"].as_str().unwrap())).unwrap(),
+               fs::read(root.join("resumed").join(b["population_file"].as_str().unwrap())).unwrap());
+    assert!(!root.join("resumed/progress.json").exists());
+    // Abandoned work beyond the checkpoint must disappear even when K changes.
+    fs::write(root.join("resumed/tracks/g00004_t002.track.json"), "{}").unwrap();
+    fs::write(root.join("resumed/best_laps/g00004_t002_1.00s.json"), "{}").unwrap();
+    fs::write(root.join("resumed/best.json"), "{}").unwrap();
+    let mut log = fs::OpenOptions::new().append(true).open(root.join("resumed/log.jsonl")).unwrap();
+    std::io::Write::write_all(&mut log, b"{\"generation\":4,\"best_score\":9999}\n").unwrap();
+    success(run(root, "resumed", &[options.as_slice(), &["--resume", "--tracks-per-generation", "1", "--generations", "5"]].concat()));
+    assert_eq!(logs(root, "resumed").len(), 5);
+    assert!(!root.join("resumed/tracks/g00004_t002.track.json").exists());
+    assert!(!root.join("resumed/best_laps/g00004_t002_1.00s.json").exists());
+    assert!(!root.join("resumed/best.json").exists());
+    success(run(root, "single", &[options.as_slice(), &["--generations", "5"]].concat()));
+    let multi = load(root.join("resumed/tracks/g00004.track.json"));
+    assert_eq!(multi, load(root.join("single/tracks/g00004.track.json")));
+    assert_eq!(load(root.join("resumed/checkpoint.json"))["tracks_per_generation"], 1);
+    for (name, extra) in [("zero", vec!["--track-mode", "random", "--tracks-per-generation", "0"]),
+                          ("fixed-batch", vec!["--tracks-per-generation", "2"])] {
+        assert!(!run(root, name, &extra).status.success());
+    }
+}
+
+#[test]
 fn train_random_mode_uses_generated_spawns_without_a_trace() {
     let workspace = Workspace::new("train-random");
     let root = &workspace.0;
     seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
     let output_path = root.join("training.json");
     let output = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
-        .args(["--threads", "1", "train", "--track-mode", "random", "--population", "1", "--generations", "2", "--ticks", "12"])
+        .args(["--threads", "1", "train", "--track-mode", "random", "--tracks-per-generation", "3", "--population", "1", "--generations", "2", "--ticks", "12"])
         .arg("--scene").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scenes_exact/rally_b06_scene.json"))
         .arg("--network").arg(root.join("seed.json"))
         .arg("--model").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/rally_trained_model_exact.json"))
@@ -107,6 +155,12 @@ fn train_random_mode_uses_generated_spawns_without_a_trace() {
     success(output);
     let report = load(&output_path);
     assert_eq!(report["track_mode"], "random");
+    assert_eq!(report["tracks_per_generation"], 3);
+    for row in report["history"].as_array().unwrap() {
+        assert_eq!(row["tracks"].as_array().unwrap().len(), 3);
+        assert_eq!(row["ticks"], 54);
+        assert_eq!(row["track"], row["tracks"][0]["track"]);
+    }
     assert_ne!(report["history"][0]["track"]["tiles"], report["history"][1]["track"]["tiles"]);
     let fixed = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
         .args(["--threads", "1", "train", "--scene", "/missing", "--network", "/missing", "--model", "/missing", "--output", "/missing"])
@@ -323,6 +377,7 @@ fn scratch_stop_request_file() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
         .args(["--threads", "1", "train-scratch", "--population", "1", "--generations", "1000000", "--ticks", "60",
+            "--track-mode", "random", "--tracks-per-generation", "3",
             "--shape", "20,5", "--mutation-start", "0.000000001", "--mutation-end", "0.000000001",
             "--checkpoint-every", "1000"])
         .arg("--out-dir").arg(root.join("live"))
@@ -341,7 +396,101 @@ fn scratch_stop_request_file() {
     let reason = stop_reason(root, "live");
     assert_eq!(reason["condition"], "stop_request");
     let generations = logs(root, "live").len();
+    assert!(logs(root, "live").iter().all(|row| row["tracks"].as_array().unwrap().len() == 3));
     assert_eq!(reason["generation"], generations - 1);
     assert_eq!(load(root.join("live/checkpoint.json"))["generation"], generations);
     assert!(!root.join("live/stop_request").exists(), "honored request is removed");
+}
+
+#[test]
+fn final_candidate_precedes_breeding_without_changing_rng_or_offspring() {
+    let workspace = Workspace::new("candidate");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents": "off", "weight_decay": 0.0}));
+    let options = ["--population", "3", "--generations", "2", "--ticks", "12", "--mutation-start", "0.2", "--mutation-end", "0.2"];
+    success(run(root, "disabled", &options));
+    success(run(root, "enabled", &[options.as_slice(), &["--save-final-candidate"]].concat()));
+    assert!(!root.join("disabled/candidate.json").exists());
+    let candidate_path = root.join("enabled/candidate.json");
+    let candidate = load(&candidate_path);
+    let a = load(root.join("disabled/checkpoint.json"));
+    let b = load(root.join("enabled/checkpoint.json"));
+    assert_eq!(a["rng"], b["rng"], "candidate export consumes no RNG draws");
+    assert_eq!(fs::read(root.join("disabled").join(a["population_file"].as_str().unwrap())).unwrap(),
+               fs::read(root.join("enabled").join(b["population_file"].as_str().unwrap())).unwrap());
+    assert_eq!(b["candidate"]["generation"], 1);
+    assert_eq!(b["candidate"]["sha256"], altd_sim::evaluation::sha256(&fs::read(candidate_path).unwrap()));
+    assert_eq!(candidate["training"]["generation"], 1);
+    assert!(candidate["training"]["best_lap_s"].is_null(), "missing laps remain missing");
+    assert_eq!(candidate["training"]["fitness"], logs(root, "enabled")[1]["best_fitness"]);
+    let leader = Network::from_game_export(&candidate);
+    let checkpoint = fs::read(root.join("enabled").join(b["population_file"].as_str().unwrap())).unwrap();
+    let bred: Vec<_> = checkpoint.chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())).collect();
+    assert!(bred.chunks_exact(leader.params.len()).all(|n| n != leader.params), "candidate weights precede reproduction");
+    for (a, b) in logs(root, "disabled").iter().zip(logs(root, "enabled")) {
+        for key in ["generation", "best_fitness", "best_score", "mean_score", "mutation_rate"] {
+            assert_eq!(a[key], b[key]);
+        }
+    }
+}
+
+#[test]
+fn frozen_evaluation_resets_tracks_validates_hashes_and_preserves_training_files() {
+    let workspace = Workspace::new("evaluation");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
+    success(run(root, "trained", &["--save-final-candidate", "--ticks", "12"]));
+    let sim = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let suite_dir = root.join("suite");
+    fs::create_dir(&suite_dir).unwrap();
+    fs::copy(sim.join("scenes_exact/rally_b06_scene.json"), suite_dir.join("scene.json")).unwrap();
+    fs::copy(sim.join("../docs/traces/rally_b06_reference.json"), suite_dir.join("spawn.json")).unwrap();
+    let mut track = json!({"id": "first", "scene": "scene.json", "spawn": "spawn.json", "ticks": 12,
+        "scene_sha256": altd_sim::evaluation::sha256(&fs::read(suite_dir.join("scene.json")).unwrap()),
+        "spawn_sha256": altd_sim::evaluation::sha256(&fs::read(suite_dir.join("spawn.json")).unwrap())});
+    let first = track.clone();
+    track["id"] = json!("second");
+    let suite = json!({"version": 1, "vehicle": "rally", "options": {"backend": "cpu", "batch_count": 1,
+        "eliminate_on_wall": false, "idle_eliminate": false}, "tracks": [first, track]});
+    let suite_path = suite_dir.join("manifest.json");
+    fs::write(&suite_path, suite.to_string()).unwrap();
+    let report_path = root.join("evaluation.json");
+    let candidate_path = root.join("trained/candidate.json");
+    let before = ["candidate.json", "checkpoint.json", "log.jsonl"].map(|name| fs::read(root.join("trained").join(name)).unwrap());
+    let evaluate = || Command::new(env!("CARGO_BIN_EXE_altd-sim"))
+        .args(["--threads", "1", "evaluate", "--network"]).arg(&candidate_path)
+        .arg("--model").arg(sim.join("rally_trained_model_exact.json"))
+        .arg("--suite").arg(&suite_path).arg("--report").arg(&report_path).output().unwrap();
+    success(evaluate());
+    let report = load(&report_path);
+    assert_eq!(report["candidate_sha256"], altd_sim::evaluation::sha256(&before[0]));
+    for key in ["score", "lap_complete", "best_lap_s", "collisions", "simulated_ticks"] {
+        assert_eq!(report["tracks"][0][key], report["tracks"][1][key], "track reset preserves {key}");
+    }
+    assert!(report["tracks"][0]["best_lap_s"].is_null());
+    assert_eq!(before, ["candidate.json", "checkpoint.json", "log.jsonl"].map(|name| fs::read(root.join("trained").join(name)).unwrap()));
+    fs::remove_file(&report_path).unwrap();
+    fs::write(suite_dir.join("spawn.json"), "{}").unwrap();
+    let failed = evaluate();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("hash mismatch"));
+    assert!(!report_path.exists());
+}
+
+#[test]
+#[ignore = "requires an idle HIP GPU and gpu/build.sh"]
+fn final_candidate_gpu_selection_matches_cpu() {
+    let workspace = Workspace::new("candidate-gpu-parity");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 2, "preserve_parents": "off"}));
+    let options = ["--save-final-candidate", "--population", "3", "--ticks", "12",
+        "--mutation-start", "0.2", "--mutation-end", "0.2"];
+    success(run(root, "cpu", &options));
+    success(run(root, "gpu", &[options.as_slice(), &["--gpu"]].concat()));
+    assert_eq!(load(root.join("cpu/candidate.json")), load(root.join("gpu/candidate.json")));
+    let a = load(root.join("cpu/checkpoint.json"));
+    let b = load(root.join("gpu/checkpoint.json"));
+    assert_eq!(a["rng"], b["rng"]);
+    assert_eq!(fs::read(root.join("cpu").join(a["population_file"].as_str().unwrap())).unwrap(),
+               fs::read(root.join("gpu").join(b["population_file"].as_str().unwrap())).unwrap());
 }

@@ -81,7 +81,7 @@ fn raycast(start: vec2<f32>, end: vec2<f32>) -> vec4<f32> {
             depth = depth + 1u;
             current = select(node.links.w, node.links.z, near_front);
         }
-        if (depth == 0u || pops > params.node_count) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+        if (depth == 0u || pops > params.node_count) { break; }
         pops = pops + 1u;
         depth = depth - 1u;
         let entry = stack[depth];
@@ -114,6 +114,8 @@ fn raycast(start: vec2<f32>, end: vec2<f32>) -> vec4<f32> {
         let far = select(node.links.z, node.links.w, front_first(split, start, end));
         current = select(NONE, far, (entry & 1u) == 1u);
     }
+    // Keep the terminal return outside the loop for Naga's control-flow validation.
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
 // `Node::closest`: own walls, then the near subtree, then the far subtree
@@ -151,7 +153,7 @@ fn closest_wall(p: vec2<f32>) -> vec4<f32> {
             depth = depth + 1u;
             current = select(node.links.w, node.links.z, classify(walls[node.links.x], p) >= 0);
         }
-        if (depth == 0u || pops > params.node_count) { return vec4<f32>(closest.x, closest.y, 1.0, 0.0); }
+        if (depth == 0u || pops > params.node_count) { break; }
         pops = pops + 1u;
         depth = depth - 1u;
         let node = nodes[stack[depth]];
@@ -164,6 +166,7 @@ fn closest_wall(p: vec2<f32>) -> vec4<f32> {
         let far = select(node.links.z, node.links.w, classify(split, p) >= 0);
         current = select(NONE, far, far_side);
     }
+    return vec4<f32>(closest.x, closest.y, 1.0, 0.0);
 }
 
 @compute @workgroup_size(64)

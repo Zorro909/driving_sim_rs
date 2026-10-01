@@ -40,6 +40,7 @@ web-sys = { version = "0.3", optional = true, features = [
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # dlopen of the HIP simulator (src/gpu.rs) and process statistics in the CLI.
 libc = "0.2"
+sha2 = "0.10"
 
 [profile.release]
 codegen-units = 1

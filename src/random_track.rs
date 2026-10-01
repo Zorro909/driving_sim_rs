@@ -38,7 +38,7 @@ pub struct Block {
     pub connections: Vec<Connection>,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 struct Lookup {
     surface: usize,
     previous: usize,
@@ -47,12 +47,13 @@ struct Lookup {
     all: Vec<usize>,
 }
 
+/// The game's tile set as `data/track_catalog.json` holds it. Only what the
+/// simulator reads is kept; block candidates are derived (`TrackGenerator`).
 #[derive(Deserialize)]
 struct Catalog {
     hashcode_seed: u32,
     bounds: [i32; 4],
     blocks: Vec<Block>,
-    lookups: Vec<Lookup>,
 }
 
 fn catalog() -> &'static Catalog {
@@ -136,14 +137,16 @@ pub struct GeneratedTrack {
     pub tiles: Vec<GeneratedTile>,
 }
 
+/// The geometry of each block, in `blocks()` order: wall polygons for the
+/// rays and convex collision shapes, relative to the tile centre.
 #[derive(Deserialize)]
 struct TileResource {
-    block: usize,
     polygons: Vec<Vec<[f32; 2]>>,
     shapes: Vec<Vec<[f32; 2]>>,
-    friction: f32,
-    bounce: f32,
 }
+/// Every tile's physics material in the game's tile set.
+const TILE_FRICTION: f64 = 1.0;
+const TILE_BOUNCE: f64 = 0.0;
 
 fn resources() -> &'static [TileResource] {
     static RESOURCES: OnceLock<Vec<TileResource>> = OnceLock::new();
@@ -226,7 +229,6 @@ impl GeneratedTrack {
         for tile in &self.tiles {
             let block = &blocks()[tile.block];
             let resource = &resources()[tile.block];
-            assert_eq!(resource.block, tile.block);
             let origin = F2 { x: (tile.position[0] * 768 + 384) as f32, y: (tile.position[1] * 768 + 384) as f32 };
             tiles.push(json!({"coords":tile.position,"surface":(["asphalt","dirt","ice"][block.surface]),
                 "connections":block.connections.iter().map(|c|vector_json(c.position(tile.position))).collect::<Vec<_>>()}));
@@ -248,7 +250,7 @@ impl GeneratedTrack {
             for shape in &resource.shapes {
                 shapes.push(json!({"tile":tile.position,"origin":vector_json(origin),"local_points":shape,
                     "points":shape.iter().map(|p|vector_json(F2{x:p[0],y:p[1]}+origin)).collect::<Vec<_>>(),
-                    "friction":resource.friction as f64,"bounce":resource.bounce as f64,"wall_first":false}));
+                    "friction":TILE_FRICTION,"bounce":TILE_BOUNCE,"wall_first":false}));
             }
         }
         let mut walls = Vec::new();
@@ -272,7 +274,8 @@ impl GeneratedTrack {
 /// Advances the supplied independent track RNG state, including on failure.
 /// A successful direct attempt pins `config.start`; fallback changes a new config.
 pub fn generate(config: &mut RandomTrackConfig, state: &mut [u64; 4]) -> Result<GeneratedTrack, &'static str> {
-    generate_with_lookups(config,state,&catalog().lookups)
+    static DEFAULT: OnceLock<TrackGenerator> = OnceLock::new();
+    DEFAULT.get_or_init(|| TrackGenerator::new(default_hashcode_seed())).generate(config, state)
 }
 fn generate_with_lookups(config: &mut RandomTrackConfig, state: &mut [u64;4], lookups: &[Lookup]) -> Result<GeneratedTrack, &'static str> {
     let mut random = GameRandom::new(*state, 0);
@@ -435,4 +438,166 @@ fn complete(path: &[Position], selected: &[usize]) -> bool {
             }
         })
     })
+}
+
+/// The game's track TileMap sits at this global position; physics shapes
+/// follow it, while ray walls and the path are absolute.
+pub const GAME_TILE_MAP_POSITION: [i32; 2] = [3, 0];
+
+fn saved_coords(value: &Value, what: &str) -> Result<Position, String> {
+    let text = value.as_str().ok_or_else(|| format!("{what} must be a string"))?;
+    let values = text
+        .strip_prefix("Vector2i(")
+        .and_then(|value| value.strip_suffix(')'))
+        .map(|inner| inner.split(',').map(|v| v.trim().parse::<i32>()).collect::<Result<Vec<_>, _>>())
+        .and_then(Result::ok)
+        .filter(|values| values.len() == 2)
+        .ok_or_else(|| format!("{what} {text:?} is not Vector2i(x, y)"))?;
+    Ok([values[0], values[1]])
+}
+
+fn saved_int(value: &Value, what: &str) -> Result<i64, String> {
+    value.as_i64().ok_or_else(|| format!("{what} must be an integer"))
+}
+
+impl GeneratedTrack {
+    /// A track the game saved: the JSON inside a gzip `.track` file. Tiles,
+    /// the start tile and its connection are all a scene needs. The path must
+    /// close; it is checked here, as `curve_controls` assumes it.
+    pub fn from_saved(saved: &Value, name: &str) -> Result<GeneratedTrack, String> {
+        let entries = saved["Tiles"].as_object().ok_or("the file has no Tiles; it is not a saved track")?;
+        if entries.is_empty() {
+            return Err("the track has no tiles".into());
+        }
+        let mut tiles = Vec::with_capacity(entries.len());
+        for (key, tile) in entries {
+            let position = saved_coords(&Value::String(key.clone()), "tile position")?;
+            let id = &tile["Block"]["TileSetId"];
+            let atlas = saved_int(&id["AtlasId"], "AtlasId")?;
+            let alternative = saved_int(&id["AlternativeId"], "AlternativeId")?;
+            let block = blocks()
+                .iter()
+                .position(|b| b.atlas as i64 == atlas && b.alternative as i64 == alternative)
+                .ok_or_else(|| format!("tile {key} uses an unknown block (atlas {atlas}, alternative {alternative})"))?;
+            tiles.push(GeneratedTile { position, block });
+        }
+        let start = saved_coords(&saved["StartTileCoords"], "StartTileCoords")?;
+        let c = &saved["StartTileConnection"];
+        let side = saved_int(&c["Side"], "StartTileConnection.Side")?;
+        let index = saved_int(&c["Index"], "StartTileConnection.Index")?;
+        let kind = saved_int(&c["Type"], "StartTileConnection.Type")?;
+        if !(0..4).contains(&side) || !(0..3).contains(&index) || kind < 0 {
+            return Err("the start connection is out of range".into());
+        }
+        let connection = Connection { side: side as usize, index: index as i32, kind: kind as usize };
+        // Walk the path as curve_controls does.
+        let (mut position, mut incoming) = (start, connection);
+        for _ in 0..tiles.len() {
+            let tile = tiles
+                .iter()
+                .find(|t| t.position == position)
+                .ok_or_else(|| format!("the path leaves the track at tile ({}, {})", position[0], position[1]))?;
+            let connections = &blocks()[tile.block].connections;
+            if !connections.contains(&incoming) {
+                return Err(format!("the path is broken at tile ({}, {})", position[0], position[1]));
+            }
+            let outgoing = connections
+                .iter()
+                .find(|&&c| c != incoming)
+                .ok_or_else(|| format!("tile ({}, {}) has no exit", position[0], position[1]))?;
+            position = add(position, NEIGHBORS[outgoing.side]);
+            incoming = Connection { side: outgoing.side ^ 1, ..*outgoing };
+            if position == start {
+                return Ok(GeneratedTrack {
+                    name: name.to_owned(),
+                    config: RandomTrackConfig { length: 0, allow_double: true, start: None, start_direction: None, surfaces: None, distribution: 0 },
+                    start,
+                    connection,
+                    tiles,
+                });
+            }
+        }
+        Err("the track's path does not return to its start".into())
+    }
+}
+
+/// Moves a scene's TileMap to `position`, as the game places it. Explicit
+/// shape origins move with it.
+pub fn place_tile_map(scene: &mut Value, position: [i32; 2]) {
+    let track = &mut scene["track"];
+    let previous = crate::world::vector(&track["tile_map_position"]);
+    track["tile_map_position"] = json!(position);
+    if let Some(shapes) = track["physics_shapes"].as_array_mut() {
+        for shape in shapes {
+            if let Some(origin) = shape.get("origin").map(crate::world::vector) {
+                shape["origin"] = json!([
+                    origin.x - previous.x + position[0] as f64,
+                    origin.y - previous.y + position[1] as f64
+                ]);
+            }
+        }
+    }
+}
+
+/// A saved game track as a training scene for independent cars, using the
+/// vehicle and physics of `template`.
+pub fn saved_track_scene(saved: &Value, name: &str, template: &Value) -> Result<Value, String> {
+    let mut scene = GeneratedTrack::from_saved(saved, name)?.to_scene(template);
+    place_tile_map(&mut scene, GAME_TILE_MAP_POSITION);
+    scene["track"]["native_broadphase"] = Value::Bool(false);
+    Ok(scene)
+}
+
+#[cfg(test)]
+mod saved_tests {
+    use super::*;
+
+    /// A generated track in the game's saved `.track` layout.
+    fn saved(track: &GeneratedTrack) -> Value {
+        let tiles: serde_json::Map<String, Value> = track
+            .tiles
+            .iter()
+            .map(|t| {
+                let key = format!("Vector2i({}, {})", t.position[0], t.position[1]);
+                let b = &blocks()[t.block];
+                (key.clone(), json!({"Block":{"TileSetId":{"AtlasId":b.atlas,"AlternativeId":b.alternative}},"Coords":key}))
+            })
+            .collect();
+        json!({"Tiles":tiles,"StartTileCoords":format!("Vector2i({}, {})", track.start[0], track.start[1]),
+            "StartTileConnection":{"Side":track.connection.side,"Index":track.connection.index,"Type":track.connection.kind}})
+    }
+
+    /// Prints a generated track in the saved layout: the web app's test
+    /// fixture (`cargo test --lib print_saved_fixture -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn print_saved_fixture() {
+        let mut config = RandomTrackConfig { length: 12, allow_double: false, start: None, start_direction: None, surfaces: Some(vec![0, 1]), distribution: 1 };
+        let track = generate(&mut config, &mut [7, 3, 5, 11]).unwrap();
+        println!("{}", saved(&track));
+    }
+
+    #[test]
+    fn saved_tracks_round_trip_and_reject_open_paths() {
+        let mut config = RandomTrackConfig { length: 16, allow_double: true, start: None, start_direction: None, surfaces: Some(vec![0, 1]), distribution: 1 };
+        let track = generate(&mut config, &mut [1, 2, 3, 4]).unwrap();
+        let file = saved(&track);
+        let parsed = GeneratedTrack::from_saved(&file, "test").unwrap();
+        assert_eq!((parsed.start, parsed.connection, &parsed.tiles), (track.start, track.connection, &track.tiles));
+        let scene = saved_track_scene(&file, "test", &json!({"vehicle":{},"physics":{}})).unwrap();
+        assert_eq!(scene["track"]["tile_map_position"], json!(GAME_TILE_MAP_POSITION));
+        assert_eq!(scene["track"]["native_broadphase"], json!(false));
+        let shape = &scene["track"]["physics_shapes"][0];
+        let tile = shape["tile"].as_array().unwrap();
+        assert_eq!(shape["origin"], json!([tile[0].as_f64().unwrap() * 768.0 + 387.0, tile[1].as_f64().unwrap() * 768.0 + 384.0]));
+
+        let mut open = file.clone();
+        let removed = format!("Vector2i({}, {})", track.tiles[3].position[0], track.tiles[3].position[1]);
+        open["Tiles"].as_object_mut().unwrap().remove(&removed);
+        assert!(GeneratedTrack::from_saved(&open, "open").unwrap_err().contains("leaves the track"));
+        let mut unknown = file.clone();
+        unknown["Tiles"][&removed]["Block"]["TileSetId"]["AtlasId"] = json!(999);
+        assert!(GeneratedTrack::from_saved(&unknown, "unknown").unwrap_err().contains("unknown block"));
+        assert!(GeneratedTrack::from_saved(&json!({"Id": 1}), "other").is_err());
+    }
 }

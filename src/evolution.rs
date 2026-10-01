@@ -65,10 +65,12 @@ pub fn metric_index(name: &str) -> Option<usize> {
     METRIC_NAMES.iter().position(|&m| m == name)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RewardSpec {
     pub metric: String,
     pub weight: i64,
+    #[serde(rename = "type")]
     pub kind: String,
 }
 
@@ -90,7 +92,8 @@ impl AgentResult<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EvolutionSettings {
     pub population: usize,
     pub selection_algorithm: String,
@@ -404,11 +407,15 @@ pub fn reproduce(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut
 }
 
 pub(crate) fn reproduce_with_scratch(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom, normals: &mut Vec<f64>) -> Generation {
+    reproduce_scored_with_scratch(agents, reward_values(agents, &settings.rewards), settings, rng, normals)
+}
+
+pub(crate) fn reproduce_scored_with_scratch(agents: &[AgentResult], scores: Vec<f64>, settings: &EvolutionSettings, rng: &mut PyRandom, normals: &mut Vec<f64>) -> Generation {
+    validate_scores(agents, &scores);
     let mut profile = crate::training_profile::Profile::new("reproduce_python");
     if agents.is_empty() {
         return Generation { networks: Vec::new(), preserved_count: 0, rewards: Vec::new() };
     }
-    let scores = reward_values(agents, &settings.rewards);
     profile.mark("rewards");
     let selected = select(agents, &scores, settings, rng);
     let size = match settings.preserve_parents.as_str() {
@@ -558,9 +565,18 @@ mod tests {
 
 /// Reproduction using the original game's independent decision/normal streams.
 pub fn reproduce_game(agents:&[AgentResult],settings:&EvolutionSettings,rng:&mut crate::game_random::GameRandom)->Generation {
+    reproduce_game_scored(agents, reward_values(agents, &settings.rewards), settings, rng)
+}
+
+fn validate_scores(agents: &[AgentResult], scores: &[f64]) {
+    assert_eq!(agents.len(), scores.len(), "fitness must match the ordered population");
+    assert!(scores.iter().all(|score| score.is_finite()), "fitness must be finite");
+}
+
+pub(crate) fn reproduce_game_scored(agents:&[AgentResult],scores:Vec<f64>,settings:&EvolutionSettings,rng:&mut crate::game_random::GameRandom)->Generation {
+    validate_scores(agents, &scores);
     let mut profile = crate::training_profile::Profile::new("reproduce_game");
     if agents.is_empty(){return Generation{networks:Vec::new(),preserved_count:0,rewards:Vec::new()};}
-    let scores=reward_values(agents,&settings.rewards);
     profile.mark("rewards");
     let selected=select(agents,&scores,settings,rng);
     let size=match settings.preserve_parents.as_str(){"off"=>0,"on_selection_size"=>settings.selection_size,"on_custom"=>settings.preserve_parents_size,other=>panic!("unknown parent preservation mode: {other}")};

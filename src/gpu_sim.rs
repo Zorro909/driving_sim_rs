@@ -3,11 +3,24 @@
 //! the handle that runs the simulation kernels (libaltd_gpu.so).
 use crate::car::{Sensor, DT};
 use crate::godot_math::F2;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::gpu::{Gpu, GpuWorld};
 use crate::vec2::V2;
 use crate::world::{Surface, VehicleConfig, World, ASPHALT};
 use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::ffi::c_void;
+
+/// `RayNode` of gpu/sim/world.h.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct RayNode {
+    pub links: [u32; 4],
+    pub own: [f32; 4],
+    pub subtree: [f32; 4],
+}
+
+
 
 pub type Vec2 = [f32; 2];
 
@@ -250,7 +263,7 @@ pub struct WorldDesc {
     pub ray_wall_count: u32,
     pub ray_depth: u32,
     pub ray_magnitude: f32,
-    pub ray_nodes: *const crate::gpu::RayNode,
+    pub ray_nodes: *const RayNode,
     pub ray_walls: *const [f32; 4],
     pub surface_count: u32,
     pub default_surface: u32,
@@ -282,6 +295,7 @@ pub struct WorldDesc {
 }
 
 /// Checks the Rust mirrors against the library's struct layout.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn check_layout(gpu: &Gpu) {
     use std::mem::{offset_of, size_of};
     let f: unsafe extern "C" fn(*mut u64, i32) -> i32 = gpu.symbol("altd_gpu_layout");
@@ -597,7 +611,7 @@ impl TrackArrays {
     }
 
     /// The descriptor; `rays` are the BSP arrays of `bsp::RayTree::gpu_arrays`.
-    pub(crate) fn desc(&self, rays: &(Vec<crate::gpu::RayNode>, Vec<[f32; 4]>, f32, usize)) -> WorldDesc {
+    pub(crate) fn desc(&self, rays: &(Vec<RayNode>, Vec<[f32; 4]>, f32, usize)) -> WorldDesc {
         let (x0, y0, nx, ny, tiles) = &self.tiles;
         WorldDesc {
             ray_node_count: rays.0.len() as u32,
@@ -749,6 +763,7 @@ impl ReadMask {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct GpuSim<'a> {
     gpu: &'a Gpu,
     handle: *mut c_void,
@@ -782,6 +797,7 @@ pub struct WindowArgs {
     pub time_limit: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for GpuSim<'_> {
     fn drop(&mut self) {
         let free: unsafe extern "C" fn(*mut c_void) = self.gpu.symbol("altd_gpu_sim_free");
@@ -789,10 +805,12 @@ impl Drop for GpuSim<'_> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn check(status: i32, what: &str) {
     assert_eq!(status, 0, "GPU {what} failed with status {status}");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> GpuSim<'a> {
     pub fn new(world: &GpuWorld<'a>, vehicle: &VehicleDesc, sensors: &[SensorDesc], capacity: usize) -> GpuSim<'a> {
         let gpu = world.gpu();

@@ -67,17 +67,20 @@ Checkpoints are written at generation boundaries every `--checkpoint-every` gene
 
 ### Random tracks
 
-Both `train` and `train-scratch` accept `--track-mode random`. Each generation uses a fresh track shared by the whole population. Tracks always come from the game's CPU TrackFactory algorithm and tile resources. The supplied `--scene` provides vehicle and space settings; the generated curve provides the spawn pose, so random mode does not need `--spawn-trace`. The default remains `--track-mode fixed`.
+Both `train` and `train-scratch` accept `--track-mode random`. Each generation uses fresh tracks shared by the whole population. Tracks always come from the game's CPU TrackFactory algorithm and tile resources. The supplied `--scene` provides vehicle and space settings; the generated curve provides the spawn pose, so random mode does not need `--spawn-trace`. The default remains `--track-mode fixed`.
 
 ```sh
 target/release/altd-sim train-scratch \
   --track-mode random \
   --random-track-settings examples/random_track_settings.json \
+  --tracks-per-generation 8 \
   --track-buffer-size 8 --gpu \
   --out-dir ../training_runs/random_tracks
 ```
 
-`--gpu` requires rebuilding the HIP library with `gpu/build.sh` after this update. A dedicated CPU producer prepares tracks, collision geometry, and spatial queries, including GPU query arrays, in a bounded queue while simulation runs. `--track-buffer-size` defaults to eight and must be positive. GPU training uploads the next prepared track at each generation boundary and retains its population and network allocations. If the queue runs dry, training waits for a fresh track. Random mode uses independent car physics on both backends; the library's native shared TileMap redraw replay remains separate.
+`--tracks-per-generation` defaults to 1. With 8, each unchanged population evaluates eight tracks, with a fresh spawn and separate `--ticks` limit on each. Eliminated cars restart on the next track. Selection uses the mean of each car's existing normalized reward ranks across all tracks, giving each track equal weight. Reproduction, mutation scheduling, weight decay, and the generation counter advance once after the whole batch. Fixed mode requires a count of 1.
+
+`--gpu` requires rebuilding the HIP library with `gpu/build.sh` after the random-mode update. A dedicated CPU producer prepares tracks, collision geometry, and spatial queries, including GPU query arrays, in a bounded queue while simulation runs. `--track-buffer-size` defaults to eight and must be positive; it is independent of the number of tracks per generation. GPU training uploads each prepared track and retains its population and network allocations. If the queue runs dry, training waits for a fresh track. Random mode uses independent car physics on both backends; the library's native shared TileMap redraw replay remains separate.
 
 Without a settings file, lengths range from 12 to 40 tiles, all block types are enabled, and surfaces form sections. Each track uniformly samples a surface count from one, two, or three, then samples a subset and ordering from asphalt, dirt, and ice. This gives each surface count equal probability.
 
@@ -93,9 +96,11 @@ The JSON file accepts these fields; omitted fields use those defaults:
 
 The generator may shorten a difficult path within the requested length range. It retries failed tracks and rejects results below the minimum; impossible settings stop training with an error. Fixed lengths never shorten.
 
-Tracks use an independent seed derived from the run seed and generation number. Queue depth and CPU/GPU selection do not change the sequence. A resume retains the track seed from the checkpoint; supply the same track settings and scene template to reproduce the sequence. As with other training options, omitted settings use defaults on resume. `--init-population` starts a track sequence using the new run's seed and the imported generation number.
+Tracks use an independent seed derived from the run seed, generation number, and index within the batch. Index zero preserves the historical seed formula, so changing the batch count between stages does not change later generations' first tracks. Queue depth and CPU/GPU selection do not change the sequence. A resume retains the track seed and track count from the checkpoint; `--tracks-per-generation` explicitly overrides the saved count. Supply the same track settings and scene template to reproduce the sequence. Omitted random generation settings use defaults on resume. `--init-population` starts a track sequence using the new run's seed and the imported generation number.
 
-`train-scratch` saves generated tracks to `tracks/gNNNNN.track.json` and records the file and effective configuration in each log entry and best-network export. Recreate a scene with `GeneratedTrack::to_scene` and the run's scene template, then set `track.native_broadphase` to `false` for the same independent car physics. `train` includes generated tracks in its history output. Lap times across different lengths describe different tasks; the all-time best lap and lap-based stop conditions still compare their raw times.
+`train-scratch` saves generated tracks to `tracks/gNNNNN.track.json` for single-track generations and `tracks/gNNNNN_tNNN.track.json` for batches. Each completed generation has one schema-version-2 log row, with per-track summaries in `tracks`. `best_score`/`best_mean_score` is the highest per-car mean raw score; `mean_score` averages those means across the population. `best_fitness` and `mean_fitness` describe selection ranks. `lapped_cars`/`lapped_all_tracks` counts cars that lap every track, and `best_batch_mean_lap_s` is the smallest mean lap among those cars. `best_lap_s` and `best.json` retain the fastest individual lap as a diagnostic, with its track index and geometry. Lap times across different track lengths still describe different tasks.
+
+Recreate a scene with `GeneratedTrack::to_scene` and the run's scene template, then set `track.native_broadphase` to `false` for the same independent car physics. `train` includes generated tracks in its history output. Atomic `progress.json` updates identify the current generation, track index, completed-track count, and trainer PID. Checkpoints contain only complete batches and the population bred for the next generation. A hard stop abandons a partial batch; resume replays from the last checkpoint and removes stale geometry for replayed generations.
 
 ### Stop conditions
 
@@ -103,12 +108,12 @@ Training normally ends at `--generations`. These options end it earlier, after t
 
 | Option | Stops when |
 |---|---|
-| `--stop-score-above=S` | The generation's best distance score is at least `S` |
-| `--stop-lap-below=T` | The generation's fastest lap is at most `T` seconds |
-| `--stop-lapped-percent=P` | At least `P`% of cars completed a lap in the generation |
+| `--stop-score-above=S` | The highest per-car mean distance score across the tracks is at least `S` |
+| `--stop-lap-below=T` | A car laps every track with a mean lap time at most `T` seconds |
+| `--stop-lapped-percent=P` | At least `P`% of cars completed a lap on every track |
 | `--stop-plateau=N` | `--plateau-metric` (`lap`, the default, or `score`) has not improved for `N` generations |
 
-The plateau count starts at zero in each invocation, including a resume. For the lap metric, generations without a completed lap count as no improvement. Creating a file named `stop_request` in `--out-dir` ends training after the current generation; a request left over from before the trainer started is deleted and ignored.
+Stop checks run after the full batch. These definitions preserve single-track behavior when the count is 1. The plateau count starts at zero in each invocation, including a resume, and watches the mean-score or complete-batch mean-lap statistic. For the lap metric, generations without a car lapping every track count as no improvement. Creating a file named `stop_request` in `--out-dir` ends training after the current full generation; a request left over from before the trainer started is deleted and ignored.
 
 The last generation's checkpoint records why training ended in `stop_reason`, for example `{"condition": "lap_below", "generation": 812, "value": 38.412, "threshold": 38.5}`. The condition is one of `stop_request`, `lap_below`, `score_above`, `lapped_percent`, `plateau` (which adds `metric`), or `generations`, checked in that order. SIGTERM exits without a final checkpoint. Pass negative thresholds with `=`, as in `--stop-score-above=-100`.
 
@@ -122,7 +127,7 @@ target/release/altd-sim train-scratch \
   --eliminate-on-wall --idle-eliminate
 ```
 
-A resume accepts changes to training parameters, including elimination, population, track, time limit, mutation schedule, and evolution settings. Supply the desired options again; omitted options use CLI defaults rather than inheriting `run.json`. The checkpoint supplies its generation, networks, and RNG state. `--seed` and `--init-network` do not replace saved networks or RNG state during resume.
+A resume accepts changes to training parameters, including elimination, population, track, time limit, mutation schedule, and evolution settings. Supply the desired options again; omitted options use CLI defaults rather than inheriting `run.json`, except `--tracks-per-generation`, which restores the checkpoint's count (1 for older checkpoints). The checkpoint supplies its generation, networks, and RNG state. `--seed` and `--init-network` do not replace saved networks or RNG state during resume.
 
 The requested `--shape` must match the checkpoint's full layer layout, even if a different layout would have the same number of parameters. The binary length must match the saved shape and population. New checkpoints store both fields in `checkpoint.json`. Older checkpoints read them from the adjacent `run.json` once and preserve them in checkpoint metadata before updating the run options.
 
@@ -158,3 +163,24 @@ The imported regression fixtures cover recorded native vehicle/population transi
 The experiment's [ROUND3.md](../experiments/driving_sim_rs_fidelity/ROUND3.md) and [ROUND4.md](../experiments/driving_sim_rs_fidelity/ROUND4.md) record the original capture evidence and remaining fidelity limits. Native body matrices are absent from older traces; passing these finite fixtures is not proof of complete state reconstruction.
 
 Godot-derived code retains its notice in [GODOT_LICENSE](GODOT_LICENSE); math source notices remain in their modules.
+
+## Final candidates and frozen evaluation
+
+`train-scratch --save-final-candidate` atomically writes `candidate.json` when a stage successfully stops. It selects the complete-batch fitness leader from the evaluated population before breeding, breaking ties by lowest population index. The export includes exact weights, shape, ordered inputs/outputs, generation, reward definition, fitness and batch statistics. It consumes no random draws and leaves reproduction and checkpoint populations unchanged. `best.json` still tracks the fastest individual lap. A final checkpoint confirms the candidate's filename, SHA-256 and generation; a candidate written without a matching completed checkpoint is not a confirmed optimization result.
+
+Evaluate a frozen candidate without training:
+
+```sh
+altd-sim evaluate --network training_runs/example/candidate.json \
+  --model training_runs/example/model.json \
+  --suite training_optimizations/example/suite/manifest.json \
+  --report training_runs/example/evaluation.json
+```
+
+The version 1 suite contains `vehicle`, `options`, and `tracks`. Options specify `backend: "cpu"`, `batch_count`, `eliminate_on_wall`, and `idle_eliminate`. Each track has a distinct `id`, relative `scene` and `spawn` filenames, their `scene_sha256`/`spawn_sha256` hashes, and a finite `ticks` cap. The evaluator validates file hashes, dimensions, ordered sensors/controls, finite parameters and vehicle compatibility. Each track gets a new runner and car, including fresh contacts, controls, sensors, score and lap state. It does not breed, change weights, or modify training logs, checkpoints or random state.
+
+The atomic versioned report records candidate, suite and simulator hashes, evaluation options, elapsed time, and each track's raw score, one-lap score, normalized progress, lap completion, optional best lap, collisions and simulated ticks. An interrupted evaluator publishes no successful report. The Python training dashboard freezes catalog tracks into suites and manages retries.
+
+The dashboard's **Optimization** tab saves versioned network/regime templates and performs exhaustive sequential sweeps. Arrays count as single choices; stages belong to an execution and do not multiply combinations. Seeds repeat each effective variation. The preview reports unique combinations and capped training work before launch. One execution owns the slot until its whole regime and evaluation finish. Pause after a variation, stop/replay from a checkpoint, cancel remaining work, or retry failed evaluations with the same candidate. Restart recovery adopts matching processes. Changing the trainer or HIP library requires a new optimization. See [the dashboard README](../driving_training_web/README.md#optimization) for template controls, storage paths and exports.
+
+Comparison ranks use the shared suite's completion rate, complete-model lap times and incomplete-model normalized progress. Training reward ranks and fastest individual training laps remain diagnostics. Failed or unfinished seed repetitions are provisional. Candidate downloads contain the evaluated model, while latest-checkpoint downloads still contain a bred next-generation network.
