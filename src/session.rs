@@ -3,10 +3,10 @@
 //! same code as the native reference. It wraps `TrainingRunner` with JSON
 //! options, seeding, flat state export and generation-boundary checkpoints.
 
-use crate::evolution::{EvolutionSettings, METRIC_NAMES};
-use crate::network::Network;
+use crate::evolution::{Breeding, EvolutionSettings, CROSSOVERS, METRIC_NAMES};
+use crate::network::{parameter_count, Network};
 use crate::pyrandom::PyRandom;
-use crate::training::{Mode, SensorLayout, TrainingAgent, TrainingRandom, TrainingRunner, CAR_STATE_STRIDE};
+use crate::training::{Lineage, Mode, SensorLayout, TrainingAgent, TrainingRandom, TrainingRunner, CAR_STATE_STRIDE};
 use crate::vec2::V2;
 use crate::world::World;
 use serde_json::{json, Value};
@@ -67,16 +67,22 @@ pub struct Session {
     boundary: Option<Boundary>,
 }
 
-/// The population and RNG as the current generation began: what a
-/// checkpoint saves. Kept as a copy so saving never touches the running cars.
+/// The generation that just began, as a checkpoint saves it. Kept apart from
+/// the running cars so saving never touches them.
 #[derive(Clone)]
 struct Boundary {
     generation: u64,
     tick: u64,
-    shape: Vec<usize>,
-    rng: TrainingRandom,
-    /// Every network's parameters, car after car.
-    params: Vec<f64>,
+    saved: Saved,
+}
+
+#[derive(Clone)]
+enum Saved {
+    /// After a full restore (format 1 or JSON): every car's parameters and
+    /// the generator after them. Saved as format 1.
+    Population { shape: Vec<usize>, rng: TrainingRandom, params: Vec<f64> },
+    /// After a start or reproduction: what bred the cars. Saved as format 2.
+    Lineage(Lineage),
 }
 
 /// Per-generation statistics hosts read instead of the full car states.
@@ -94,8 +100,10 @@ pub struct GenerationSummary {
     pub lap_time: Option<f64>,
 }
 
-/// `checkpoint_bytes` magic: format 1.
+/// `checkpoint_bytes` magic: format 1, every car's networks.
 const CHECKPOINT_MAGIC: &[u8; 8] = b"ALTDCKP1";
+/// Format 2: the parents a generation was bred from (`Lineage`).
+const PARENTS_MAGIC: &[u8; 8] = b"ALTDCKP2";
 
 fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
     value.as_array().ok_or_else(|| format!("missing {what}"))?
@@ -153,8 +161,8 @@ impl Session {
         if self.network.get("weights").is_some() {
             let seed = Network::try_from_game_export(&self.network)?;
             self.check_shape(&seed.shape)?;
-            self.runner.start(&seed);
-            self.snapshot();
+            let lineage = self.runner.start_traced(&seed);
+            self.record(lineage);
             Ok(())
         } else {
             let shape = self.template_shape().ok_or("the network export has neither weights nor a shape; use start_with_shape")?;
@@ -167,8 +175,8 @@ impl Session {
     pub fn start_with_shape(&mut self, shape: &[usize]) -> Result<(), String> {
         self.check_shape(shape)?;
         let seed = self.runner.rng.xavier(shape);
-        self.runner.start(&seed);
-        self.snapshot();
+        let lineage = self.runner.start_traced(&seed);
+        self.record(lineage);
         Ok(())
     }
 
@@ -215,9 +223,9 @@ impl Session {
     /// parent count and every car's reward.
     pub fn next_generation(&mut self) -> Result<(usize, Vec<f64>), String> {
         self.require_started()?;
-        let generation = self.runner.next_generation();
-        self.snapshot();
-        Ok((generation.preserved_count, generation.rewards))
+        let (turnover, lineage) = self.runner.next_generation_traced();
+        self.record(lineage);
+        Ok((turnover.preserved_count, turnover.rewards))
     }
 
     /// Change the settings used by the next reproduction without resetting
@@ -361,22 +369,36 @@ impl Session {
             self.runner.rng = rng;
         }
         self.runner.resume(&networks, generation);
-        self.snapshot();
+        self.snapshot_population();
         Ok(())
     }
 
-    /// Records the generation that just began as the checkpoint boundary.
-    fn snapshot(&mut self) {
+    /// Records the generation that just began, with every car's parameters,
+    /// as the checkpoint boundary (after a full restore).
+    fn snapshot_population(&mut self) {
         let agents = &self.runner.agents;
         let Some(first) = agents.first() else { return };
         let mut params = Vec::with_capacity(agents.len() * first.network.params.len());
         for a in agents {
             params.extend_from_slice(&a.network.params);
         }
-        self.boundary = Some(Boundary {
-            generation: self.runner.generation, tick: self.runner.tick, shape: first.network.shape.clone(),
-            rng: self.runner.rng.clone(), params,
-        });
+        let saved = Saved::Population { shape: first.network.shape.clone(), rng: self.runner.rng.clone(), params };
+        self.boundary = Some(Boundary { generation: self.runner.generation, tick: self.runner.tick, saved });
+    }
+
+    /// Records the reproduction that bred the generation that just began.
+    fn record(&mut self, lineage: Lineage) {
+        self.boundary = Some(Boundary { generation: self.runner.generation, tick: self.runner.tick, saved: Saved::Lineage(lineage) });
+    }
+
+    fn restore_lineage(&mut self, generation: u64, lineage: Lineage) -> Result<(), String> {
+        lineage.validate()?;
+        self.check_shape(&lineage.parents[0].shape)?;
+        let (networks, rng) = lineage.rebuild();
+        self.runner.rng = rng;
+        self.runner.resume_owned(networks, generation);
+        self.record(lineage);
+        Ok(())
     }
 
     /// The generation boundary `checkpoint_bytes` saves: `(generation, tick)`.
@@ -384,51 +406,30 @@ impl Session {
         self.boundary.as_ref().map(|b| (b.generation, b.tick))
     }
 
-    /// The boundary of the current generation in a compact binary form:
-    /// `ALTDCKP1`, then little-endian u32 generation, tick, population,
-    /// layer count and RNG JSON length, the u32 shape, the RNG JSON, zero
-    /// padding to a multiple of 8 bytes and every network's f64 parameters.
+    /// The boundary of the current generation in binary: format 2 (see
+    /// `parent_bytes`) after a start or reproduction, format 1 (see
+    /// `population_bytes`) after restoring a full checkpoint.
     pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, String> {
         let b = self.boundary.as_ref().ok_or("the session has not started")?;
-        let rng = b.rng.to_json().to_string();
-        let size = crate::network::parameter_count(&b.shape);
-        let header = [b.generation, b.tick, (b.params.len() / size) as u64, b.shape.len() as u64, rng.len() as u64];
-        let mut out = Vec::with_capacity(64 + rng.len() + b.params.len() * 8);
-        out.extend_from_slice(CHECKPOINT_MAGIC);
-        for n in header.iter().copied().chain(b.shape.iter().map(|&n| n as u64)) {
-            out.extend_from_slice(&u32::try_from(n).map_err(|_| "checkpoint field exceeds u32")?.to_le_bytes());
+        match &b.saved {
+            Saved::Population { shape, rng, params } => population_bytes(b.generation, b.tick, shape, rng, params),
+            Saved::Lineage(lineage) => parent_bytes(b.generation, b.tick, lineage),
         }
-        out.extend_from_slice(rng.as_bytes());
-        out.resize(out.len().next_multiple_of(8), 0);
-        for p in &b.params {
-            out.extend_from_slice(&p.to_le_bytes());
-        }
-        Ok(out)
     }
 
-    /// Restores a `checkpoint_bytes` checkpoint (see `restore_checkpoint`).
+    /// Restores a `checkpoint_bytes` checkpoint of either format.
     pub fn restore_checkpoint_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let invalid = || "invalid binary checkpoint".to_string();
-        if bytes.len() < 28 || &bytes[..8] != CHECKPOINT_MAGIC {
-            return Err(invalid());
+        match bytes.get(..8) {
+            Some(m) if m == CHECKPOINT_MAGIC => {
+                let (shape, generation, params, rng) = read_population(bytes)?;
+                self.restore(&shape, generation, params, rng)
+            }
+            Some(m) if m == PARENTS_MAGIC => {
+                let (generation, lineage) = read_parents(bytes)?;
+                self.restore_lineage(generation, lineage)
+            }
+            _ => Err("invalid binary checkpoint".into()),
         }
-        let word = |i: usize| -> Result<usize, String> {
-            let at = 8 + i * 4;
-            bytes.get(at..at + 4).map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize).ok_or_else(invalid)
-        };
-        let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
-        let shape: Vec<usize> = (0..layers).map(|i| word(5 + i)).collect::<Result<_, _>>()?;
-        let rng_at = 8 + (5 + layers) * 4;
-        let rng_text = bytes.get(rng_at..rng_at + rng_len).ok_or_else(invalid)?;
-        let rng: Value = serde_json::from_slice(rng_text).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
-        let params_at = (rng_at + rng_len).next_multiple_of(8);
-        let size = if shape.len() >= 2 { crate::network::parameter_count(&shape) } else { 0 };
-        let data = bytes.get(params_at..).ok_or_else(invalid)?;
-        if data.len() != population * size * 8 {
-            return Err(format!("the checkpoint holds {} bytes of parameters, {population} networks of shape {shape:?} need {}", data.len(), population * size * 8));
-        }
-        let params = data.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap())).collect();
-        self.restore(&shape, generation, params, (!rng.is_null()).then(|| TrainingRandom::from_json(&rng)))
     }
 
     /// Statistics of the current generation (see `GenerationSummary`).
@@ -492,6 +493,146 @@ impl Session {
         self.runner.replace_track(world, V2::new(position.x, position.y), rotation);
         Ok(())
     }
+}
+
+/// `parameter_count` for a shape from untrusted bytes: `None` on overflow
+/// (usize is 32 bits on wasm).
+fn checked_parameter_count(shape: &[usize]) -> Option<usize> {
+    shape.windows(2).try_fold(0usize, |sum, w| w[0].checked_add(1)?.checked_mul(w[1])?.checked_add(sum))
+}
+
+/// Format 1: `ALTDCKP1`, then little-endian u32 generation, tick, population,
+/// layer count and RNG JSON length, the u32 shape, the RNG JSON, zero
+/// padding to a multiple of 8 bytes and every network's f64 parameters.
+fn population_bytes(generation: u64, tick: u64, shape: &[usize], rng: &TrainingRandom, params: &[f64]) -> Result<Vec<u8>, String> {
+    let rng = rng.to_json().to_string();
+    let size = parameter_count(shape);
+    let header = [generation, tick, (params.len() / size) as u64, shape.len() as u64, rng.len() as u64];
+    let mut out = Vec::with_capacity(64 + rng.len() + params.len() * 8);
+    out.extend_from_slice(CHECKPOINT_MAGIC);
+    for n in header.iter().copied().chain(shape.iter().map(|&n| n as u64)) {
+        out.extend_from_slice(&u32::try_from(n).map_err(|_| "checkpoint field exceeds u32")?.to_le_bytes());
+    }
+    out.extend_from_slice(rng.as_bytes());
+    out.resize(out.len().next_multiple_of(8), 0);
+    for p in params {
+        out.extend_from_slice(&p.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Reads format 1: `(shape, generation, params, rng)`.
+fn read_population(bytes: &[u8]) -> Result<(Vec<usize>, u64, Vec<f64>, Option<TrainingRandom>), String> {
+    let invalid = || "invalid binary checkpoint".to_string();
+    if bytes.len() < 28 || &bytes[..8] != CHECKPOINT_MAGIC {
+        return Err(invalid());
+    }
+    let word = |i: usize| -> Result<usize, String> {
+        let at = i.checked_mul(4).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+        bytes.get(at..at.checked_add(4).ok_or_else(invalid)?).map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize).ok_or_else(invalid)
+    };
+    let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
+    let shape: Vec<usize> = (0..layers).map(|i| word(5 + i)).collect::<Result<_, _>>()?;
+    let rng_at = layers.checked_add(5).and_then(|n| n.checked_mul(4)).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+    let rng_end = rng_at.checked_add(rng_len).ok_or_else(invalid)?;
+    let rng_text = bytes.get(rng_at..rng_end).ok_or_else(invalid)?;
+    let rng: Value = serde_json::from_slice(rng_text).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
+    let params_at = rng_end.next_multiple_of(8);
+    let size = if shape.len() >= 2 { checked_parameter_count(&shape).ok_or_else(invalid)? } else { 0 };
+    let data = bytes.get(params_at..).ok_or_else(invalid)?;
+    let expected = population.checked_mul(size).and_then(|n| n.checked_mul(8));
+    if expected != Some(data.len()) {
+        return Err(format!("the checkpoint holds {} bytes of parameters, {population} networks of shape {shape:?} need {}", data.len(), expected.map_or("more".to_string(), |n| n.to_string())));
+    }
+    let params = data.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap())).collect();
+    Ok((shape, generation, params, (!rng.is_null()).then(|| TrainingRandom::from_json(&rng))))
+}
+
+/// Format 2, `ALTDCKP2`, little-endian: u32 words generation, tick,
+/// population, layer count L, RNG JSON length R, parent count P, selected
+/// count S, preserved count K, crossover (index in `CROSSOVERS`) and flags
+/// (bit 0: adaptive mutation); the u32 shape, selected and preserved parent
+/// indices; the RNG JSON; zero padding to a multiple of 8 bytes; f64
+/// mutation rate and weight decay; then the P parents' f64 parameters.
+/// Words 0 to 4 sit where format 1 has them.
+fn parent_bytes(generation: u64, tick: u64, l: &Lineage) -> Result<Vec<u8>, String> {
+    let rng = l.rng.to_json().to_string();
+    let shape = &l.parents[0].shape;
+    let b = &l.breeding;
+    let crossover = CROSSOVERS.iter().position(|&c| c == b.crossover).ok_or("unknown crossover")? as u64;
+    let header = [
+        generation, tick, b.population as u64, shape.len() as u64, rng.len() as u64,
+        l.parents.len() as u64, l.selected.len() as u64, l.preserved.len() as u64, crossover, b.adaptive_mutation as u64,
+    ];
+    let size = parameter_count(shape);
+    let mut out = Vec::with_capacity(64 + 4 * (shape.len() + l.selected.len() + l.preserved.len()) + rng.len() + 16 + l.parents.len() * size * 8);
+    out.extend_from_slice(PARENTS_MAGIC);
+    let words = header.into_iter()
+        .chain(shape.iter().map(|&n| n as u64))
+        .chain(l.selected.iter().chain(&l.preserved).map(|&i| i as u64));
+    for n in words {
+        out.extend_from_slice(&u32::try_from(n).map_err(|_| "checkpoint field exceeds u32")?.to_le_bytes());
+    }
+    out.extend_from_slice(rng.as_bytes());
+    out.resize(out.len().next_multiple_of(8), 0);
+    out.extend_from_slice(&b.mutation_rate.to_le_bytes());
+    out.extend_from_slice(&b.weight_decay.to_le_bytes());
+    for p in l.parents.iter().flat_map(|n| &n.params) {
+        out.extend_from_slice(&p.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Reads format 2 (see `parent_bytes`) and validates it: `(generation, lineage)`.
+fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
+    let invalid = || "invalid binary checkpoint".to_string();
+    let word = |i: usize| -> Result<usize, String> {
+        let at = i.checked_mul(4).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+        bytes.get(at..at.checked_add(4).ok_or_else(invalid)?).map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize).ok_or_else(invalid)
+    };
+    let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
+    let (parents, selected, preserved, crossover, flags) = (word(5)?, word(6)?, word(7)?, word(8)?, word(9)?);
+    let first_index = 10usize.checked_add(layers).ok_or_else(invalid)?;
+    let rng_at = first_index.checked_add(selected).and_then(|n| n.checked_add(preserved))
+        .and_then(|n| n.checked_mul(4)).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+    // Bound every count by the bytes present before allocating for it.
+    let rng_end = rng_at.checked_add(rng_len).filter(|&end| end <= bytes.len()).ok_or_else(invalid)?;
+    let shape: Vec<usize> = (0..layers).map(|i| word(10 + i)).collect::<Result<_, _>>()?;
+    if shape.len() < 2 || shape.contains(&0) {
+        return Err(invalid());
+    }
+    let index = |i: usize| word(i).map(|n| n as u32);
+    let selected_ix = (0..selected).map(|i| index(first_index + i)).collect::<Result<Vec<_>, _>>()?;
+    let preserved_ix = (0..preserved).map(|i| index(first_index + selected + i)).collect::<Result<Vec<_>, _>>()?;
+    let rng: Value = serde_json::from_slice(&bytes[rng_at..rng_end]).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
+    if rng.is_null() {
+        return Err("the checkpoint has no random state".into());
+    }
+    let rates_at = rng_end.next_multiple_of(8);
+    let float = |at: usize| bytes.get(at..at.checked_add(8).ok_or_else(invalid)?).map(|b| f64::from_le_bytes(b.try_into().unwrap())).ok_or_else(invalid);
+    let (mutation_rate, weight_decay) = (float(rates_at)?, float(rates_at + 8)?);
+    let size = checked_parameter_count(&shape).ok_or_else(invalid)?;
+    let stride = size.checked_mul(8).ok_or_else(invalid)?;
+    let data = bytes.get(rates_at + 16..).ok_or_else(invalid)?;
+    if parents.checked_mul(stride) != Some(data.len()) {
+        return Err(format!("the checkpoint holds {} bytes of parameters, {parents} networks of shape {shape:?} need more or fewer", data.len()));
+    }
+    let crossover = CROSSOVERS.get(crossover).ok_or("the checkpoint has an unknown crossover")?;
+    if flags > 1 {
+        return Err(invalid());
+    }
+    let networks = data.chunks_exact(stride)
+        .map(|chunk| Network::from_vector(&shape, chunk.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap())).collect()))
+        .collect();
+    let lineage = Lineage {
+        parents: networks,
+        selected: selected_ix,
+        preserved: preserved_ix,
+        breeding: Breeding { population, crossover: (*crossover).into(), mutation_rate, adaptive_mutation: flags == 1, weight_decay },
+        rng: TrainingRandom::from_json(&rng),
+    };
+    lineage.validate()?;
+    Ok((generation, lineage))
 }
 
 #[cfg(test)]
@@ -597,7 +738,7 @@ mod tests {
         let json = s.checkpoint().unwrap();
         s.advance(120, false).unwrap();
         let bytes = s.checkpoint_bytes().unwrap();
-        assert_eq!(&bytes[..8], b"ALTDCKP1");
+        assert_eq!(&bytes[..8], b"ALTDCKP2");
         assert_eq!(s.boundary(), Some((1, 0)));
         let mut t = autumn(options);
         t.restore_checkpoint_bytes(&bytes).unwrap();
@@ -605,9 +746,150 @@ mod tests {
         assert_eq!(t.checkpoint_bytes().unwrap(), bytes);
         let mut u = autumn(options);
         u.restore_checkpoint(&json).unwrap();
-        assert_eq!(u.checkpoint_bytes().unwrap(), bytes);
+        let full = u.checkpoint_bytes().unwrap();
+        assert_eq!(&full[..8], b"ALTDCKP1");
+        let mut w = autumn(options);
+        w.restore_checkpoint_bytes(&full).unwrap();
+        assert_eq!(w.checkpoint().unwrap(), json);
+        assert_eq!(w.checkpoint_bytes().unwrap(), full);
         assert!(t.restore_checkpoint_bytes(&bytes[..bytes.len() - 8]).is_err());
         assert!(t.restore_checkpoint_bytes(b"ALTDCKP0").is_err());
+    }
+
+    fn state_bits(s: &Session) -> Vec<u64> {
+        s.car_states().iter().map(|v| v.to_bits()).collect()
+    }
+
+    const PARENT_OPTIONS: [&str; 3] = [
+        r#"{"population": 12, "seed": 5, "eliminateOnWall": true, "settings": {"selection_algorithm": "tournament", "selection_size": 4, "crossover": "uniform", "mutation_rate": 0.3, "adaptive_mutation": true, "weight_decay": 0.001, "preserve_parents": "on_custom", "preserve_parents_size": 2}}"#,
+        r#"{"population": 12, "seed": 6, "eliminateOnWall": true, "settings": {"selection_algorithm": "roulette", "selection_size": 3, "crossover": "single_point", "mutation_rate": 0.2, "preserve_parents": "off"}}"#,
+        r#"{"population": 12, "seed": 7, "eliminateOnWall": true, "settings": {"selection_size": 3, "mutation_rate": 0.2}}"#,
+    ];
+
+    /// A parent checkpoint holds the parents, not the generation, yet it
+    /// restores every network, the generator and later generations exactly,
+    /// even after the session's settings have moved on.
+    #[test]
+    fn parent_checkpoints_rebuild_the_generation_exactly() {
+        for options in PARENT_OPTIONS {
+            let mut s = autumn(options);
+            s.start_with_shape(&[20, 8, 5]).unwrap();
+            let first = s.checkpoint_bytes().unwrap();
+            assert_eq!(&first[..8], b"ALTDCKP2");
+            let mut t = autumn(options);
+            t.restore_checkpoint_bytes(&first).unwrap();
+            assert_eq!(t.checkpoint().unwrap(), s.checkpoint().unwrap(), "generation 0");
+            assert_eq!(t.checkpoint_bytes().unwrap(), first);
+
+            s.advance_generation(120).unwrap();
+            s.next_generation().unwrap();
+            s.advance_generation(120).unwrap();
+            // A schedule or stage change: the next reproduction breeds 9 cars
+            // at another rate, which a session built with `options` lacks.
+            s.set_evolution_settings(r#"{"population": 9, "selection_algorithm": "tournament", "selection_size": 2, "crossover": "uniform", "mutation_rate": 0.05, "weight_decay": 0.01, "preserve_parents": "on_custom", "preserve_parents_size": 1}"#).unwrap();
+            s.next_generation().unwrap();
+            let bytes = s.checkpoint_bytes().unwrap();
+            let json = s.checkpoint().unwrap();
+            let mut u = autumn(options);
+            u.restore_checkpoint_bytes(&bytes).unwrap();
+            assert_eq!(u.runner.agents.len(), 9);
+            assert_eq!(u.runner.generation, 2);
+            assert_eq!(u.checkpoint().unwrap(), json, "every network and the generator");
+            assert_eq!(u.checkpoint_bytes().unwrap(), bytes);
+            u.set_evolution_settings(r#"{"population": 9, "selection_algorithm": "tournament", "selection_size": 2, "crossover": "uniform", "mutation_rate": 0.05, "weight_decay": 0.01, "preserve_parents": "on_custom", "preserve_parents_size": 1}"#).unwrap();
+            for _ in 0..2 {
+                s.advance_generation(120).unwrap();
+                u.advance_generation(120).unwrap();
+                assert_eq!(state_bits(&u), state_bits(&s));
+                assert_eq!(u.next_generation().unwrap(), s.next_generation().unwrap());
+                assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
+            }
+        }
+    }
+
+    /// The checkpoint grows with the parents, not the cars.
+    #[test]
+    fn parent_checkpoints_scale_with_the_selection() {
+        let mut s = autumn(r#"{"population": 60, "seed": 5, "settings": {"selection_size": 3, "mutation_rate": 0.2}}"#);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        let bytes = s.checkpoint_bytes().unwrap();
+        let word = |i: usize| u32::from_le_bytes(bytes[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
+        let params = crate::network::parameter_count(&[20, 8, 5]);
+        assert_eq!((word(2), word(5)), (60, 3), "60 cars bred from the 3 best, preserved");
+        // The generator's JSON (about 7 KB) is the fixed part, so compare with
+        // a quarter of the 60 cars' parameters rather than a few networks.
+        assert!(bytes.len() < 60 * params * 8 / 4, "{} bytes", bytes.len());
+        assert!(bytes.len() >= 3 * params * 8, "the 3 parents are all there");
+    }
+
+    /// Format 1 checkpoints of earlier versions still restore.
+    #[test]
+    fn full_checkpoints_still_restore() {
+        let options = PARENT_OPTIONS[0];
+        let mut s = autumn(options);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(120).unwrap();
+        s.next_generation().unwrap();
+        let mut v = autumn(options);
+        v.restore_checkpoint(&s.checkpoint().unwrap()).unwrap();
+        let full = v.checkpoint_bytes().unwrap();
+        assert_eq!(&full[..8], b"ALTDCKP1");
+        let mut w = autumn(options);
+        w.restore_checkpoint_bytes(&full).unwrap();
+        assert_eq!(w.checkpoint().unwrap(), s.checkpoint().unwrap());
+        w.advance_generation(120).unwrap();
+        s.advance_generation(120).unwrap();
+        w.next_generation().unwrap();
+        s.next_generation().unwrap();
+        assert_eq!(w.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap(), "the next save is format 2");
+    }
+
+    /// Corrupt parent checkpoints are errors, never panics (a panic traps WASM).
+    #[test]
+    fn malformed_parent_checkpoints_are_rejected() {
+        let options = PARENT_OPTIONS[0];
+        let mut s = autumn(options);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        let bytes = s.checkpoint_bytes().unwrap();
+        let word = |b: &[u8], i: usize| u32::from_le_bytes(b[8 + i * 4..12 + i * 4].try_into().unwrap());
+        let set = |i: usize, value: u32| {
+            let mut b = bytes.clone();
+            b[8 + i * 4..12 + i * 4].copy_from_slice(&value.to_le_bytes());
+            b
+        };
+        let (layers, parents, selected, preserved) = (word(&bytes, 3) as usize, word(&bytes, 5), word(&bytes, 6), word(&bytes, 7));
+        let first_index = 10 + layers;
+        let rates_at = {
+            let rng_at = 8 + (first_index + (selected + preserved) as usize) * 4;
+            (rng_at + word(&bytes, 4) as usize).next_multiple_of(8)
+        };
+        let mut nan_rate = bytes.clone();
+        nan_rate[rates_at..rates_at + 8].copy_from_slice(&f64::NAN.to_le_bytes());
+        let mut no_selection = set(6, 0);
+        // Drop the selected indices so the rest of the layout stays valid.
+        no_selection.drain(8 + first_index * 4..8 + (first_index + selected as usize) * 4);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("truncated", bytes[..bytes.len() - 8].to_vec()),
+            ("header only", bytes[..40].to_vec()),
+            ("index past the parents", set(first_index, parents)),
+            ("huge selection", set(6, u32::MAX)),
+            ("huge parent count", set(5, u32::MAX)),
+            ("no cars", set(2, 0)),
+            ("more kept than cars", set(2, preserved - 1)),
+            ("unknown crossover", set(8, 3)),
+            ("unknown flags", set(9, 2)),
+            ("NaN mutation rate", nan_rate),
+            ("selects nothing", no_selection),
+            ("one-layer shape", set(3, 1)),
+        ];
+        for (what, case) in cases {
+            let mut t = autumn(options);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.restore_checkpoint_bytes(&case).is_err())).unwrap_or(false), "{what}");
+        }
     }
 
     #[test]

@@ -380,15 +380,18 @@ impl Simulation {
         self.session().active_count() as u32
     }
 
-    /// The checkpoint of the current generation's start in the binary form
-    /// of `Session::checkpoint_bytes`. The session keeps that boundary as a
-    /// copy, so hosts request the bytes only when they save.
+    /// The checkpoint of the current generation's start: the parents it was
+    /// bred from and the generator state (`Session::checkpoint_bytes`,
+    /// format 2), or after restoring a full checkpoint every network
+    /// (format 1). The session keeps that boundary, so hosts request the
+    /// bytes only when they save.
     #[wasm_bindgen(js_name = checkpointBytes)]
     pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, JsError> {
         self.session().checkpoint_bytes().map_err(js_error)
     }
 
-    /// Restores a `checkpointBytes` checkpoint.
+    /// Restores a `checkpointBytes` checkpoint of either format, breeding a
+    /// format 2 generation again.
     #[wasm_bindgen(js_name = restoreCheckpointBytes)]
     pub fn restore_checkpoint_bytes(&self, bytes: &[u8]) -> Result<(), JsError> {
         self.session_mut()?.restore_checkpoint_bytes(bytes).map_err(js_error)
