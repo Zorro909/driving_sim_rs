@@ -1,0 +1,46 @@
+{
+ "population": 1600,
+ "samples": 8084,
+ "states": {
+  "2327031 AI Learns To Dr (main)": {
+   "R": 0.488,
+   "S:futex_do_wait": 0.318,
+   "S:futex_wait_multiple": 0.182,
+   "S:0": 0.012,
+   "S:anon_pipe_read": 0.0
+  },
+  "2327051 AI Learns To Dr": {
+   "S:futex_do_wait": 0.567,
+   "R": 0.424,
+   "S:0": 0.01
+  },
+  "2344658 .NET TP Worker": {
+   "S:anon_pipe_read": 0.768,
+   "R": 0.143,
+   "S:futex_wait_multiple": 0.083,
+   "S:0": 0.005,
+   "S:futex_do_wait": 0.001
+  },
+  "2351002 .NET TP Worker": {
+   "S:anon_pipe_read": 0.706,
+   "R": 0.168,
+   "S:futex_wait_multiple": 0.116,
+   "S:0": 0.008,
+   "S:futex_do_wait": 0.002
+  },
+  "2342747 .NET TP Worker": {
+   "S:anon_pipe_read": 0.756,
+   "R": 0.146,
+   "S:futex_wait_multiple": 0.089,
+   "S:0": 0.007,
+   "S:futex_do_wait": 0.002
+  },
+  "2344257 .NET TP Worker": {
+   "S:anon_pipe_read": 0.757,
+   "R": 0.145,
+   "S:futex_wait_multiple": 0.089,
+   "S:0": 0.008,
+   "S:futex_do_wait": 0.001
+  }
+ }
+}

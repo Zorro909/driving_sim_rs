@@ -8,13 +8,13 @@ This report compares the game's CPU driving and training code with the Rust port
 
 - **Game:** `AILearnsToDrive.dll` (Godot 4.3 Mono, .NET 8, C#), decompiled with `ilspycmd` into `/tmp/ald-decomp`. File paths below use the decompiled namespace folders, for example `AILearnsToDrive.Lib.Vehicles/Vehicle.cs`. Names in the original source should match; line numbers may not.
 - **Rust:** `src/` in this crate, plus the measurements in `../docs/benchmarks/README.md` and `reports/cpu-port-*.json`.
-- **No game profiling was done.** The impact ratings come from counting work per car per tick and from what the Rust port measured. They are estimates. Profile before committing to the larger items.
+- **Game benchmark:** [../game-benchmark-20261002/README.md](../game-benchmark-20261002/README.md). It measured the running game through the AltdMcp mod: throughput with one factor changed at a time, and the CPU time of each game thread. The impact ratings below were first estimated by counting work per car per tick and from what the Rust port measured. They were then corrected with these measurements; the findings say where. The benchmark has no profiler, so the time spent on the main thread is not split up further.
 
 Confidence markers:
 
 | Marker | Meaning |
 |---|---|
-| ✓ | Verified by reading the decompiled game code and the Rust code |
+| ✓ | Verified by reading the decompiled game code and the Rust code, or measured in the game benchmark |
 | ? | Inferred from engine or library behaviour that was not checked in this codebase |
 
 **Exactness.** The Rust port aims to reproduce the game bit for bit. ✓ Its fidelity experiment (`../experiments/driving_sim_rs_fidelity/README.md`) reports zero error for every captured position, velocity, rotation and network output on three recorded game episodes (A01, A07, B06). Most of the port's optimizations are tested to give identical results to its straightforward version. Every finding below says whether it changes the game's results. "Exact" means the same floating-point operations run in the same order, so trained networks, replays and saved runs behave the same.
@@ -28,6 +28,7 @@ Confidence markers:
 | 3 | [03-per-tick-pipeline.md](03-per-tick-pipeline.md) | 14, 19, 20 |
 | 4 | [04-spatial-queries.md](04-spatial-queries.md) | 11, 12, 16, 21, 22 |
 | 5 | [05-headless-simulation.md](05-headless-simulation.md) | 24, 25 |
+| – | [../game-benchmark-20261002/README.md](../game-benchmark-20261002/README.md) | measurements of the running game |
 
 ## Main implementation differences
 
@@ -48,9 +49,35 @@ Confidence markers:
 | Random numbers | .NET `Random` and MathNet's sampler. | A Python-compatible generator by default. The game's .NET streams can be selected for exact replays (`TrainingRandom::Game`). | ✓ |
 | Stability check | `Vehicle.GetIsStable` compares the *signed* angular velocity: `AngularVelocity < 0.001f`. | Copies this on purpose (`TrainingRunner::settle_reset`). | ✓ |
 
+## What limits the game today (measured)
+
+From the [game benchmark](../game-benchmark-20261002/README.md). The test used a trained rally network with 20 inputs, 8 hidden layers and both path sensors, on A07, under Proton on a Ryzen 9 7950X (32 logical CPUs). Runs vary by about ±5%.
+
+- **The tick is a serial chain, not a CPU limit.** ✓
+  - With 400 cars, the game reaches 3.0× real time (72,000 car ticks/s) and keeps only about 7.5 of the 32 logical CPUs busy.
+  - No thread is saturated: the main thread is busy about 70% of the time, and each .NET worker about 20%.
+  - Asking for 4×, 8× or 16× gives the same speed.
+  - Within a tick, roughly:
+    - 36%: the .NET parallel loops (about 12 cores busy);
+    - 32%: the main thread alone;
+    - 11%: an engine thread while the main thread waits (? probably Godot's physics step);
+    - the rest: waiting and handing over work.
+- **Each car tick is expensive.** ✓ It takes about 100 µs of CPU with the trained network, and about 22 µs even for a 2-input network on a car standing still. The Rust port runs a whole car tick in 3.3 µs on one thread. ? The game's figures include spin-waiting, so they are upper bounds.
+- **What each input costs** ✓ (added with zero weights, so the driving stays the same):
+
+  | Input | Added CPU µs per car tick |
+  |---|---:|
+  | each path sensor (`correct_direction`, `track_curvature`) | ≈ 30 |
+  | 8 hidden layers through MathNet | ≈ 28 |
+  | each vision ray | ≈ 1 |
+  | grip, boost, velocity and wheel-angle sensors | ≈ 0 |
+
+- **Population.** ✓ Throughput peaks at about 400 cars. It is 53,000 car ticks/s at 100 cars and 51,000 at 1,600, where the CPU per car tick rises to 140 µs. Below about 50 cars, the 16× cap is the limit.
+- **Turnover.** ✓ It takes about 9 ms per generation with 100 cars, 40 ms with 400 and 460 ms with 1,600, plus about 30 ms for a random track. With 5 s generations, that is at most about 7% of the wall time.
+
 ## Findings, ranked by complexity
 
-Impact is the estimated effect on training throughput: **H**igh, **M**edium or **L**ow.
+Impact is the estimated effect on training throughput: **H**igh, **M**edium or **L**ow. "(measured)" marks a rating checked or corrected with the [game benchmark](../game-benchmark-20261002/README.md).
 
 ### Trivial (local edits, minutes each)
 
@@ -91,8 +118,8 @@ Impact is the estimated effect on training throughput: **H**igh, **M**edium or *
 11. **Store track surfaces in a dense tile array.** ✓ Impact L–M → [04](04-spatial-queries.md#surface-lookup)
     `TrackManager.GetSurfaceAt` does a `ConcurrentDictionary` lookup for every wheel on every tick. That is 4 lookups per car per tick, plus `PointToCoords`. Tracks are small, bounded tile grids, so an array indexed by `(x - x0, y - y0)` built in `TrackManager.Init` is enough, as Rust's `TileTable` shows. Exact.
 
-12. **Reuse track queries within a tick.** ✓ Impact M → [04](04-spatial-queries.md#per-tick-memoization)
-    The direction and curvature sensors both call `GetClosestTrackPointInsideTile` and `Curve2D.GetClosestOffset` on the same point. On stats ticks, the wall-distance sensor and `AgentStats.UpdateDistanceFromWall` both run `Raycaster.FindClosestPoint` from the same position. Compute each once per car per tick. Exact. Rust caches the path offset per pose.
+12. **Reuse track queries within a tick.** ✓ Impact **M–H** (measured) → [04](04-spatial-queries.md#per-tick-memoization)
+    The direction and curvature sensors both call `GetClosestTrackPointInsideTile` and `Curve2D.GetClosestOffset` on the same point. On stats ticks, the wall-distance sensor and `AgentStats.UpdateDistanceFromWall` both run `Raycaster.FindClosestPoint` from the same position. Compute each once per car per tick. Exact. Rust caches the path offset per pose. ✓ Measured: each path sensor costs about 30 µs of CPU per car tick on A07, so sharing one projection saves about 30 µs per car tick for networks that use both.
 
 13. **Compute rewards once, without dictionaries per agent.** ✓ Impact L–M → [02](02-generation-turnover.md#rewards)
     `RewardAlgorithmUtils.Apply` builds a `Dictionary` for every agent and sums through LINQ. Callers recompute it again and again:
@@ -103,43 +130,43 @@ Impact is the estimated effect on training throughput: **H**igh, **M**edium or *
     Use arrays, compute once per turnover, and pass the result along. Exact if the summation order is kept.
 
 14. **Partition the parallel loops by range.** ✓ Impact L–M → [03](03-per-tick-pipeline.md#partitioning)
-    `BatchPool.ApplyOnBatchParallel` (`Parallel.For`) and `VehicleManager.ApplyPhysicsProcess` (`Parallel.ForEach` over a `List`) call a delegate for every car, and each call does very little work. Use `Partitioner.Create(0, n, chunk)` or another fixed range per worker. Exact.
+    `BatchPool.ApplyOnBatchParallel` (`Parallel.For`) and `VehicleManager.ApplyPhysicsProcess` (`Parallel.ForEach` over a `List`) call a delegate for every car, and each call does very little work. Use `Partitioner.Create(0, n, chunk)` or another fixed range per worker. Exact. ✓ Measured: during the parallel loops only about 12 of 32 logical CPUs are busy on average, and the workers spend about 75% of their time blocked.
 
-15. **Skip cosmetic work during fast or unwatched training.** ✓ Impact L–M
+15. **Skip cosmetic work during fast or unwatched training.** ✓ Impact L (measured)
     Several things do work that does not affect the simulation:
     - `VehicleManager.UpdateSound` runs a LINQ group-by every 6 ticks.
     - `UpdateVehicleZIndices` sorts every agent through LINQ every 18 ticks.
     - Camera updates, sensor redraws, skidmarks and per-frame wheel and icon updates (`Vehicle._Process`) run all the time.
 
-    Turn these off or throttle them at high speed or when the window is hidden. Exact for the simulation.
+    Turn these off or throttle them at high speed or when the window is hidden. Exact for the simulation. ? The benchmark found that rendering and the other threads outside the main thread and the .NET pool use only about 0.6–1.3 cores with 200 or more cars. So this mainly saves power, unless the main-thread share turns out to be large when profiled.
 
 16. **Make the spawn-overlap check cheaper.** ✓ Impact L–M → [04](04-spatial-queries.md#car-to-car-queries)
     While vehicle collisions are enabled, `VehicleManager.UpdateClearedOverlaps` compares every car that has not cleared its overlap against every other car on every tick. It reads `Node2D.Position` (an engine call) inside the inner loop, so it costs up to O(N²) engine calls per tick until the cars separate. Cars spawn on the same point when the starting grid is off, so this case is common. Read positions into an array once per tick and use a uniform grid. `UpdateVehicleInteractions` also rebuilds `ObstacleSnapshot` through LINQ every tick; reuse that array. Exact.
 
 ### Medium (several files, careful exactness work)
 
-17. **Run inference without allocations, optionally with SIMD.** ✓ Impact **H** → [01](01-network-inference.md)
-    `NeuralNetwork.Forward` creates at least four temporary MathNet matrices per layer. With the usual 8-layer network that is more than 30 matrices per car per inference, at up to 60 inferences per car per second. Keep each network as one flat `double[]` in the existing `GetVector` layout, and run a plain loop over reusable buffers in the same summation order. The Rust port shows this is bit-exact against the game. `Vector256<double>` can then process 4 outputs at once and stays exact.
+17. **Run inference without allocations, optionally with SIMD.** ✓ Impact **H** (measured) → [01](01-network-inference.md)
+    `NeuralNetwork.Forward` creates at least four temporary MathNet matrices per layer. With the usual 8-layer network that is more than 30 matrices per car per inference, at up to 60 inferences per car per second. Keep each network as one flat `double[]` in the existing `GetVector` layout, and run a plain loop over reusable buffers in the same summation order. The Rust port shows this is bit-exact against the game. `Vector256<double>` can then process 4 outputs at once and stays exact. ✓ Measured: the 8 hidden layers of a typical network (16,16,16,16,12,12,12,8) add about 28 µs of CPU per car tick. With 400 cars standing still, they lowered the speed from 8.7× to 4.9× real time.
 
-18. **Make reproduction and novelty cheaper.** ✓ Impact M (at turnover) → [02](02-generation-turnover.md#reproduction)
-    For each child, crossover, then mutation (`Clone()` plus a random matrix), then weight decay (a full copy, even when decay is 0) each produce a new network. `GetVector` and `FromVector` copy elements one by one through MathNet's indexer. All of this runs on one thread. With flat arrays, one pass can mutate, decay and write the child. Rust draws all the noise in order first, then mutates children in parallel, which keeps the random-number order.
+18. **Make reproduction and novelty cheaper.** ✓ Impact L–M (measured, at turnover) → [02](02-generation-turnover.md#reproduction)
+    For each child, crossover, then mutation (`Clone()` plus a random matrix), then weight decay (a full copy, even when decay is 0) each produce a new network. `GetVector` and `FromVector` copy elements one by one through MathNet's indexer. All of this runs on one thread. With flat arrays, one pass can mutate, decay and write the child. Rust draws all the noise in order first, then mutates children in parallel, which keeps the random-number order. ✓ Measured: a whole turnover takes about 9 ms with 100 cars, 40 ms with 400 and 460 ms with 1,600. That is at most about 7% of the wall time with 5 s generations, but it grows faster than the population.
 
 19. **Parallelize agent statistics and run each car's tick work in one task.** ✓ Impact M → [03](03-per-tick-pipeline.md#parallel-statistics)
-    `UpdateGenerationStats` runs `AgentStats.UpdateStats` sequentially for every agent. That includes a path projection, a BSP nearest-wall query and `Curve2D.SampleBaked`. Most of this only touches one agent's data. Run the pure part in parallel, then apply the side effects (icons, achievements, idle elimination, lap observers) on the main thread in agent order. Exact if the side effects keep their order.
+    `UpdateGenerationStats` runs `AgentStats.UpdateStats` sequentially for every agent. That includes a path projection, a BSP nearest-wall query and `Curve2D.SampleBaked`. Most of this only touches one agent's data. Run the pure part in parallel, then apply the side effects (icons, achievements, idle elimination, lap observers) on the main thread in agent order. Exact if the side effects keep their order. ✓ Measured: about a third of each tick is the main thread working alone, which includes this work. ? How much of that third is statistics, and how much is the engine step, was not separated.
 
 20. **Make fewer engine calls in the vehicle physics.** ✓ Impact M → [03](03-per-tick-pipeline.md#engine-calls)
     For every car on every tick, `ImpulseAccumulator.Flush` makes two `PhysicsServer2D` calls, and `ClampVelocity` may call `BodySetState`. `_IntegrateForces` calls `GetContactColliderObject(i) is Vehicle` for every contact, which wraps an object only to test its type. Apply impulses through the `PhysicsDirectBodyState2D` already passed to `_IntegrateForces`, or merge them into one call, and compare collider IDs instead of objects. ? Moving the impulses into the integrator changes when they are applied, so check exactness against a replay.
 
-21. **Narrow the path-sensor projection.** ✓ Impact M–H → [04](04-spatial-queries.md#path-projection)
-    `CorrectDirectionSensor` and `TrackCurvatureSensor` call `Curve2D.GetClosestOffset`, which scans every baked point of the track, for every car on every inference. Score tracking already uses a ±450 px window (`TrackManager.GetClosestOffsetNear`). Either reuse a similar window, or add a grid of baked segments that skips segments exactly, as Rust's `SegmentGrid` does. Only the grid version is guaranteed exact. This only matters for networks that use these sensors; the default sensor set does not.
+21. **Narrow the path-sensor projection.** ✓ Impact **H** (measured) → [04](04-spatial-queries.md#path-projection)
+    `CorrectDirectionSensor` and `TrackCurvatureSensor` call `Curve2D.GetClosestOffset`, which scans every baked point of the track, for every car on every inference. Score tracking already uses a ±450 px window (`TrackManager.GetClosestOffsetNear`). Either reuse a similar window, or add a grid of baked segments that skips segments exactly, as Rust's `SegmentGrid` does. Only the grid version is guaranteed exact. This only matters for networks that use these sensors; the default sensor set does not. ✓ Measured: about 30 µs of CPU per sensor per car tick on A07 (12 tiles). Adding one path sensor alone dropped the speed of 400 cars from 8.7× to 5.4× real time. That makes it the largest single cost found. The scan covers every baked point, so ? the cost grows with track length (A08 has 36 tiles, B09 has 48).
 
 ### High (new data structures or concurrency)
 
-22. **Flatten the BSP raycaster into an array with exact bounding boxes.** ✓ Impact **H** → [04](04-spatial-queries.md#bsp-raycaster)
-    `BspTreeRaycaster` is a pointer-linked tree with no bounding volumes, so a ray explores every subtree on its side of each partition line. Rust stores the same tree in preorder in one array, with float32 wall data and per-node and per-subtree boxes. A box test skips exactly the walls whose intersection test would fail anyway. The hit is identical. Ray sensors are usually most of a network's inputs, so this is likely one of the largest per-tick costs.
+22. **Flatten the BSP raycaster into an array with exact bounding boxes.** ✓ Impact L–M (measured; first estimated H) → [04](04-spatial-queries.md#bsp-raycaster)
+    `BspTreeRaycaster` is a pointer-linked tree with no bounding volumes, so a ray explores every subtree on its side of each partition line. Rust stores the same tree in preorder in one array, with float32 wall data and per-node and per-subtree boxes. A box test skips exactly the walls whose intersection test would fail anyway. The hit is identical. Ray sensors are usually most of a network's inputs. ✓ But the benchmark measured only about 1 µs of CPU per ray per car tick on A07, and going from 1 to 13 rays did not change the speed of the trained network beyond noise. So this matters less than the path sensors and inference. It may matter more on tracks with many wall segments.
 
-23. **Prepare the next random track in the background.** ✓ Impact M (removes turnover pauses) → [02](02-generation-turnover.md#background-track-preparation)
-    On random tracks, `SetNextGeneration` calls `TrackFactory.GenerateRandomTrack` and `TrackManager.Init` synchronously. `Init` redraws the TileMap and builds a new `BspTreeRaycaster`, which costs O(n²) or more in wall segments. Generate the track, its BSP, its baked path and its surface table on a worker thread during the current generation. At turnover, only swap them in and update the scene on the main thread.
+23. **Prepare the next random track in the background.** ✓ Impact L–M (measured; removes turnover pauses) → [02](02-generation-turnover.md#background-track-preparation)
+    On random tracks, `SetNextGeneration` calls `TrackFactory.GenerateRandomTrack` and `TrackManager.Init` synchronously. `Init` redraws the TileMap and builds a new `BspTreeRaycaster`, which costs O(n²) or more in wall segments. Generate the track, its BSP, its baked path and its surface table on a worker thread during the current generation. At turnover, only swap them in and update the scene on the main thread. ✓ Measured: generating a random 20-tile track added about 30 ms per generation with 400 cars.
 
 ### Very high (architectural)
 
@@ -151,11 +178,15 @@ Impact is the estimated effect on training throughput: **H**igh, **M**edium or *
 
 ## Suggested order
 
-1. Findings 1–10 and 15: small, safe and exact.
-2. Finding 17 (inference): likely the largest single gain, and exact.
-3. Findings 22 and 21 (sensor queries), then 11–12.
-4. Findings 19, 20 and 14 (the per-tick pipeline), then 13, 18 and 23 (turnover).
-5. Consider finding 24 only if the gains above are not enough.
+Revised after the [game benchmark](../game-benchmark-20261002/README.md):
+
+1. **Findings 12 and 21 (path sensors).** These are the largest measured cost, about 30 µs per sensor per car tick. Finding 12 is a small change.
+2. **Finding 17 (inference).** About 28 µs per car tick for 8 small layers, and exact.
+3. **Findings 1–10.** Small, safe and exact. Together they target the base cost of about 17 µs per car tick, measured with a minimal network on a car standing still.
+4. **Findings 14, 19 and 20 (the per-tick pipeline).** The tick is a serial chain and about 75% of the CPUs stay idle, so this is what lets more cores help, especially above about 400 cars.
+5. **Findings 11, 22 and 15.** These were measured or estimated to matter less than first thought.
+6. **Findings 13, 18 and 23 (turnover).** At most about 7% of the time with 5 s generations.
+7. **Finding 24.** Consider it if the gains above are not enough. It removes the engine phase and the per-tick waits.
 
 ## Reference: measured Rust throughput
 

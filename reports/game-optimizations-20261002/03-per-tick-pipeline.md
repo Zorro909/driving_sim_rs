@@ -20,11 +20,30 @@ Everything below is registered with `_physicsTickObserver` in `GameManager` (✓
 
 So each tick has at least two fork-join barriers (inference, forces), plus the engine step. Every sixth tick, the main thread also runs the stats for every agent while the workers wait.
 
+### Measured
+
+From the [game benchmark](../game-benchmark-20261002/README.md#where-the-time-goes-within-a-tick-400-cars-trained-network): 400 cars, a trained 20-input network, 32 logical CPUs, under Proton.
+
+- **Nothing is saturated.** ✓ The game reaches 3.0× real time while using about 7.5 cores in total. The main thread is busy about 70% of the time, and each of the 30–40 .NET workers about 20%.
+- **More speed does not help.** ✓ Requesting 4×, 8× or 16× gives the same result.
+- **Rough shares of a tick,** from sampling the threads' run states (✓):
+
+  | Share | What runs |
+  |---:|---|
+  | ≈ 36% | the .NET parallel loops; about 12 cores busy on average |
+  | ≈ 32% | the main thread alone |
+  | ≈ 11% | one engine thread alone, while the main thread waits. ? It is probably Godot's `WorkerThreadPool` running the physics step. |
+  | ≈ 16% | workers finishing, or threads waking up |
+
+- **More cars do not help either.** ✓ Car ticks per second peak at about 400 cars and fall to about 51,000 at 1,600, because the CPU per car tick rises from about 100 to 140 µs.
+
+So shortening the serial chain matters as much as making each car cheaper. That means fewer barriers, the stats off the main thread, and fewer engine calls.
+
 ## Partitioning
 
 ### Game
 
-`BatchPool.ApplyOnBatchParallel` uses `Parallel.For(0, n, options, i => action(Values[i]))` (✓). `ApplyPhysicsProcess` uses `Parallel.ForEach(_vehicles, options, v => v.PhysicsProcess(delta))` over a `List` (✓). `Repositories.Settings.GetParallelismOptions()` is evaluated on every call.
+`BatchPool.ApplyOnBatchParallel` uses `Parallel.For(0, n, options, i => action(Values[i]))` (✓). `ApplyPhysicsProcess` uses `Parallel.ForEach(_vehicles, options, v => v.PhysicsProcess(delta))` over a `List` (✓). `Repositories.Settings.GetParallelismOptions()` returns a cached `ParallelOptions` and only updates it when the setting changes (✓), so it costs nothing.
 
 ? `Parallel.For` splits the range dynamically and calls the delegate once per index. `Parallel.ForEach` over a `List<T>` uses a partitioner that hands out small chunks under a lock. The work per car is small (a few microseconds), so the scheduling overhead is a noticeable share.
 
@@ -41,7 +60,6 @@ Parallel.ForEach(ranges, options, r =>
 ```
 
 - Use an array instead of a `List` for `_vehicles` during a generation.
-- Cache the `ParallelOptions` and refresh it only when the settings change.
 - Exact: each car's work is independent, and the order between cars does not matter within these two phases.
 
 ✓ The Rust port gives each worker whole cars (`agents.par_iter_mut().with_max_len(1)` in `advance_window`). That works because each task is a whole window of ticks (see below), not a single tick.

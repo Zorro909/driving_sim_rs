@@ -80,7 +80,9 @@ sealed class FlatBsp
 
 `FindClosestPoint` can also use the flat array. Its existing pruning (the distance to the partition's infinite line) stays the same. A box distance test could be added for the far subtree, but it has to be checked for exactness separately, since it changes which walls are visited. Visiting fewer walls is only safe if a skipped wall can never be strictly closer.
 
-Impact: high. ✓ The game's default sensor set (`NeuralNetworkUtils.GetDefaultSensors`) is 5 vision rays of 300 to 800 px, plus grip and speed. Every car casts all of them on every inference. ? How much the box test saves depends on the track. On open layouts with long walls, a ray typically touches only a few subtrees.
+Impact: low to medium (measured; first estimated high). ✓ The game's default sensor set (`NeuralNetworkUtils.GetDefaultSensors`) is 5 vision rays of 300 to 800 px, plus grip and speed. Every car casts all of them on every inference.
+
+✓ But the [game benchmark](../game-benchmark-20261002/README.md#what-each-input-costs-400-cars-cars-standing-still) measured only about 1 µs of CPU per ray per car tick on A07. Going from 1 to 13 rays did not change the speed of a trained network beyond noise. ? Tracks with more wall segments make each ray dearer, and the box test then saves more.
 
 ## Car-to-car queries
 
@@ -130,7 +132,9 @@ float offset = curve2D.GetClosestOffset(p);
    - **Window, like `GetClosestOffsetNear`.** Simple, but not exact. Near crossings, or after a large jump, the window can miss the global nearest segment. The sensors use a point *between* the car and the track center, so the window should be centred on the car's last sensor offset, not on its score offset.
    - **Grid, like `SegmentGrid`.** Exact. It needs a C# port of Godot's `GetClosestOffset` loop (the segment projection and the `(nearest, distance)` update), which is also a chance to drop the engine call. The Rust code shows the arithmetic in float32 order.
 
-Impact: medium to high, depending on track length and how many direction or curvature sensors the network uses. If neither sensor is enabled, the cost is zero.
+Impact: high for networks that use these sensors (measured). If neither sensor is enabled, the cost is zero.
+
+✓ In the [game benchmark](../game-benchmark-20261002/README.md#what-each-input-costs-400-cars-cars-standing-still), each sensor added about 30 µs of CPU per car tick on A07 (12 tiles). One of them alone lowered the speed of 400 cars from 8.7× to 5.4× real time. That is the largest single cost measured. Step 1 (sharing the projection) halves it for networks with both sensors. ? Longer tracks have more baked points, so the cost per call grows with track length.
 
 ## Per-tick memoization
 

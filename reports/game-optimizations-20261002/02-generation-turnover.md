@@ -110,7 +110,17 @@ Points to keep in mind:
 - **Pooling.** Reuse last generation's parameter arrays for the new children instead of allocating new ones. A network is no longer needed once all of its children are written.
 - **Novelty.** Flatten each network once (or use the flat array directly). Compute the mean in parallel over parameter columns, adding networks in index order. Compute each network's distance in parallel, with a plain loop that adds `Math.Pow(d, 2.0)` in index order. ? `d * d` is very likely equal to `Math.Pow(d, 2.0)` for every input on .NET 8, but confirm it on the target platforms first. ? Godot's `Mathf.Pow(double, double)` forwards to `Math.Pow`; the Godot source was not checked here.
 
-Impact: medium. This scales with population times parameter count. ✓ In the Rust benchmark, a whole turnover for 128 cars with a 1,661-parameter network takes 3.7 ms (`reports/cpu-port-bench.json`, `turnover_seconds`). ? The game's current turnover time was not measured.
+Impact: medium. This scales with population times parameter count. ✓ In the Rust benchmark, a whole turnover for 128 cars with a 1,661-parameter network takes 3.7 ms (`reports/cpu-port-bench.json`, `turnover_seconds`).
+
+✓ Measured in the game ([benchmark](../game-benchmark-20261002/README.md#turnover-5-s-generations)), with a 1,661-parameter network and 5 s generations on A07:
+
+| Cars | Pause per generation |
+|---:|---:|
+| 100 | about 9 ms |
+| 400 | about 39 ms |
+| 1,600 | about 460 ms |
+
+? The meter only counts frames in which the simulation is not running, so these figures are lower bounds.
 
 ## Background track preparation
 
@@ -160,7 +170,7 @@ Things that need care:
 - `TileMap.DrawTrack`, the sprite, `VehicleManager.Init` and the skidmarks stay on the main thread.
 - The random number generator for tracks must be separate from the one used for evolution if the order of draws matters.
 
-Impact: medium. It removes the pause at turnover, which matters most with short generations. It does not speed up the simulation itself.
+Impact: low to medium. It removes the pause at turnover, which matters most with short generations. It does not speed up the simulation itself. ✓ Measured: with 400 cars, a random 20-tile track raised the pause from about 39 ms to about 68 ms per generation.
 
 ## Smaller turnover items
 

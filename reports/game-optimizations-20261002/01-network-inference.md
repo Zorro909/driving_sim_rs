@@ -132,4 +132,12 @@ Each lane adds its terms in the same order as the scalar loop, so the result is 
 
 ## Expected gain
 
-✓ The Rust port runs the same kind of network on the CPU at more than 1M car ticks per second on 2 threads, including physics and sensors (`reports/cpu-port-bench.json`). ? For the game, the gain depends on how much of each tick goes to inference and garbage collection. That has not been profiled. Removing the allocations alone should be clearly measurable with large populations, because it also reduces the GC pauses that stop every worker thread.
+✓ The Rust port runs the same kind of network on the CPU at more than 1M car ticks per second on 2 threads, including physics and sensors (`reports/cpu-port-bench.json`).
+
+✓ Measured in the game ([benchmark](../game-benchmark-20261002/README.md#what-each-input-costs-400-cars-cars-standing-still)), with 400 cars standing still:
+
+- Adding 8 hidden layers (16,16,16,16,12,12,12,8) with zero weights adds about 28 µs of .NET pool CPU per car tick.
+- That lowered the speed from 8.7× to 4.9× real time.
+- MathNet does the same work for zero weights, so this is the cost of the forward pass itself.
+
+? How much of it is garbage collection was not measured. Removing the allocations alone should be clearly measurable with large populations, because it also reduces the GC pauses that stop every worker thread.
