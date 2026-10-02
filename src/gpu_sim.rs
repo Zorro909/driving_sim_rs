@@ -394,6 +394,57 @@ fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     (q[0] * q[0] + q[1] * q[1]).sqrt()
 }
 
+fn box_distance(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let dx = (a[0] - b[2]).max(b[0] - a[2]).max(0.0);
+    let dy = (a[1] - b[3]).max(b[1] - a[3]).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Index for preparing GPU grids. Bounds only prune candidates; leaves
+/// retain the original distance calculation and segment indices.
+struct SegmentBoxTree {
+    bounds: [f64; 4],
+    indices: Vec<usize>,
+    children: Option<[Box<SegmentBoxTree>; 2]>,
+}
+
+impl SegmentBoxTree {
+    fn new(boxes: &[[f64; 4]], mut indices: Vec<usize>) -> Self {
+        let bounds = indices.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |b, &i| {
+            let a = boxes[i];
+            [b[0].min(a[0]), b[1].min(a[1]), b[2].max(a[2]), b[3].max(a[3])]
+        });
+        let children = if indices.len() > 16 {
+            let axis = usize::from(bounds[3] - bounds[1] > bounds[2] - bounds[0]);
+            let middle = indices.len() / 2;
+            indices.select_nth_unstable_by(middle, |&a, &b| {
+                (boxes[a][axis] + boxes[a][axis + 2]).total_cmp(&(boxes[b][axis] + boxes[b][axis + 2]))
+            });
+            let right = indices.split_off(middle);
+            let left = std::mem::take(&mut indices);
+            Some([Box::new(Self::new(boxes, left)), Box::new(Self::new(boxes, right))])
+        } else {
+            None
+        };
+        Self { bounds, indices, children }
+    }
+
+    fn visit(&self, query: [f64; 4], limit: &mut f64, visitor: &mut impl FnMut(usize, &mut f64)) {
+        if box_distance(self.bounds, query) > *limit + 1e-12 * (1.0 + *limit) {
+            return;
+        }
+        if let Some(children) = &self.children {
+            let first = usize::from(box_distance(children[1].bounds, query) < box_distance(children[0].bounds, query));
+            children[first].visit(query, limit, visitor);
+            children[first ^ 1].visit(query, limit, visitor);
+        } else {
+            for &i in &self.indices {
+                visitor(i, limit);
+            }
+        }
+    }
+}
+
 /// Builds the grid over the segments' bounding box grown by `margin`.
 /// For a cell box C, `bound = min_s max_{corner c} |c - s|` bounds the
 /// nearest distance of every point of C (distance to a segment is convex);
@@ -407,6 +458,7 @@ pub fn near_grid(segments: &[([f64; 2], [f64; 2])], cell: f64, margin: f64) -> O
     }
     let boxes: Vec<[f64; 4]> =
         segments.iter().map(|(a, b)| [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]).collect();
+    let index = SegmentBoxTree::new(&boxes, (0..segments.len()).collect());
     let lo = boxes.iter().fold([f64::INFINITY; 2], |l, b| [l[0].min(b[0]), l[1].min(b[1])]);
     let hi = boxes.iter().fold([f64::NEG_INFINITY; 2], |h, b| [h[0].max(b[2]), h[1].max(b[3])]);
     let (x0, y0) = (lo[0] - margin, lo[1] - margin);
@@ -420,19 +472,25 @@ pub fn near_grid(segments: &[([f64; 2], [f64; 2])], cell: f64, margin: f64) -> O
             let (cx, cy) = ((c % nx as usize) as f64, (c / nx as usize) as f64);
             let bx = [x0 + cx * cell - 1.0, y0 + cy * cell - 1.0, x0 + (cx + 1.0) * cell + 1.0, y0 + (cy + 1.0) * cell + 1.0];
             let corners = [[bx[0], bx[1]], [bx[2], bx[1]], [bx[0], bx[3]], [bx[2], bx[3]]];
-            let bound = segments
-                .iter()
-                .map(|&(a, b)| corners.iter().map(|&p| segment_distance(p, a, b)).fold(0.0f64, f64::max))
-                .fold(f64::INFINITY, f64::min);
-            let limit = bound * (1.0 + 1e-4) + slack;
-            (0..segments.len() as u32)
-                .filter(|&i| {
-                    let b = &boxes[i as usize];
-                    let dx = (b[0] - bx[2]).max(bx[0] - b[2]).max(0.0);
-                    let dy = (b[1] - bx[3]).max(bx[1] - b[3]).max(0.0);
-                    (dx * dx + dy * dy).sqrt() <= limit
-                })
-                .collect()
+            // Distance to a segment's box from the cell center is a lower
+            // bound on its greatest corner distance. Visit nearby boxes
+            // first, then prune boxes that cannot improve the bound.
+            let center = [(bx[0] + bx[2]) * 0.5, (bx[1] + bx[3]) * 0.5];
+            let mut bound = f64::INFINITY;
+            index.visit([center[0], center[1], center[0], center[1]], &mut bound, &mut |i, bound| {
+                let (a, b) = segments[i];
+                let farthest = corners.iter().map(|&p| segment_distance(p, a, b)).fold(0.0f64, f64::max);
+                *bound = bound.min(farthest);
+            });
+            let mut limit = bound * (1.0 + 1e-4) + slack;
+            let mut list = Vec::new();
+            index.visit(bx, &mut limit, &mut |i, limit| {
+                if box_distance(boxes[i], bx) <= *limit {
+                    list.push(i as u32);
+                }
+            });
+            list.sort_unstable();
+            list
         })
         .collect();
     let mut start = Vec::with_capacity(lists.len() + 1);
@@ -462,16 +520,22 @@ pub fn shape_grid(boxes: &[([f64; 2], [f64; 2])], cell: f64, margin: f64) -> Opt
     let (x0, y0) = (lo[0] - margin, lo[1] - margin);
     let nx = ((hi[0] + margin - x0) / cell).ceil().max(1.0) as u32;
     let ny = ((hi[1] + margin - y0) / cell).ceil().max(1.0) as u32;
+    let padded: Vec<_> = boxes.iter().map(|(a, b)| [a[0] - 1.0, a[1] - 1.0, b[0] + 1.0, b[1] + 1.0]).collect();
+    let index = SegmentBoxTree::new(&padded, (0..boxes.len()).collect());
     let mut start = vec![0u32];
     let mut items = Vec::new();
     for cy in 0..ny {
         for cx in 0..nx {
             let c = [x0 + cx as f64 * cell - margin, y0 + cy as f64 * cell - margin,
                      x0 + (cx + 1) as f64 * cell + margin, y0 + (cy + 1) as f64 * cell + margin];
-            items.extend((0..boxes.len() as u32).filter(|&i| {
-                let (a, b) = boxes[i as usize];
-                a[0] - 1.0 <= c[2] && b[0] + 1.0 >= c[0] && a[1] - 1.0 <= c[3] && b[1] + 1.0 >= c[1]
-            }));
+            let row_start = items.len();
+            index.visit(c, &mut 0.0, &mut |i, _| {
+                let (a, b) = boxes[i];
+                if a[0] - 1.0 <= c[2] && b[0] + 1.0 >= c[0] && a[1] - 1.0 <= c[3] && b[1] + 1.0 >= c[1] {
+                    items.push(i as u32);
+                }
+            });
+            items[row_start..].sort_unstable();
             start.push(items.len() as u32);
         }
     }

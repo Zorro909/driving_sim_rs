@@ -920,8 +920,14 @@ impl World {
         let (lo, hi) = (V2::new(lo.x - margin, lo.y - margin), V2::new(hi.x + margin, hi.y + margin));
         let finite = lo.x.is_finite() && hi.x.is_finite();
 
+        let bsp = crate::bsp::Node::from_polygons(array("polygons"));
+        let raycaster_present = track["raycaster_present"].as_bool();
         let wall_segments: Vec<(V2, V2)> = walls.iter().map(|w| (w.start, w.end)).collect();
-        let wall_grid = (finite && !walls.is_empty()).then(|| NearestGrid::build(&wall_segments, lo, hi, 32.0));
+        // closest_wall only uses this grid for legacy scenes without a BSP
+        // or an explicit raycaster. Building it for large imported tracks
+        // otherwise scans every wall for every grid cell without using it.
+        let wall_grid = (finite && !walls.is_empty() && bsp.is_none() && raycaster_present.is_none())
+            .then(|| NearestGrid::build(&wall_segments, lo, hi, 32.0));
         let wall_boxes: Vec<(V2, V2)> = walls
             .iter()
             .map(|w| {
@@ -932,7 +938,6 @@ impl World {
         let shape_boxes: Vec<(V2, V2)> = shapes.iter().map(|s| (s.min, s.max)).collect();
         let shape_grid = (finite && !shapes.is_empty()).then(|| BoxGrid::build(&shape_boxes, lo, hi, 128.0, 1.0));
 
-        let bsp = crate::bsp::Node::from_polygons(array("polygons"));
         let path_segments = crate::path_segments::PathSegments::new(&path);
         let path_grid = crate::segment_grid::SegmentGrid::new(&path.iter().map(|&p| F2::from(p)).collect::<Vec<_>>());
         let default_surface = vehicle.surface("asphalt");
@@ -945,7 +950,7 @@ impl World {
                 native_cell_order:track["native_cell_order"].as_array().map(|cells|cells.iter().map(|t|(num(&t[0]) as i64,num(&t[1]) as i64)).collect()).unwrap_or_else(||tiles.iter().map(key).collect()),
                 bsp_rays: bsp.as_deref().map(crate::bsp::RayTree::new),
                 bsp,
-                raycaster_present: track["raycaster_present"].as_bool(),
+                raycaster_present,
                 walls,
                 shapes,
                 path,
