@@ -1504,6 +1504,37 @@ mod tests {
         }
     }
 
+    /// Without preservation nothing but the lineage's first slot holds the best
+    /// car, and tournament draws need not pick it first.
+    #[test]
+    fn the_best_car_leads_the_parents_without_preservation() {
+        let seed = Network::xavier(&[20, 8, 5], &mut PyRandom::new(9));
+        let mut runner = autumn_runner(10);
+        runner.settings = EvolutionSettings {
+            population: 10,
+            selection_algorithm: "tournament".into(),
+            selection_size: 3,
+            mutation_rate: 0.3,
+            preserve_parents: "off".into(),
+            ..Default::default()
+        };
+        runner.start(&seed);
+        let mut first_draw_differed = false;
+        for _ in 0..6 {
+            runner.advance(90, false);
+            let before: Vec<Network> = runner.agents.iter().map(|x| x.network.clone()).collect();
+            let (turnover, lineage) = runner.next_generation_traced();
+            assert_eq!(turnover.preserved_count, 0);
+            assert!(lineage.preserved.is_empty());
+            // The first car with the highest reward, as `ranked` keeps ties in order.
+            let best = (0..turnover.rewards.len()).fold(0, |best, i| if turnover.rewards[i] > turnover.rewards[best] { i } else { best });
+            assert_eq!(param_bits([&lineage.parents[0]]), param_bits([&before[best]]));
+            let first_selected = &lineage.parents[lineage.selected[0] as usize];
+            first_draw_differed |= param_bits([first_selected]) != param_bits([&before[best]]);
+        }
+        assert!(first_draw_differed, "the test must tell the best car from the first selected parent");
+    }
+
     #[test]
     fn lineage_validate_rejects_malformed_networks() {
         let seed = Network::xavier(&[20, 8, 5], &mut PyRandom::new(9));
