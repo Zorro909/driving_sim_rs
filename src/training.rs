@@ -6,7 +6,7 @@
 //! their driving metrics stop updating.
 
 use crate::car::{Car, Controls, Sensor, SensorScratch, DT};
-use crate::evolution::{reproduce, AgentResult, EvolutionSettings, Generation, Metrics};
+use crate::evolution::{reproduce, reward_values, AgentResult, Breeding, Choice, EvolutionSettings, Generation, Metrics, CROSSOVERS};
 use crate::network::{ForwardScratch, Network};
 use crate::pymath::{clamp, py_min};
 use crate::pyrandom::PyRandom;
@@ -47,6 +47,106 @@ impl TrainingRandom {
     pub fn xavier(&mut self,shape:&[usize])->Network {
         match self{Self::Python(r)=>Network::xavier(shape,r),Self::Game(r)=>Network::xavier_game(shape,r)}
     }
+    pub(crate) fn choose(&mut self, scores: &[f64], settings: &EvolutionSettings) -> Choice {
+        match self {
+            Self::Python(r) => crate::evolution::choose(scores, settings, r),
+            Self::Game(r) => crate::evolution::choose(scores, settings, r),
+        }
+    }
+    pub(crate) fn breed(&mut self, selected: &[&Network], preserved: Vec<Network>, settings: &EvolutionSettings, profile: &mut crate::training_profile::Profile) -> Vec<Network> {
+        match self {
+            Self::Python(r) => crate::evolution::breed(selected, preserved, settings, r, &mut Vec::new(), profile),
+            Self::Game(r) => crate::evolution::breed_game(selected, preserved, settings, r, profile),
+        }
+    }
+}
+
+/// One reproduction as checkpoints store it: the distinct parents, which of
+/// them were selected and preserved, the breeding settings, and the
+/// generator state after selection. `rebuild` repeats the breeding.
+#[derive(Clone)]
+pub struct Lineage {
+    /// Distinct parents in first use: the best car of the scored population
+    /// first, then preserved cars, then selected cars.
+    pub parents: Vec<Network>,
+    /// Indices into `parents`, in draw order; repeats are kept.
+    pub selected: Vec<u32>,
+    /// Indices into `parents`, best first.
+    pub preserved: Vec<u32>,
+    pub breeding: Breeding,
+    /// The generator state after selection, before crossover.
+    pub rng: TrainingRandom,
+}
+
+impl Lineage {
+    fn new(agents: &[AgentResult], choice: &Choice, breeding: Breeding, rng: TrainingRandom) -> Lineage {
+        let mut slots = std::collections::HashMap::new();
+        let mut parents = Vec::new();
+        let mut slot = |car: usize| -> u32 {
+            *slots.entry(car).or_insert_with(|| {
+                parents.push(agents[car].network.clone());
+                (parents.len() - 1) as u32
+            })
+        };
+        slot(choice.best);
+        let preserved = choice.preserved.iter().map(|&car| slot(car)).collect();
+        let selected = choice.selected.iter().map(|&car| slot(car)).collect();
+        Lineage { parents, selected, preserved, breeding, rng }
+    }
+
+    /// Whether `rebuild` can breed this lineage; a checkpoint may be corrupt.
+    pub fn validate(&self) -> Result<(), String> {
+        let b = &self.breeding;
+        let Some(first) = self.parents.first() else { return Err("the checkpoint has no networks".into()) };
+        if self.parents.iter().any(|p| p.shape != first.shape) {
+            return Err("the checkpoint's parents differ in shape".into());
+        }
+        if b.population == 0 {
+            return Err("the checkpoint has no cars".into());
+        }
+        if self.selected.iter().chain(&self.preserved).any(|&i| i as usize >= self.parents.len()) {
+            return Err("a checkpoint parent index is out of range".into());
+        }
+        if self.preserved.len() > b.population {
+            return Err("the checkpoint keeps more parents than it has cars".into());
+        }
+        if self.selected.is_empty() && self.preserved.len() < b.population {
+            return Err("the checkpoint selects no parents".into());
+        }
+        if !CROSSOVERS.contains(&b.crossover.as_str()) {
+            return Err("the checkpoint has an unknown crossover".into());
+        }
+        if !(0.0..=10.0).contains(&b.mutation_rate) || !(0.0..=1.0).contains(&b.weight_decay) {
+            return Err("the checkpoint's mutation rate or weight decay is out of range".into());
+        }
+        Ok(())
+    }
+
+    /// The bred population and the generator state after it. Call `validate` first.
+    pub fn rebuild(&self) -> (Vec<Network>, TrainingRandom) {
+        let mut rng = self.rng.clone();
+        let selected: Vec<&Network> = self.selected.iter().map(|&i| &self.parents[i as usize]).collect();
+        let preserved = self.preserved.iter().map(|&i| self.parents[i as usize].clone()).collect();
+        let mut profile = crate::training_profile::Profile::new("rebuild");
+        let networks = rng.breed(&selected, preserved, &self.breeding.settings(), &mut profile);
+        (networks, rng)
+    }
+}
+
+/// `TrainingRandom::reproduce_scored`, also returning the reproduction as a
+/// `Lineage`. `agents` must not be empty.
+fn reproduce_traced(rng: &mut TrainingRandom, agents: &[AgentResult], scores: Vec<f64>, settings: &EvolutionSettings) -> (Generation, Lineage) {
+    crate::evolution::validate_scores(agents, &scores);
+    assert!(!agents.is_empty(), "a training generation needs at least one network");
+    let mut profile = crate::training_profile::Profile::new("reproduce_traced");
+    let choice = rng.choose(&scores, settings);
+    let lineage = Lineage::new(agents, &choice, Breeding::of(settings), rng.clone());
+    let selected: Vec<&Network> = choice.selected.iter().map(|&i| agents[i].network).collect();
+    let preserved: Vec<Network> = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
+    let preserved_count = preserved.len();
+    profile.mark("selection");
+    let networks = rng.breed(&selected, preserved, settings, &mut profile);
+    (Generation { networks, preserved_count, rewards: scores }, lineage)
 }
 
 /// `SENSOR_TYPES` in training.py.
@@ -656,6 +756,34 @@ impl TrainingRunner {
         let initial = self.rng.reproduce(&[seed_result], &self.settings);
         self.install(&initial.networks, false);
         initial
+    }
+
+    /// `start`, returning the first reproduction as a `Lineage`.
+    pub fn start_traced(&mut self, seed: &Network) -> Lineage {
+        let seed_result = [AgentResult { network: seed, metrics: [None; 14], update_count: 0 }];
+        let scores = reward_values(&seed_result, &self.settings.rewards);
+        let (initial, lineage) = reproduce_traced(&mut self.rng, &seed_result, scores, &self.settings);
+        self.install_with_novelty(initial.networks, false, None);
+        lineage
+    }
+
+    /// `resume` with networks the new agents take over without a copy.
+    pub fn resume_owned(&mut self, networks: Vec<Network>, generation: u64) {
+        self.install_with_novelty(networks, generation > 0, None);
+        self.generation = generation;
+    }
+
+    /// `next_generation`, installing the offspring without a copy and
+    /// returning the reproduction as a `Lineage` for checkpoints.
+    pub fn next_generation_traced(&mut self) -> (Turnover, Lineage) {
+        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
+        let scores = reward_values(&results, &self.settings.rewards);
+        let (Generation { networks, preserved_count, rewards }, lineage) = reproduce_traced(&mut self.rng, &results, scores, &self.settings);
+        drop(results);
+        self.install_with_novelty(networks, true, None);
+        self.stats_phase = 0;
+        self.generation += 1;
+        (Turnover { preserved_count, rewards }, lineage)
     }
 
     /// Reproduce the initial population, generate its track, then install cars.
@@ -1322,6 +1450,50 @@ mod tests {
             Arc::new(World::from_scene(&scene)), crate::world::vector(&spawn["position"]), spawn["rotation"].as_f64().unwrap(),
             SensorLayout::from_exports(&template, &model), &outputs, settings, PyRandom::new(5), 2, 0, true, true,
         )
+    }
+
+    fn param_bits(networks: impl IntoIterator<Item = impl std::borrow::Borrow<Network>>) -> Vec<Vec<u64>> {
+        networks.into_iter().map(|n| n.borrow().params.iter().map(|p| p.to_bits()).collect()).collect()
+    }
+
+    /// Traced turnover installs what untraced turnover does, and its lineage
+    /// rebuilds those networks and the generator state from the parents alone.
+    #[test]
+    fn traced_turnover_matches_and_its_lineage_rebuilds_it() {
+        let seed = Network::xavier(&[20, 8, 5], &mut PyRandom::new(9));
+        for settings in [
+            EvolutionSettings { population: 10, selection_size: 3, preserve_parents_size: 2, mutation_rate: 0.3, weight_decay: 0.0, ..Default::default() },
+            EvolutionSettings { population: 7, selection_algorithm: "tournament".into(), selection_size: 4, crossover: "uniform".into(), mutation_rate: 0.2, adaptive_mutation: true, preserve_parents: "off".into(), ..Default::default() },
+        ] {
+            let (mut a, mut b) = (autumn_runner(10), autumn_runner(10));
+            a.settings = settings.clone();
+            b.settings = settings.clone();
+            a.start(&seed);
+            let first = b.start_traced(&seed);
+            assert_eq!(first.parents.len(), 1, "the first generation is bred from the seed alone");
+            let (rebuilt, rng) = first.rebuild();
+            assert_eq!(param_bits(&rebuilt), param_bits(b.agents.iter().map(|x| &x.network)));
+            assert_eq!(rng.to_json(), b.rng.to_json());
+            for _ in 0..2 {
+                a.advance(90, false);
+                b.advance(90, false);
+                let expected = a.next_generation();
+                let (turnover, lineage) = b.next_generation_traced();
+                assert_eq!((turnover.preserved_count, turnover.rewards.clone()), (expected.preserved_count, expected.rewards.clone()));
+                assert_eq!(param_bits(b.agents.iter().map(|x| &x.network)), param_bits(&expected.networks));
+                assert_eq!(b.rng.to_json(), a.rng.to_json());
+                assert_eq!((b.generation, b.stats_phase), (a.generation, a.stats_phase));
+                lineage.validate().unwrap();
+                assert!(lineage.parents.len() <= 1 + settings.selection_size + 2);
+                // The best parent leads; with parents kept it is also the first car.
+                if expected.preserved_count > 0 {
+                    assert_eq!(param_bits([&lineage.parents[0]]), param_bits([&expected.networks[0]]));
+                }
+                let (rebuilt, rng) = lineage.rebuild();
+                assert_eq!(param_bits(&rebuilt), param_bits(&expected.networks));
+                assert_eq!(rng.to_json(), a.rng.to_json());
+            }
+        }
     }
 
     fn agent_state(a: &TrainingAgent) -> String {
