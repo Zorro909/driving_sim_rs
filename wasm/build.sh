@@ -31,7 +31,7 @@ if [ "$THREADS" = 1 ]; then
     OUT=${OUT:-wasm/pkg-threads}
     BUILD_DIR=${THREAD_TARGET_DIR:-target/wasm-threads}
     TOOLCHAIN=$(cat wasm/thread-toolchain)
-    MEMORY=1073741824
+    MEMORY=2147483648
     FEATURES=$FEATURES,wasm-threads
     # RUSTFLAGS overrides .cargo/config.toml, including the WebGPU cfg.
     RUSTFLAGS="--cfg=web_sys_unstable_apis -C target-feature=+atomics,+bulk-memory -C link-arg=--shared-memory -C link-arg=--max-memory=$MEMORY -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base" \
