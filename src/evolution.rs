@@ -329,15 +329,15 @@ fn ranked(scores: &[f64]) -> Vec<usize> {
     indices
 }
 
-fn select<'a>(agents: &[AgentResult<'a>], scores: &[f64], settings: &EvolutionSettings, rng: &mut impl DecisionSource) -> Vec<&'a Network> {
+fn select(scores: &[f64], settings: &EvolutionSettings, rng: &mut impl DecisionSource) -> Vec<usize> {
     let count = settings.selection_size;
     let indices: Vec<usize> = match settings.selection_algorithm.as_str() {
         "best" => ranked(scores).into_iter().take(count).collect(),
         "tournament" => (0..count)
             .map(|_| {
-                let mut best = rng.randrange(agents.len());
+                let mut best = rng.randrange(scores.len());
                 for _ in 1..5 {
-                    let i = rng.randrange(agents.len());
+                    let i = rng.randrange(scores.len());
                     if scores[i] > scores[best] {
                         best = i;
                     }
@@ -364,13 +364,77 @@ fn select<'a>(agents: &[AgentResult<'a>], scores: &[f64], settings: &EvolutionSe
                             return index;
                         }
                     }
-                    agents.len() - 1
+                    scores.len() - 1
                 })
                 .collect()
         }
         other => panic!("unknown selection algorithm: {other}"),
     };
-    indices.into_iter().map(|i| agents[i].network).collect()
+    indices
+}
+
+pub const CROSSOVERS: [&str; 3] = ["none", "single_point", "uniform"];
+
+/// The cars a reproduction breeds from, by index into the scored
+/// population: `selected` in draw order (repeats kept), `preserved` best
+/// first, and `best`, the highest-scoring car.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub selected: Vec<usize>,
+    pub preserved: Vec<usize>,
+    pub best: usize,
+}
+
+fn preserve_size(settings: &EvolutionSettings) -> usize {
+    match settings.preserve_parents.as_str() {
+        "off" => 0,
+        "on_selection_size" => settings.selection_size,
+        "on_custom" => settings.preserve_parents_size,
+        other => panic!("unknown parent preservation mode: {other}"),
+    }
+}
+
+/// Selection and parent preservation: the first half of `reproduce`, and its
+/// only random draws before crossover. `scores` must not be empty.
+pub(crate) fn choose(scores: &[f64], settings: &EvolutionSettings, rng: &mut impl DecisionSource) -> Choice {
+    let selected = select(scores, settings, rng);
+    let ranked = ranked(scores);
+    let preserved = ranked.iter().copied().take(preserve_size(settings).min(settings.population)).collect();
+    Choice { selected, preserved, best: ranked[0] }
+}
+
+/// The settings `breed` and `breed_game` read, as checkpoints store them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Breeding {
+    pub population: usize,
+    pub crossover: String,
+    pub mutation_rate: f64,
+    pub adaptive_mutation: bool,
+    pub weight_decay: f64,
+}
+
+impl Breeding {
+    pub fn of(s: &EvolutionSettings) -> Breeding {
+        Breeding {
+            population: s.population,
+            crossover: s.crossover.clone(),
+            mutation_rate: s.mutation_rate,
+            adaptive_mutation: s.adaptive_mutation,
+            weight_decay: s.weight_decay,
+        }
+    }
+
+    /// Settings that breed like the ones `of` read; selection fields default.
+    pub fn settings(&self) -> EvolutionSettings {
+        EvolutionSettings {
+            population: self.population,
+            crossover: self.crossover.clone(),
+            mutation_rate: self.mutation_rate,
+            adaptive_mutation: self.adaptive_mutation,
+            weight_decay: self.weight_decay,
+            ..Default::default()
+        }
+    }
 }
 
 fn cross(parents: &[&Network], count: usize, algorithm: &str, rng: &mut impl DecisionSource) -> Vec<Network> {
@@ -417,26 +481,29 @@ pub(crate) fn reproduce_scored_with_scratch(agents: &[AgentResult], scores: Vec<
         return Generation { networks: Vec::new(), preserved_count: 0, rewards: Vec::new() };
     }
     profile.mark("rewards");
-    let selected = select(agents, &scores, settings, rng);
-    let size = match settings.preserve_parents.as_str() {
-        "off" => 0,
-        "on_selection_size" => settings.selection_size,
-        "on_custom" => settings.preserve_parents_size,
-        other => panic!("unknown parent preservation mode: {other}"),
-    };
-    let preserved: Vec<Network> =
-        ranked(&scores).into_iter().take(size.min(settings.population)).map(|i| agents[i].network.clone()).collect();
+    let choice = choose(&scores, settings, rng);
+    let selected: Vec<&Network> = choice.selected.iter().map(|&i| agents[i].network).collect();
+    let preserved: Vec<Network> = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
     profile.mark("selection");
+    let preserved_count = preserved.len();
+    let networks = breed(&selected, preserved, settings, rng, normals, &mut profile);
+    Generation { networks, preserved_count, rewards: scores }
+}
+
+/// Crossover, mutation and weight decay: the second half of `reproduce`.
+/// Returns `preserved` unchanged, then `settings.population` minus them
+/// children of `selected`. Every draw comes from `rng`, so the same parents,
+/// settings and generator state give the same networks.
+pub(crate) fn breed(selected: &[&Network], preserved: Vec<Network>, settings: &EvolutionSettings, rng: &mut PyRandom, normals: &mut Vec<f64>, profile: &mut crate::training_profile::Profile) -> Vec<Network> {
     let count = settings.population.saturating_sub(preserved.len());
     // Crossover "none" copies parents in order without random decisions; that
     // copy is folded into the mutation pass below instead of materialized.
     // Other algorithms build the children here, consuming the stream as before.
     let copies = settings.crossover == "none";
     if copies && count > 0 { assert!(!selected.is_empty(), "selection produced no parents"); }
-    let crossed: Vec<Network> = if copies { Vec::new() } else { cross(&selected, count, &settings.crossover, rng) };
+    let crossed: Vec<Network> = if copies { Vec::new() } else { cross(selected, count, &settings.crossover, rng) };
     let source = |i: usize| -> &Network { if copies { selected[i % selected.len()] } else { &crossed[i] } };
     profile.mark("crossover");
-    let preserved_count = preserved.len();
     let mut networks = preserved;
     // Children draw their mutation noise one after another from the shared
     // stream; draw it all in order, then mutate the children in parallel.
@@ -480,7 +547,7 @@ pub(crate) fn reproduce_scored_with_scratch(agents: &[AgentResult], scores: Vec<
     };
     networks.extend(mutated);
     profile.mark("mutation");
-    Generation { networks, preserved_count, rewards: scores }
+    networks
 }
 
 #[cfg(test)]
@@ -490,13 +557,8 @@ mod tests {
     /// The pre-fusion reproduction: clone every child, then mutate and decay it in place.
     fn reproduce_reference(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom) -> Generation {
         let scores = reward_values(agents, &settings.rewards);
-        let selected = select(agents, &scores, settings, rng);
-        let size = match settings.preserve_parents.as_str() {
-            "off" => 0,
-            "on_selection_size" => settings.selection_size,
-            "on_custom" => settings.preserve_parents_size,
-            other => panic!("unknown parent preservation mode: {other}"),
-        };
+        let selected: Vec<&Network> = select(&scores, settings, rng).into_iter().map(|i| agents[i].network).collect();
+        let size = preserve_size(settings);
         let preserved: Vec<Network> =
             ranked(&scores).into_iter().take(size.min(settings.population)).map(|i| agents[i].network.clone()).collect();
         let children = cross(&selected, settings.population.saturating_sub(preserved.len()), &settings.crossover, rng);
@@ -561,6 +623,82 @@ mod tests {
             assert_eq!(a.gauss(1.0).to_bits(), b.gauss(1.0).to_bits(), "variant {v}: next draw");
         }
     }
+
+    fn scored_agents(networks: &[Network]) -> Vec<AgentResult<'_>> {
+        networks
+            .iter()
+            .enumerate()
+            .map(|(i, network)| {
+                let mut metrics: Metrics = [None; 14];
+                metrics[0] = Some(((i * 7919) % 23) as f64 * 0.5);
+                AgentResult { network, metrics, update_count: 10 + i as u64 }
+            })
+            .collect()
+    }
+
+    fn breeding_variants() -> Vec<EvolutionSettings> {
+        let mut variants = Vec::new();
+        for crossover in CROSSOVERS {
+            for (mutation_rate, adaptive, weight_decay) in [(0.0, false, 0.0), (0.3, true, 0.0005000000237487257), (1e-9, true, 1.0)] {
+                for (selection_algorithm, preserve_parents, population) in [("best", "on_selection_size", 40), ("tournament", "on_custom", 33), ("roulette", "off", 5)] {
+                    variants.push(EvolutionSettings {
+                        population,
+                        selection_algorithm: selection_algorithm.into(),
+                        selection_size: 3,
+                        crossover: crossover.into(),
+                        mutation_rate,
+                        adaptive_mutation: adaptive,
+                        weight_decay,
+                        preserve_parents: preserve_parents.into(),
+                        preserve_parents_size: 2,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        variants
+    }
+
+    fn bits(networks: &[Network]) -> Vec<Vec<u64>> {
+        networks.iter().map(|n| n.params.iter().map(|p| p.to_bits()).collect()).collect()
+    }
+
+    /// Breeding from copies of the chosen parents, with the generator state
+    /// saved after selection and only the settings `Breeding` keeps, repeats
+    /// `reproduce` exactly.
+    #[test]
+    fn breeding_replays_from_the_chosen_parents_and_generator_state() {
+        let mut seed = PyRandom::new(3);
+        let networks: Vec<Network> = (0..37).map(|_| Network::xavier(&[6, 5, 4], &mut seed)).collect();
+        let agents = scored_agents(&networks);
+        for (v, settings) in breeding_variants().iter().enumerate() {
+            let scores = reward_values(&agents, &settings.rewards);
+            let mut expected_rng = PyRandom::new(11 + v as i64);
+            expected_rng.gauss(1.0);
+            let mut chooser = expected_rng.clone();
+            let expected = reproduce(&agents, settings, &mut expected_rng);
+            let choice = choose(&scores, settings, &mut chooser);
+            assert_eq!(choice.preserved.first().copied().unwrap_or(choice.best), choice.best, "variant {v}");
+            let selected: Vec<Network> = choice.selected.iter().map(|&i| agents[i].network.clone()).collect();
+            let selected: Vec<&Network> = selected.iter().collect();
+            let preserved = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
+            let mut replay = chooser.clone();
+            let mut profile = crate::training_profile::Profile::new("test");
+            let actual = breed(&selected, preserved, &Breeding::of(settings).settings(), &mut replay, &mut Vec::new(), &mut profile);
+            assert_eq!(bits(&actual), bits(&expected.networks), "variant {v}");
+            assert_eq!(replay.to_json(), expected_rng.to_json(), "variant {v}: generator state");
+
+            let mut game = crate::game_random::GameRandom::new([1, 2, 3, 4 + v as u64], 7 + v as i32);
+            let mut game_chooser = game.clone();
+            let expected = reproduce_game(&agents, settings, &mut game);
+            let choice = choose(&scores, settings, &mut game_chooser);
+            let selected: Vec<&Network> = choice.selected.iter().map(|&i| agents[i].network).collect();
+            let preserved = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
+            let actual = breed_game(&selected, preserved, &Breeding::of(settings).settings(), &mut game_chooser, &mut profile);
+            assert_eq!(bits(&actual), bits(&expected.networks), "game variant {v}");
+            assert_eq!(game_chooser.to_json(), game.to_json(), "game variant {v}: generator state");
+        }
+    }
 }
 
 /// Reproduction using the original game's independent decision/normal streams.
@@ -568,7 +706,7 @@ pub fn reproduce_game(agents:&[AgentResult],settings:&EvolutionSettings,rng:&mut
     reproduce_game_scored(agents, reward_values(agents, &settings.rewards), settings, rng)
 }
 
-fn validate_scores(agents: &[AgentResult], scores: &[f64]) {
+pub(crate) fn validate_scores(agents: &[AgentResult], scores: &[f64]) {
     assert_eq!(agents.len(), scores.len(), "fitness must match the ordered population");
     assert!(scores.iter().all(|score| score.is_finite()), "fitness must be finite");
 }
@@ -578,12 +716,18 @@ pub(crate) fn reproduce_game_scored(agents:&[AgentResult],scores:Vec<f64>,settin
     let mut profile = crate::training_profile::Profile::new("reproduce_game");
     if agents.is_empty(){return Generation{networks:Vec::new(),preserved_count:0,rewards:Vec::new()};}
     profile.mark("rewards");
-    let selected=select(agents,&scores,settings,rng);
-    let size=match settings.preserve_parents.as_str(){"off"=>0,"on_selection_size"=>settings.selection_size,"on_custom"=>settings.preserve_parents_size,other=>panic!("unknown parent preservation mode: {other}")};
-    let mut networks:Vec<_>=ranked(&scores).into_iter().take(size.min(settings.population)).map(|i|agents[i].network.clone()).collect();
-    let preserved_count=networks.len();
+    let choice=choose(&scores,settings,rng);
+    let selected:Vec<&Network>=choice.selected.iter().map(|&i|agents[i].network).collect();
+    let preserved:Vec<Network>=choice.preserved.iter().map(|&i|agents[i].network.clone()).collect();
+    let preserved_count=preserved.len();
     profile.mark("selection");
-    let children=cross(&selected,settings.population.saturating_sub(preserved_count),&settings.crossover,rng);
+    let networks=breed_game(&selected,preserved,settings,rng,&mut profile);
+    Generation{networks,preserved_count,rewards:scores}
+}
+
+/// `breed` with the original game's streams.
+pub(crate) fn breed_game(selected:&[&Network],mut networks:Vec<Network>,settings:&EvolutionSettings,rng:&mut crate::game_random::GameRandom,profile:&mut crate::training_profile::Profile)->Vec<Network> {
+    let children=cross(selected,settings.population.saturating_sub(networks.len()),&settings.crossover,rng);
     profile.mark("crossover");
     for child in children {
         let rate=settings.mutation_rate*if settings.adaptive_mutation {mutation_factor(&child,"xavier")}else{1.0};
@@ -592,5 +736,5 @@ pub(crate) fn reproduce_game_scored(agents:&[AgentResult],scores:Vec<f64>,settin
         networks.push(child);
     }
     profile.mark("mutation");
-    Generation{networks,preserved_count,rewards:scores}
+    networks
 }
