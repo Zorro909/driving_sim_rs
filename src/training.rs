@@ -101,6 +101,14 @@ impl Lineage {
         if self.parents.iter().any(|p| p.shape != first.shape) {
             return Err("the checkpoint's parents differ in shape".into());
         }
+        if first.shape.len() < 2 || first.shape.contains(&0) {
+            return Err("the checkpoint's parents have an invalid shape".into());
+        }
+        // Checked, since a shape from a checkpoint may be huge (usize is 32 bits on wasm).
+        let expected = first.shape.windows(2).try_fold(0usize, |sum, w| w[0].checked_add(1)?.checked_mul(w[1])?.checked_add(sum));
+        if self.parents.iter().any(|p| Some(p.params.len()) != expected) {
+            return Err("the checkpoint's parents have the wrong number of parameters".into());
+        }
         if b.population == 0 {
             return Err("the checkpoint has no cars".into());
         }
@@ -1494,6 +1502,26 @@ mod tests {
                 assert_eq!(rng.to_json(), a.rng.to_json());
             }
         }
+    }
+
+    #[test]
+    fn lineage_validate_rejects_malformed_networks() {
+        let seed = Network::xavier(&[20, 8, 5], &mut PyRandom::new(9));
+        let mut runner = autumn_runner(10);
+        let lineage = runner.start_traced(&seed);
+        lineage.validate().unwrap();
+        let invalid = |edit: &dyn Fn(&mut Lineage)| {
+            let mut broken = lineage.clone();
+            edit(&mut broken);
+            assert!(broken.validate().is_err());
+        };
+        invalid(&|l| { l.parents[0].params.pop(); });
+        invalid(&|l| l.parents[0].params.push(0.0));
+        invalid(&|l| { l.parents[0].shape = vec![20]; });
+        invalid(&|l| { l.parents[0].shape = Vec::new(); });
+        invalid(&|l| { l.parents[0].shape = vec![20, 0, 5]; });
+        invalid(&|l| { l.parents[0].shape = vec![usize::MAX, usize::MAX]; });
+        invalid(&|l| { l.parents[0].shape = vec![4, 4]; l.parents[0].params = vec![0.0; 3]; });
     }
 
     fn agent_state(a: &TrainingAgent) -> String {
