@@ -1,5 +1,5 @@
 {
-  "source": "docs/traces/rally_b06_reference.json",
+  "source": "Recorded Rally B06 trace; see tests/fixtures/README.md.",
   "frames": [
     {
       "tick": 1123,

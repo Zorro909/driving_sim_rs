@@ -1,4 +1,4 @@
-// Track queries of src/world.rs and src/curve.rs: tile surfaces, the path
+// Track queries of src/track/world.rs and src/track/curve.rs: tile surfaces, the path
 // sensor point, Curve2D sampling and closest offsets, and closest_path.
 #pragma once
 #include <cfloat>

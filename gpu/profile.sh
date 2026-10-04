@@ -14,32 +14,34 @@
 #   gpu/profile.sh --yes        # accept every default without asking
 #   gpu/profile.sh --only 1,2   # run only these levels, without asking
 #   gpu/profile.sh --sizes "8192 32768"   # populations (default: 8192 32768 262144)
+#   gpu/profile.sh --checkpoint runs/example  # optional saved population
+#   gpu/profile.sh --output target/profile    # results directory
 #
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
-export ALTD_GPU_CKPT=~/git/AILearnsToDrive/training_runs/b06_fidelity
 
-
-YES=0; ONLY=""; SIZES="8192 32768 262144"
+YES=0; ONLY=""; SIZES="8192 32768 262144"; PROFILE_OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
     --only) ONLY="$2"; shift ;;
     --sizes) SIZES="$2"; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --checkpoint) export ALTD_GPU_CKPT="$2"; shift ;;
+    --output) PROFILE_OUT="$2"; shift ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
   shift
 done
 
-OUT="$REPO/prof-$(date +%Y%m%d-%H%M)"
+OUT="${PROFILE_OUT:-$REPO/prof-$(date +%Y%m%d-%H%M)}"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
 LOG="$OUT/README.txt"
 CHECK="target/release/examples/gpu_check"
 LIB="${ALTD_GPU_LIB:-$REPO/target/gpu/libaltd_gpu.so}"
-export ALTD_GPU_CKPT="${ALTD_GPU_CKPT:-/tmp/altd-gpu-ckpt}"
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-8}"
 # Keep the integrated GPU (the Ryzen's gfx1036) out of every run.
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}" ROCR_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES:-0}"
@@ -82,7 +84,7 @@ bold "GPU profiling wizard, output in $OUT"
 {
   echo "altd GPU profiling run $(date -Iseconds)"
   echo "repo: $REPO  git: $(git rev-parse --short HEAD 2>/dev/null) $(git status --short 2>/dev/null | wc -l) modified files"
-  echo "library: $LIB"; echo "checkpoint: $ALTD_GPU_CKPT"; echo "sizes: $SIZES  rayon threads: $RAYON_NUM_THREADS"
+  echo "library: $LIB"; echo "checkpoint: ${ALTD_GPU_CKPT:-generated Xavier population}"; echo "sizes: $SIZES  rayon threads: $RAYON_NUM_THREADS"
   echo
 } > "$LOG"
 
@@ -94,10 +96,10 @@ for tool in cargo hipcc rocminfo python3; do
 done
 if command -v rocprofv3 >/dev/null; then HAVE_ROCPROF=1; echo "  rocprofv3: $(command -v rocprofv3)"; else HAVE_ROCPROF=0; echo "  rocprofv3: missing (levels 2 and 3 will be skipped)"; fi
 [ $missing = 1 ] && { echo "install the missing tools first"; exit 1; }
-if [ ! -f "$ALTD_GPU_CKPT/checkpoint.json" ]; then
-  echo "  checkpoint: $ALTD_GPU_CKPT/checkpoint.json not found (set ALTD_GPU_CKPT to the B06 checkpoint directory)"; exit 1
+if [ -n "${ALTD_GPU_CKPT:-}" ] && [ ! -f "$ALTD_GPU_CKPT/checkpoint.json" ]; then
+  echo "  checkpoint: $ALTD_GPU_CKPT/checkpoint.json not found"; exit 1
 fi
-echo "  checkpoint: $ALTD_GPU_CKPT ($(python3 -c "import json;m=json.load(open('$ALTD_GPU_CKPT/checkpoint.json'));print('generation',m.get('generation'),'population',m.get('population'))"))"
+echo "  checkpoint: ${ALTD_GPU_CKPT:-generated Xavier population}"
 { rocminfo | grep -E "^\s*(Name|Marketing Name|Compute Unit|Max Clock Freq|Wavefront Size):" ; } > "$OUT/device.txt" 2>&1
 { hipcc --version; echo; rocminfo | grep -m1 -i "ROCk\|version"; [ $HAVE_ROCPROF = 1 ] && rocprofv3 --version; } > "$OUT/toolchain.txt" 2>&1
 grep -m1 "Marketing Name" "$OUT/device.txt" | sed 's/^\s*/  /'
@@ -106,7 +108,7 @@ if [ ! -f "$LIB" ] || [ "$(find gpu/sim -newer "$LIB" | wc -l)" -gt 0 ]; then
 fi
 sha256sum "$LIB" >> "$LOG"
 if [ ! -x "$CHECK" ] || [ "$(find src examples -newer "$CHECK" -name '*.rs' | wc -l)" -gt 0 ]; then
-  run_logged build_examples cargo build --release --examples || exit 1
+  run_logged build_examples cargo build --release --offline --example gpu_check || exit 1
 fi
 if ask "Run the exactness checks first (gpu_check math novelty turnover step, a few minutes)?" y; then
   run_logged exactness_check "$CHECK" math novelty turnover step
@@ -179,9 +181,9 @@ fi
 # ---- level 4: step sections and kernel resources ---------------------------
 if want_level 4 "step-section cycle counts (timing build) and kernel resource usage"; then
   note "level 4: a second library built with -DALTD_STEP_TIMING (atomics slow the step; only the ratios matter)"
-  FLAGS=(-O3 -ffp-contract=off --offload-arch=gfx1100 -fPIC -shared -std=c++20 -fhip-fp32-correctly-rounded-divide-sqrt)
+  FLAGS=(-O3 -ffp-contract=off --offload-arch="${GPU_ARCH:-gfx1100}" -fPIC -shared -std=c++20 -fhip-fp32-correctly-rounded-divide-sqrt)
   TLIB="$REPO/target/gpu/libaltd_gpu_timing.so"
-  python3 gpu/gen_tables.py 2>/dev/null
+  python3 gpu/gen_tables.py --check || exit 1
   if run_logged build_timing_library hipcc "${FLAGS[@]}" -DALTD_STEP_TIMING -o "$TLIB" gpu/sim/altd_gpu.hip -lamdhip64; then
     : > "$OUT/step_sections.txt"
     for cars in $SIZES; do [ "$cars" = 32768 ] && continue; for elim in 0 1; do
@@ -197,8 +199,8 @@ fi
 # ---- level 5: forward-pass attribution -------------------------------------
 if want_level 5 "forward-pass attribution (diagnostic builds; their results are wrong by design)"; then
   note "level 5: forward seconds of a 32K full run per variant. diag1 = no activation, diag2 = no weight traffic, diag3 = activation only, diag4 = layer loop only, diag5 = diag4 without layer barriers, branchy = scalar tanh, cumode = -mcumode build"
-  FLAGS=(-O3 -ffp-contract=off --offload-arch=gfx1100 -fPIC -shared -std=c++20 -fhip-fp32-correctly-rounded-divide-sqrt)
-  python3 gpu/gen_tables.py 2>/dev/null
+  FLAGS=(-O3 -ffp-contract=off --offload-arch="${GPU_ARCH:-gfx1100}" -fPIC -shared -std=c++20 -fhip-fp32-correctly-rounded-divide-sqrt)
+  python3 gpu/gen_tables.py --check || exit 1
   : > "$OUT/forward_attribution.txt"
   for variant in "current:" "cumode:-mcumode" "branchy:-DALTD_TANH_BRANCHY" "diag1:-DALTD_FORWARD_DIAG=1" "diag2:-DALTD_FORWARD_DIAG=2" "diag3:-DALTD_FORWARD_DIAG=3" "diag4:-DALTD_FORWARD_DIAG=4" "diag5:-DALTD_FORWARD_DIAG=5"; do
     name=${variant%%:*}; define=${variant#*:}
@@ -214,8 +216,8 @@ fi
 
 # ---- pack -------------------------------------------------------------------
 echo; bold "Done"
-TAR="$REPO/$(basename "$OUT").tar.gz"
-tar czf "$TAR" -C "$REPO" "$(basename "$OUT")"
+TAR="$OUT.tar.gz"
+tar czf "$TAR" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 echo "  results: $OUT"
 echo "  archive: $TAR ($(du -h "$TAR" | cut -f1)), send this file"
 grep -c "rc=0" "$LOG" | sed 's/^/  steps succeeded: /'

@@ -9,7 +9,7 @@
 //! options, network exports, indices and shapes are validated and reported
 //! as errors.
 
-use crate::session::{Session, SessionOptions};
+use crate::training::session::{Session, SessionOptions};
 use crate::training::{CAR_STATE_FIELDS, CAR_STATE_STRIDE};
 use js_sys::{Float32Array, Float64Array, Promise};
 use std::cell::{Cell, RefCell, RefMut};
@@ -26,9 +26,13 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 #[wasm_bindgen(js_name = cpuThreadCount)]
 pub fn cpu_thread_count() -> usize {
     #[cfg(feature = "wasm-threads")]
-    { rayon::current_num_threads() }
+    {
+        rayon::current_num_threads()
+    }
     #[cfg(not(feature = "wasm-threads"))]
-    { 1 }
+    {
+        1
+    }
 }
 
 /// Integration tests use a barrier to prove work executes on every pool worker.
@@ -46,7 +50,10 @@ pub fn test_thread_indices() -> Vec<u32> {
                 let barrier = &barrier;
                 let indices = &indices;
                 scope.spawn(move |_| {
-                    indices.lock().unwrap().push(rayon::current_thread_index().unwrap() as u32);
+                    indices
+                        .lock()
+                        .unwrap()
+                        .push(rayon::current_thread_index().unwrap() as u32);
                     barrier.wait();
                 });
             }
@@ -56,7 +63,9 @@ pub fn test_thread_indices() -> Vec<u32> {
         indices
     }
     #[cfg(not(feature = "wasm-threads"))]
-    { vec![0] }
+    {
+        vec![0]
+    }
 }
 
 #[wasm_bindgen(start)]
@@ -93,7 +102,7 @@ fn vehicle_template(text: &str) -> Result<serde_json::Value, JsError> {
 pub fn track_scene(track_json: &str, name: &str, template_json: &str) -> Result<String, JsError> {
     let saved = parse(track_json, "track file")?;
     let template = vehicle_template(template_json)?;
-    let scene = crate::random_track::saved_track_scene(&saved, name, &template).map_err(js_error)?;
+    let scene = crate::track::random_track::saved_track_scene(&saved, name, &template).map_err(js_error)?;
     Ok(scene.to_string())
 }
 
@@ -101,8 +110,13 @@ pub fn track_scene(track_json: &str, name: &str, template_json: &str) -> Result<
 /// `seed`: `settingsJson` holds `RandomTrainingTrackSettings`. The scene uses
 /// the game's TileMap position and independent cars.
 #[wasm_bindgen(js_name = randomTrackScene)]
-pub fn random_track_scene(template_json: &str, settings_json: &str, seed: f64, generation: u32) -> Result<String, JsError> {
-    use crate::training_tracks::{training_scene, RandomTrainingTrackSettings};
+pub fn random_track_scene(
+    template_json: &str,
+    settings_json: &str,
+    seed: f64,
+    generation: u32,
+) -> Result<String, JsError> {
+    use crate::track::training_tracks::{training_scene, RandomTrainingTrackSettings};
     let template = vehicle_template(template_json)?;
     let settings: RandomTrainingTrackSettings =
         serde_json::from_str(settings_json).map_err(|e| js_error(format!("random track settings: {e}")))?;
@@ -111,14 +125,14 @@ pub fn random_track_scene(template_json: &str, settings_json: &str, seed: f64, g
         return Err(js_error("the track seed must be a safe integer"));
     }
     let generator = match template["runtime"]["hashcode_seed"].as_u64() {
-        Some(hash) => Some(crate::random_track::TrackGenerator::new(
+        Some(hash) => Some(crate::track::random_track::TrackGenerator::new(
             u32::try_from(hash).map_err(|_| js_error("HashCode seed exceeds u32"))?,
         )),
         None => None,
     };
     let (_, mut scene) =
         training_scene(&template, &settings, generator.as_ref(), seed as i64, generation as u64).map_err(js_error)?;
-    crate::random_track::place_tile_map(&mut scene, crate::random_track::GAME_TILE_MAP_POSITION);
+    crate::track::random_track::place_tile_map(&mut scene, crate::track::random_track::GAME_TILE_MAP_POSITION);
     Ok(scene.to_string())
 }
 
@@ -157,7 +171,12 @@ impl Simulation {
     /// `modelJson` are the files the CLI takes; `options` is an object or
     /// JSON string of `SessionOptions` (see wasm/README.md).
     #[wasm_bindgen(constructor)]
-    pub fn new(scene_json: &str, network_json: &str, model_json: &str, options: JsValue) -> Result<Simulation, JsError> {
+    pub fn new(
+        scene_json: &str,
+        network_json: &str,
+        model_json: &str,
+        options: JsValue,
+    ) -> Result<Simulation, JsError> {
         let options = if options.is_undefined() || options.is_null() {
             SessionOptions::default()
         } else if let Some(text) = options.as_string() {
@@ -166,10 +185,21 @@ impl Simulation {
             let text = js_sys::JSON::stringify(&options).map_err(|e| js_error(format!("options: {e:?}")))?;
             SessionOptions::from_json(&String::from(text)).map_err(js_error)?
         };
-        let session = Session::new(&parse(scene_json, "scene")?, &parse(network_json, "network")?, &parse(model_json, "model")?, options)
-            .map_err(js_error)?;
+        let session = Session::new(
+            &parse(scene_json, "scene")?,
+            &parse(network_json, "network")?,
+            &parse(model_json, "model")?,
+            options,
+        )
+        .map_err(js_error)?;
         Ok(Simulation {
-            shared: Rc::new(Shared { session: RefCell::new(session), busy: Cell::new(false), revision: Cell::new(0), gpu_rays_checked: Cell::new(0), gpu_ray_mismatches: Cell::new(0) }),
+            shared: Rc::new(Shared {
+                session: RefCell::new(session),
+                busy: Cell::new(false),
+                revision: Cell::new(0),
+                gpu_rays_checked: Cell::new(0),
+                gpu_ray_mismatches: Cell::new(0),
+            }),
         })
     }
 
@@ -212,14 +242,20 @@ impl Simulation {
     /// `stopWhenInactive` the window ends once every car is inactive.
     /// Returns the executed ticks.
     pub fn advance(&self, ticks: u32, stop_when_inactive: bool) -> Result<u32, JsError> {
-        self.session_mut()?.advance(ticks as u64, stop_when_inactive).map(|n| n as u32).map_err(js_error)
+        self.session_mut()?
+            .advance(ticks as u64, stop_when_inactive)
+            .map(|n| n as u32)
+            .map_err(js_error)
     }
 
     /// Runs the rest of the generation under a time limit in ticks, as the
     /// game does. Returns the executed ticks.
     #[wasm_bindgen(js_name = advanceGeneration)]
     pub fn advance_generation(&self, time_limit_ticks: u32) -> Result<u32, JsError> {
-        self.session_mut()?.advance_generation(time_limit_ticks as u64).map(|n| n as u32).map_err(js_error)
+        self.session_mut()?
+            .advance_generation(time_limit_ticks as u64)
+            .map(|n| n as u32)
+            .map_err(js_error)
     }
 
     /// Reproduces and installs the next generation:
@@ -228,22 +264,45 @@ impl Simulation {
     pub fn next_generation(&self) -> Result<JsValue, JsError> {
         let (preserved_count, rewards) = self.session_mut()?.next_generation().map_err(js_error)?;
         let result = js_sys::Object::new();
-        js_sys::Reflect::set(&result, &"preservedCount".into(), &JsValue::from(preserved_count as u32)).map_err(|e| js_error(format!("{e:?}")))?;
-        js_sys::Reflect::set(&result, &"rewards".into(), &Float64Array::from(&rewards[..])).map_err(|e| js_error(format!("{e:?}")))?;
+        js_sys::Reflect::set(
+            &result,
+            &"preservedCount".into(),
+            &JsValue::from(preserved_count as u32),
+        )
+        .map_err(|e| js_error(format!("{e:?}")))?;
+        js_sys::Reflect::set(&result, &"rewards".into(), &Float64Array::from(&rewards[..]))
+            .map_err(|e| js_error(format!("{e:?}")))?;
         Ok(result.into())
     }
 
     /// `advance` with the ray sensors cast on the GPU (tick-major). Resolves
     /// to the executed ticks. See `GpuRaycaster`.
     #[wasm_bindgen(js_name = advanceWithGpuRays)]
-    pub fn advance_with_gpu_rays(&self, raycaster: &gpu::GpuRaycaster, ticks: u32, stop_when_inactive: bool) -> Promise {
-        gpu::advance_window(self.shared.clone(), raycaster.inner(), ticks as u64, stop_when_inactive, None)
+    pub fn advance_with_gpu_rays(
+        &self,
+        raycaster: &gpu::GpuRaycaster,
+        ticks: u32,
+        stop_when_inactive: bool,
+    ) -> Promise {
+        gpu::advance_window(
+            self.shared.clone(),
+            raycaster.inner(),
+            ticks as u64,
+            stop_when_inactive,
+            None,
+        )
     }
 
     /// `advanceGeneration` with the ray sensors cast on the GPU.
     #[wasm_bindgen(js_name = advanceGenerationWithGpuRays)]
     pub fn advance_generation_with_gpu_rays(&self, raycaster: &gpu::GpuRaycaster, time_limit_ticks: u32) -> Promise {
-        gpu::advance_window(self.shared.clone(), raycaster.inner(), 0, true, Some(time_limit_ticks as u64))
+        gpu::advance_window(
+            self.shared.clone(),
+            raycaster.inner(),
+            0,
+            true,
+            Some(time_limit_ticks as u64),
+        )
     }
 
     /// Ray queries that were also cast on the CPU (`gpuVerifyEvery`).
@@ -308,7 +367,10 @@ impl Simulation {
 
     /// The training metrics of a car (`metricNames()` order; NaN when unset).
     pub fn metrics(&self, index: u32) -> Result<Float64Array, JsError> {
-        self.session().metrics(index as usize).map(|m| Float64Array::from(&m[..])).map_err(js_error)
+        self.session()
+            .metrics(index as usize)
+            .map(|m| Float64Array::from(&m[..]))
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = metricNames)]
@@ -318,7 +380,10 @@ impl Simulation {
 
     /// The sensor inputs a car would read now (`sensorNames()` order).
     pub fn sensors(&self, index: u32) -> Result<Float64Array, JsError> {
-        self.session().sensors(index as usize).map(|s| Float64Array::from(&s[..])).map_err(js_error)
+        self.session()
+            .sensors(index as usize)
+            .map(|s| Float64Array::from(&s[..]))
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = sensorNames)]
@@ -328,7 +393,10 @@ impl Simulation {
 
     /// `[acceleration, steering, brake, handbrake, boost]` of a car.
     pub fn controls(&self, index: u32) -> Result<Float64Array, JsError> {
-        self.session().controls(index as usize).map(|c| Float64Array::from(&c[..])).map_err(js_error)
+        self.session()
+            .controls(index as usize)
+            .map(|c| Float64Array::from(&c[..]))
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = outputNames)]
@@ -345,7 +413,9 @@ impl Simulation {
     /// Replaces a car's network with an export of the same shape.
     #[wasm_bindgen(js_name = setNetworkJson)]
     pub fn set_network_json(&self, index: u32, json: &str) -> Result<(), JsError> {
-        self.session_mut()?.set_network_json(index as usize, json).map_err(js_error)
+        self.session_mut()?
+            .set_network_json(index as usize, json)
+            .map_err(js_error)
     }
 
     /// The best lap of the generation as `{index, time}`, or null.
@@ -363,7 +433,11 @@ impl Simulation {
     pub fn generation_summary(&self) -> Result<JsValue, JsError> {
         let s = self.session().generation_summary();
         let result = js_sys::Object::new();
-        let set = |key: &str, value: JsValue| js_sys::Reflect::set(&result, &key.into(), &value).map(|_| ()).map_err(|e| js_error(format!("{e:?}")));
+        let set = |key: &str, value: JsValue| {
+            js_sys::Reflect::set(&result, &key.into(), &value)
+                .map(|_| ())
+                .map_err(|e| js_error(format!("{e:?}")))
+        };
         let number = |v: Option<f64>| v.map_or(JsValue::NULL, JsValue::from);
         set("bestIndex", JsValue::from(s.best_index as u32))?;
         set("bestScore", JsValue::from(s.best_score))?;
@@ -413,7 +487,9 @@ impl Simulation {
     /// Installs a checkpoint's networks as its generation and restores its RNG.
     #[wasm_bindgen(js_name = restoreCheckpointJson)]
     pub fn restore_checkpoint_json(&self, json: &str) -> Result<(), JsError> {
-        self.session_mut()?.restore_checkpoint(&parse(json, "checkpoint")?).map_err(js_error)
+        self.session_mut()?
+            .restore_checkpoint(&parse(json, "checkpoint")?)
+            .map_err(js_error)
     }
 
     /// GameManager.OnPause: frozen cars keep their pose.

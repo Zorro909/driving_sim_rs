@@ -1,4 +1,4 @@
-// BSP wall queries of src/bsp.rs for WebGPU: a port of gpu/sim/rays.h with
+// BSP wall queries of src/track/bsp.rs for WebGPU, matching gpu/sim/rays.h with
 // the same descent and pop order, so a query visits the walls the CPU visits
 // and keeps the first of equal hits. The arithmetic is written operation by
 // operation as the CPU evaluates it. float.wgsl supplies rounding boundaries

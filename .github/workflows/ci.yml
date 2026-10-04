@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 4
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Override local target-cpu=native before restoring compiled dependencies.
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-x86-64-webgpu
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features wasm -- -D warnings
+      - name: Lint WASM
+        env:
+          RUSTFLAGS: --cfg=web_sys_unstable_apis
+        run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings
+      - name: Lint browser diagnostics
+        env:
+          RUSTFLAGS: --cfg=web_sys_unstable_apis
+        run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features wasm,wasm-thread-test -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-x86-64
+      - run: cargo test --locked --release
+      - run: cargo test --locked
+
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: --cfg=web_sys_unstable_apis
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install the pinned threaded toolchain
+        run: rustup toolchain install "$(cat wasm/thread-toolchain)" --profile minimal --component rust-src --target wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-x86-64-webgpu-nightly-2025-11-15
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Read the locked wasm-bindgen version
+        id: bindgen
+        run: echo "version=$(wasm/bindgen-version.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: target/wasm-bindgen-cli
+          key: ${{ runner.os }}-wasm-bindgen-${{ steps.bindgen.outputs.version }}-rust-1.94.0-x86-64
+      - name: Install the matching wasm-bindgen CLI
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+        run: |
+          version=$(wasm/bindgen-version.sh)
+          if [ "$(target/wasm-bindgen-cli/bin/wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen $version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked --root target/wasm-bindgen-cli
+          fi
+          echo "$GITHUB_WORKSPACE/target/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - name: Build the library and serial package
+        run: |
+          cargo build --locked --lib --target wasm32-unknown-unknown --no-default-features --features wasm
+          wasm/build.sh
+      - name: Generate native browser references
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+        run: cargo run --locked --release --example wasm_reference -- --generate-fixtures
+      - name: Build diagnostic serial and threaded packages
+        run: |
+          TEST_THREADS=1 THREADS=1 OUT=target/wasm-thread-test/threads wasm/build.sh
+          TEST_THREADS=1 THREADS=0 OUT=target/wasm-thread-test/single wasm/build.sh
+      - name: Generate the native thread reference
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+        run: cargo run --locked --release --example wasm_thread_reference
+      - name: Install browser test tooling
+        run: npm install --global playwright@1.63.0
+      - name: Compare browser CPU and threaded simulation
+        run: |
+          # Hosted Ubuntu runners supply Chrome. CHROMIUM also allows local replay.
+          export CHROMIUM="${CHROMIUM:-$(command -v google-chrome)}"
+          test -x "$CHROMIUM"
+          NO_GPU=1 node wasm/test/run.mjs
+          for scenario in rally_asphalt rally_mixed rally_ice; do
+            NO_GPU=1 SCENARIO="wasm/test/scenarios/$scenario.json" REFERENCE="wasm/test/scenarios/$scenario-reference.json" node wasm/test/run.mjs
+          done
+          NO_GPU=1 PAGE=threads.html THREADS=2 node wasm/test/run.mjs
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs-x86-64
+      - run: cargo doc --locked --no-deps
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-x86-64
+      - run: cargo check --locked --all-targets

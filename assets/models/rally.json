@@ -1,0 +1,74 @@
+{
+  "vehicle_type": "rally",
+  "vision": [
+    {
+      "angle": -135,
+      "length": 624.2640380859375
+    },
+    {
+      "angle": -90,
+      "length": 200.00003051757812
+    },
+    {
+      "angle": -60,
+      "length": 499.9999694824219
+    },
+    {
+      "angle": -35,
+      "length": 691.4912109375
+    },
+    {
+      "angle": -20,
+      "length": 763.8155517578125
+    },
+    {
+      "angle": -10,
+      "length": 790.8846435546875
+    },
+    {
+      "angle": 0,
+      "length": 800
+    },
+    {
+      "angle": 10,
+      "length": 790.8846435546875
+    },
+    {
+      "angle": 20,
+      "length": 763.8155517578125
+    },
+    {
+      "angle": 35,
+      "length": 691.4912109375
+    },
+    {
+      "angle": 60,
+      "length": 499.9999694824219
+    },
+    {
+      "angle": 90,
+      "length": 200.00003051757812
+    },
+    {
+      "angle": 135,
+      "length": 624.2640380859375
+    }
+  ],
+  "sensors": [
+    "angular_velocity",
+    "boost_capacity",
+    "correct_direction",
+    "grip",
+    "velocity_front",
+    "velocity_side",
+    "track_curvature"
+  ],
+  "outputs": [
+    "steering",
+    "acceleration",
+    "handbrake",
+    "brake",
+    "boost"
+  ],
+  "fidelity_provenance": "Sensor lengths retain the captured single-precision values."
+}

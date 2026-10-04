@@ -1,186 +1,85 @@
-# Rust driving simulation (`altd-sim`)
+# altd-sim
 
-`driving_sim_rs` is the CPU simulator and trainer for AI Learns To Drive. It incorporates the accuracy and performance work from `experiments/driving_sim_rs_fidelity`: native float physics and collision ordering, runtime math, exact sensor parameters, interpolated lap times, accelerated spatial queries, and AVX2 network inference. It also includes the bit-exact HIP GPU simulator (`--gpu`, see [gpu/README.md](gpu/README.md)) and a WebAssembly build of the simulator as a JavaScript library with a WebGPU raycaster (see [wasm/README.md](wasm/README.md)).
+[![CI](https://github.com/Zorro909/driving_sim_rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Zorro909/driving_sim_rs/actions/workflows/ci.yml)
 
-The original Rust implementation matched the Python simulator. This implementation targets the game, so Python comparison reports and older training results are no longer expected to match. The old throughput measurements in [docs/benchmarks](../docs/benchmarks/README.md) describe that earlier implementation.
+`altd-sim` is a Rust vehicle simulator and neural-network trainer for AI Learns To Drive. It runs headless on the CPU, through a runtime-loaded AMD HIP library, or in WebAssembly. It reproduces the game's floating-point arithmetic, contact ordering, sensors and evolution behavior against captured regression fixtures. Exactness claims apply to the tested inputs; [fidelity](docs/fidelity.md) records the limits.
 
-## Build and run
+The repository includes vehicle and sensor templates, tile resources, fixed generated tracks and self-contained tests. Campaign tracks are not distributed.
+
+## Quick start
+
+Rust 1.94 or newer is the tested native toolchain. Build from the repository root. `--offline` works when dependencies are already cached; omit it on the first build if needed.
 
 ```sh
-cd driving_sim_rs
 cargo build --release --offline
+python3 tools/benchmark.py --population 1024 --ticks 600 --repeats 5 \
+  --report target/benchmark.json
 
-target/release/altd-sim bench --population 1000 --ticks 1800
-
-target/release/altd-sim train-scratch \
-  --out-dir ../training_runs/b06_fidelity \
-  --eliminate-on-wall --idle-eliminate
+target/release/altd-sim --threads 8 train-scratch \
+  --scene assets/scenes/rally_template.json --track-mode random \
+  --random-track-settings assets/random_track_settings.json \
+  --population 256 --generations 3 --ticks 600 --seed 1729 \
+  --eliminate-on-wall --idle-eliminate --save-final-candidate \
+  --out-dir runs/example
 ```
 
-On an AMD GPU (built by `gpu/build.sh`), `train-scratch --gpu` simulates the generations with identical results. See [gpu/README.md](gpu/README.md).
+The training command starts Xavier networks and generates a reproducible track each generation. Increase the population, generations and tick limit for longer runs. Supply the same scene and track settings when resuming, with `--resume` and a higher `--generations` target.
 
-The `cli` feature (default) builds the command line. `wasm/build.sh` builds the crate for `wasm32-unknown-unknown` with `--no-default-features --features wasm` as a callable library for browsers and JavaScript runtimes, bit-identical to the native simulator, with the ray sensors optionally cast on WebGPU. See [wasm/README.md](wasm/README.md).
-
-`--threads N` sets the Rayon worker count; the default uses the CPU affinity mask. `--mode independent|lockstep` selects the scheduler. Exact native trigonometry requires x86 or x86_64. AVX2 acceleration is detected at runtime and has a scalar fallback.
-
-`bench` and `train-scratch` default to the higher-precision scenes in `scenes_exact/` and the sensor model in `rally_trained_model_exact.json`. Explicit `--scene` and `--model` paths still work, including older exports with their precision limitations.
-
-Other commands are `train`, `compare-trace`, `compare-one-step`, `compare-closed-loop`, `compare-network`, `compare-sensors`, and `compare-score`. Run a command with `--help` for its arguments.
-
-## From-scratch training
-
-`train-scratch` defaults to B06 Hard, 8,192 cars, 50,000 generations, and a 5,400-tick time limit. It starts with a random Xavier network of shape `20,16,16,16,16,12,12,8,5`. The network template supplies input/output names; its weights are ignored unless supplied through `--init-network`.
-
-Evolution defaults are tournament selection of 20 parents, no crossover, four preserved parents, adaptive mutation, no weight decay, and reward `total_score` multiplied by 100. Mutation decays geometrically from `--mutation-start 0.4` to `--mutation-end 0.0125`; `--schedule linear` selects a linear decay. `--generations` is the total target generation count, including when resuming. The resumed generation's mutation rate is calculated from the newly supplied schedule. Generations after the schedule's end use `--mutation-end`.
-
-`--reward distance` selects for distance along the track, the existing `total_score` metric. `--reward best-lap-time` selects for faster completed laps using `best_lap_performance`, the reciprocal of the car's best lap time. Explicit `--reward` replaces any rewards in `--settings`; when omitted, settings-file rewards are preserved, with distance as the default.
-
-You can switch rewards when resuming:
+`.cargo/config.toml` uses `target-cpu=native` for x86 local builds, including the published CPU measurements. For a portable x86_64 binary, override it explicitly:
 
 ```sh
-target/release/altd-sim train-scratch \
-  --out-dir ../training_runs/b06_fidelity --resume --reward best-lap-time
+RUSTFLAGS='-C target-cpu=x86-64' cargo build --release --offline
 ```
 
-Cars without a completed lap have no best-lap reward signal. Distance training can establish lap completion before switching to best lap time. The printed score remains distance for comparison; selection uses the chosen reward, recorded in `run.json` under `settings.rewards`.
+AVX2 network and geometry paths use runtime detection and retain scalar fallbacks. Exact native trigonometry uses x87 on x86; other targets use the portable implementation described in the fidelity notes.
 
-Elimination is off by default:
+## Other backends
 
-- `--eliminate-on-wall` deactivates a car when its native callback reports wall contact.
-- `--idle-eliminate` deactivates a car after more than 80 consecutive statistics updates with insufficient forward progress. Statistics run at 10 Hz; progress uses a rolling ten-sample mean below 0.1 score units.
-- `--no-eliminate-on-wall` and `--no-idle-eliminate` explicitly disable either option.
+AMD GPU builds need ROCm and `hipcc`. The default architecture is `gfx1100`, for the RX 7900 XTX.
 
-`--settings file.json` overrides the evolution defaults, except population and scheduled mutation rate. It also accepts `eliminate` and `idle_eliminate` as booleans or numeric switches. Settings may be a plain object or nested under `settings`. Explicit CLI switches take precedence.
+```sh
+gpu/build.sh
+# Add --gpu to the train-scratch command above.
+```
 
-Deactivated cars remain in the population. Their network inference and driving stop, and their driving scores and lap statistics stop updating. Passive physics and pending contact accounting continue, preserving native contact ordering without removing bodies or shifting inference batches. A generation finishes on the statistics callback at which every car is inactive, or when its time limit expires. The game checks its time limit before driving, so a generation's callback count can exceed `--ticks` slightly.
+For another supported AMD GPU, set `GPU_ARCH` when building. Rust builds do not require ROCm. See [GPU setup](gpu/README.md) for validation and profiling.
 
-Each generation prints lap and score summaries. Lap crossings are interpolated within the statistics interval and rounded to milliseconds, as in the game. Selection uses the configured reward, independently of which car sets the fastest lap.
+WebAssembly builds need the wasm32 target and the matching `wasm-bindgen` CLI:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version "$(wasm/bindgen-version.sh)" --locked
+wasm/build.sh
+```
+
+The JavaScript library includes CPU simulation, a threaded CPU package and optional WebGPU backends. See [WASM setup](wasm/README.md) for initialization, browser requirements and tests. Expanded native/WASM comparisons have known last-bit differences; serial and threaded WASM are compared separately.
+
+## CLI and output
+
+`target/release/altd-sim --help` and `target/release/altd-sim COMMAND --help` show arguments. `bench` measures a fixed population; `train` evolves an exported network; `train-scratch` starts Xavier networks and supports checkpoints, generated-track batches and stop conditions; `evaluate` runs a frozen candidate against a hash-validated suite. The `compare-*` commands compare user-supplied captures with the simulator. Scenes and recorded traces are explicit inputs. [CLI reference](docs/cli.md) covers defaults, resume behavior and report formats.
+
+A `train-scratch` run writes:
 
 | File | Contents |
-|---|---|
-| `run.json` | Effective options from the latest start or resume, including elimination settings |
-| `log.jsonl` | Per-generation laps, scores, active-car count, simulated ticks, and timings |
-| `best_laps/gNNNNN_T.TTs.json`, `best.json` | Networks that set a new best lap, with input/output names and training metadata |
-| `checkpoint.json`, `checkpoint_gNNNNN.bin` | Population parameters, shape, population size, RNG state, generation, and best-lap record |
+| --- | --- |
+| `run.json`, `log.jsonl`, `progress.json` | Effective options, completed generations and current progress |
+| `checkpoint.json`, `checkpoint_gNNNNN.bin` | Generation-boundary population and RNG state |
+| `best.json`, `best_laps/` | Networks that set a new best lap |
+| `candidate.json` | Final fitness leader when `--save-final-candidate` is enabled |
+| `tracks/` | Generated track geometry for replay |
 
-Checkpoints are written at generation boundaries every `--checkpoint-every` generations, default 100, and after the last generation when training stops on its own. Zero disables checkpointing. Resuming replays work after the latest checkpoint, truncating the corresponding log entries. Resuming a final checkpoint with a higher `--generations` continues exactly as an uninterrupted run would.
+## Code and tests
 
-### Random tracks
-
-Both `train` and `train-scratch` accept `--track-mode random`. Each generation uses fresh tracks shared by the whole population. Tracks always come from the game's CPU TrackFactory algorithm and tile resources. The supplied `--scene` provides vehicle and space settings; the generated curve provides the spawn pose, so random mode does not need `--spawn-trace`. The default remains `--track-mode fixed`.
-
-```sh
-target/release/altd-sim train-scratch \
-  --track-mode random \
-  --random-track-settings examples/random_track_settings.json \
-  --tracks-per-generation 8 \
-  --track-buffer-size 8 --gpu \
-  --out-dir ../training_runs/random_tracks
-```
-
-`--tracks-per-generation` defaults to 1. With 8, each unchanged population evaluates eight tracks, with a fresh spawn and separate `--ticks` limit on each. Eliminated cars restart on the next track. Selection uses the mean of each car's existing normalized reward ranks across all tracks, giving each track equal weight. Reproduction, mutation scheduling, weight decay, and the generation counter advance once after the whole batch. Fixed mode requires a count of 1.
-
-`--gpu` requires rebuilding the HIP library with `gpu/build.sh` after the random-mode update. A dedicated CPU producer prepares tracks, collision geometry, and spatial queries, including GPU query arrays, in a bounded queue while simulation runs. `--track-buffer-size` defaults to eight and must be positive; it is independent of the number of tracks per generation. GPU training uploads each prepared track and retains its population and network allocations. If the queue runs dry, training waits for a fresh track. Random mode uses independent car physics on both backends; the library's native shared TileMap redraw replay remains separate.
-
-Without a settings file, lengths range from 12 to 40 tiles, all block types are enabled, and surfaces form sections. Each track uniformly samples a surface count from one, two, or three, then samples a subset and ordering from asphalt, dirt, and ice. This gives each surface count equal probability.
-
-The JSON file accepts these fields; omitted fields use those defaults:
-
-| Field | Accepted values |
-|---|---|
-| `length` | Fixed even tile count, or `{"min": 12, "max": 40}` with inclusive bounds. Ranges sample only even counts. The game's grid supports 4 to 76 tiles. |
-| `allow_double` | `true` or `false`, or choices such as `[false, true]`. True permits all game block types. |
-| `surfaces` | Fixed set such as `[0, 1]`; explicit set choices such as `[[0], [1], [0, 2], [0, 1, 2]]`; or `{"pool": [0, 1, 2], "count": [1, 2, 3]}` to sample counts and subsets. IDs are asphalt `0`, dirt `1`, ice `2`. A pool such as `[0, 1]` with count `[1, 2]` excludes ice. |
-| `distribution` | `0` for a random surface per tile, `1` for consecutive sections, or choices `[0, 1]`. |
-| `start` | `null` for a new grid position each track, or a fixed `[x, y]` inside the game's grid. |
-
-The generator may shorten a difficult path within the requested length range. It retries failed tracks and rejects results below the minimum; impossible settings stop training with an error. Fixed lengths never shorten.
-
-Tracks use an independent seed derived from the run seed, generation number, and index within the batch. Index zero preserves the historical seed formula, so changing the batch count between stages does not change later generations' first tracks. Queue depth and CPU/GPU selection do not change the sequence. A resume retains the track seed and track count from the checkpoint; `--tracks-per-generation` explicitly overrides the saved count. Supply the same track settings and scene template to reproduce the sequence. Omitted random generation settings use defaults on resume. `--init-population` starts a track sequence using the new run's seed and the imported generation number.
-
-`train-scratch` saves generated tracks to `tracks/gNNNNN.track.json` for single-track generations and `tracks/gNNNNN_tNNN.track.json` for batches. Each completed generation has one schema-version-2 log row, with per-track summaries in `tracks`. `best_score`/`best_mean_score` is the highest per-car mean raw score; `mean_score` averages those means across the population. `best_fitness` and `mean_fitness` describe selection ranks. `lapped_cars`/`lapped_all_tracks` counts cars that lap every track, and `best_batch_mean_lap_s` is the smallest mean lap among those cars. `best_lap_s` and `best.json` retain the fastest individual lap as a diagnostic, with its track index and geometry. Lap times across different track lengths still describe different tasks.
-
-Recreate a scene with `GeneratedTrack::to_scene` and the run's scene template, then set `track.native_broadphase` to `false` for the same independent car physics. `train` includes generated tracks in its history output. Atomic `progress.json` updates identify the current generation, track index, completed-track count, and trainer PID. Checkpoints contain only complete batches and the population bred for the next generation. A hard stop abandons a partial batch; resume replays from the last checkpoint and removes stale geometry for replayed generations.
-
-### Stop conditions
-
-Training normally ends at `--generations`. These options end it earlier, after the first generation that meets any of them:
-
-| Option | Stops when |
-|---|---|
-| `--stop-score-above=S` | The highest per-car mean distance score across the tracks is at least `S` |
-| `--stop-lap-below=T` | A car laps every track with a mean lap time at most `T` seconds |
-| `--stop-lapped-percent=P` | At least `P`% of cars completed a lap on every track |
-| `--stop-plateau=N` | `--plateau-metric` (`lap`, the default, or `score`) has not improved for `N` generations |
-
-Stop checks run after the full batch. These definitions preserve single-track behavior when the count is 1. The plateau count starts at zero in each invocation, including a resume, and watches the mean-score or complete-batch mean-lap statistic. For the lap metric, generations without a car lapping every track count as no improvement. Creating a file named `stop_request` in `--out-dir` ends training after the current full generation; a request left over from before the trainer started is deleted and ignored.
-
-The last generation's checkpoint records why training ended in `stop_reason`, for example `{"condition": "lap_below", "generation": 812, "value": 38.412, "threshold": 38.5}`. The condition is one of `stop_request`, `lap_below`, `score_above`, `lapped_percent`, `plateau` (which adds `metric`), or `generations`, checked in that order. SIGTERM exits without a final checkpoint. Pass negative thresholds with `=`, as in `--stop-score-above=-100`.
-
-## Resume with different settings
+`src/math/` contains runtime-compatible arithmetic and vectors. `src/physics/` implements vehicles and contacts, while `src/track/` owns scene geometry, spatial queries and generated tracks. `src/nn/` provides scalar and AVX2 inference. `src/training/` owns populations, evolution, RNGs, evaluation and embedding sessions. `src/gpu/hip.rs` loads HIP; `src/gpu/simulation.rs` shares device layouts with `src/wasm/`, which supplies JavaScript and WebGPU bindings. The CLI entrypoint is `src/bin/altd-sim/main.rs`, beside its argument, comparison, benchmark and checkpoint modules. Rust imports follow these groups, such as `altd_sim::physics::car::Car` and `altd_sim::training::session::Session`. See [design notes](docs/design.md).
 
 ```sh
-target/release/altd-sim train-scratch \
-  --out-dir ../training_runs/b06_fidelity --resume \
-  --generations 60000 --ticks 7200 --population 4096 \
-  --mutation-start 0.2 --mutation-end 0.01 \
-  --eliminate-on-wall --idle-eliminate
+cargo test --release --offline
+cargo test --offline
+cargo build --offline --target wasm32-unknown-unknown --no-default-features --features wasm
 ```
 
-A resume accepts changes to training parameters, including elimination, population, track, time limit, mutation schedule, and evolution settings. Supply the desired options again; omitted options use CLI defaults rather than inheriting `run.json`, except `--tracks-per-generation`, which restores the checkpoint's count (1 for older checkpoints). The checkpoint supplies its generation, networks, and RNG state. `--seed` and `--init-network` do not replace saved networks or RNG state during resume.
+Tests retain self-contained native captures and label generated golden data as current-code regressions. Browser integration checks live in `wasm/test/`; HIP equivalence checks use `gpu_check`. The exhaustive trigonometry scan and hardware-dependent tests are opt-in. See [performance](docs/performance.md), [GPU internals](docs/gpu.md) and [WASM fidelity](docs/wasm.md).
 
-The requested `--shape` must match the checkpoint's full layer layout, even if a different layout would have the same number of parameters. The binary length must match the saved shape and population. New checkpoints store both fields in `checkpoint.json`. Older checkpoints read them from the adjacent `run.json` once and preserve them in checkpoint metadata before updating the run options.
+GitHub Actions checks formatting, native and WASM Clippy, native release and debug tests, rustdoc, Rust 1.93 compatibility, and WASM packages with CPU browser comparisons. Its native jobs override `target-cpu=native` with `x86-64` and include the flags in their cache keys, so cached builds can move between runner CPUs. Serial/threaded browser tests retain the documented expanded native differences. HIP and hardware WebGPU checks run separately because the hosted runners have no GPU.
 
-Reducing population keeps the first saved networks. Increasing population repeats saved networks in order; later reproduction uses the requested population and evolution settings. `--init-population path/to/checkpoint.json` uses the same validation and resizing in a new run directory, starting a fresh best-lap record. An ordinary resume retains the saved best-lap record, even if track settings change.
-
-Existing checkpoints can be continued with the new simulator when their shape matches. Physics changes mean the continuation differs from the old simulator. Native contact caches are also not serialized, so bit-identical physical continuation across process restarts is not guaranteed.
-
-## CPU implementation
-
-- `car`, `collision`, `simulation`, and `broadphase` implement vehicle callbacks, passive physics, contact solving, and native population lifecycle.
-- `world`, `curve`, `bsp`, `segment_grid`, and `path_segments` load tracks and accelerate ray, nearest-wall, and path queries while preserving arithmetic and tie order.
-- `network` and `network_simd` implement scalar and AVX2 inference with the same accumulation order.
-- `godot_math`, `native_math`, `managed_trig`, and `double_math` reproduce the captured game's math routines.
-- `training` and `evolution` implement scoring, scheduling, reproduction, and vehicle reuse. `game_random` supports captured game RNG streams through `--game-rng-state`; ordinary seeded training retains the Python-compatible RNG.
-- `random_track` implements the game's track generation and redraw support. `training_tracks` samples training variants and prepares tracks in a bounded CPU queue.
-- `session` wraps `TrainingRunner` for embedding hosts (JSON options, seeding, flat car states, generation checkpoints); `wasm` exports it to JavaScript and adds the WebGPU raycaster (`wasm32` with the `wasm` feature only).
-- `native_math::engine_sin_cos` uses x87 `FSINCOS` on x86; other targets use the portable fdlibm port validated against it for |x| ≤ 16.
-
-Independent mode runs each car through a window to keep its state and network in cache, catching inactive cars up to the final callback. Lockstep advances all cars one tick at a time. Scenes requesting native shared broadphase use the tick-major path in either mode to retain native ordering.
-
-## Verification
-
-```sh
-cargo test --offline -- --test-threads=2
-cargo test --release --offline -- --test-threads=2
-python check_accuracy.py --label cpu-port \
-  --cases a01 a05 a06 a07 b06 --closed-loop --sensors \
-  --assert-position 0 --assert-closed-loop-exact
-```
-
-The imported regression fixtures cover recorded native vehicle/population transitions, sensors, statistics, runtime math, random tracks, and accelerated-query equivalence. CLI tests cover elimination, settings overrides, resumed parameter changes, and checkpoint shape/size validation. The accuracy checker normalizes the game's float32 JSON state before comparison and writes reports under `reports/`. `wasm/test/run.mjs` compares the WebAssembly build, and its WebGPU raycaster, with a native reference in headless Chromium (see [wasm/README.md](wasm/README.md)).
-
-The experiment's [ROUND3.md](../experiments/driving_sim_rs_fidelity/ROUND3.md) and [ROUND4.md](../experiments/driving_sim_rs_fidelity/ROUND4.md) record the original capture evidence and remaining fidelity limits. Native body matrices are absent from older traces; passing these finite fixtures is not proof of complete state reconstruction.
-
-Godot-derived code retains its notice in [GODOT_LICENSE](GODOT_LICENSE); math source notices remain in their modules.
-
-## Final candidates and frozen evaluation
-
-`train-scratch --save-final-candidate` atomically writes `candidate.json` when a stage successfully stops. It selects the complete-batch fitness leader from the evaluated population before breeding, breaking ties by lowest population index. The export includes exact weights, shape, ordered inputs/outputs, generation, reward definition, fitness and batch statistics. It consumes no random draws and leaves reproduction and checkpoint populations unchanged. `best.json` still tracks the fastest individual lap. A final checkpoint confirms the candidate's filename, SHA-256 and generation; a candidate written without a matching completed checkpoint is not a confirmed optimization result.
-
-Evaluate a frozen candidate without training:
-
-```sh
-altd-sim evaluate --network training_runs/example/candidate.json \
-  --model training_runs/example/model.json \
-  --suite training_optimizations/example/suite/manifest.json \
-  --report training_runs/example/evaluation.json
-```
-
-The version 1 suite contains `vehicle`, `options`, and `tracks`. Options specify `backend: "cpu"`, `batch_count`, `eliminate_on_wall`, and `idle_eliminate`. Each track has a distinct `id`, relative `scene` and `spawn` filenames, their `scene_sha256`/`spawn_sha256` hashes, and a finite `ticks` cap. The evaluator validates file hashes, dimensions, ordered sensors/controls, finite parameters and vehicle compatibility. Each track gets a new runner and car, including fresh contacts, controls, sensors, score and lap state. It does not breed, change weights, or modify training logs, checkpoints or random state.
-
-The atomic versioned report records candidate, suite and simulator hashes, evaluation options, elapsed time, and each track's raw score, one-lap score, normalized progress, lap completion, optional best lap, collisions and simulated ticks. An interrupted evaluator publishes no successful report. The Python training dashboard freezes catalog tracks into suites and manages retries.
-
-The dashboard's **Optimization** tab saves versioned network/regime templates and performs exhaustive sequential sweeps. Arrays count as single choices; stages belong to an execution and do not multiply combinations. Seeds repeat each effective variation. The preview reports unique combinations and capped training work before launch. One execution owns the slot until its whole regime and evaluation finish. Pause after a variation, stop/replay from a checkpoint, cancel remaining work, or retry failed evaluations with the same candidate. Restart recovery adopts matching processes. Changing the trainer or HIP library requires a new optimization. See [the dashboard README](../driving_training_web/README.md#optimization) for template controls, storage paths and exports.
-
-Comparison ranks use the shared suite's completion rate, complete-model lap times and incomplete-model normalized progress. Training reward ranks and fastest individual training laps remain diagnostics. Failed or unfinished seed repetitions are provisional. Candidate downloads contain the evaluated model, while latest-checkpoint downloads still contain a bred next-generation network.
+The project uses the [MIT license](LICENSE). Godot-derived code retains the [Godot notice](GODOT_LICENSE), and numerical modules retain their source notices.

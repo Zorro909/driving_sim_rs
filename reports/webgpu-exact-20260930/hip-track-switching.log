@@ -1,7 +1,0 @@
-    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
-     Running tests/training_tracks.rs (target/release/deps/training_tracks-d3dc59bfae3836b0)
-
-running 1 test
-test gpu_track_switches_preserve_cpu_results_and_reuse_population_buffers ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.11s

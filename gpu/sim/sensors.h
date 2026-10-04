@@ -1,4 +1,4 @@
-// `Car::sensor` (src/car.rs) for every sensor kind, reading the GPU car state.
+// `Car::sensor` (src/physics/car.rs) for every sensor kind, reading the GPU car state.
 #pragma once
 #include "rays.h"
 #include "track.h"

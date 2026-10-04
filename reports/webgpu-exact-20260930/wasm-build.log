@@ -1,7 +1,0 @@
-   Compiling altd_sim v0.1.0 (/var/home/zorro/.t3/worktrees/driving_sim_rs/t3code-8b520ae7)
-    Finished `release` profile [optimized + debuginfo] target(s) in 9.04s
-total 900
--rw-r--r--. 1 zorro zorro  11614 Sep 30 13:40 altd_sim.d.ts
--rw-r--r--. 1 zorro zorro  48560 Sep 30 13:40 altd_sim.js
--rw-r--r--. 1 zorro zorro 851508 Sep 30 13:40 altd_sim_bg.wasm
--rw-r--r--. 1 zorro zorro   4996 Sep 30 13:40 altd_sim_bg.wasm.d.ts

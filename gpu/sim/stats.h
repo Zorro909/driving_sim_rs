@@ -1,4 +1,4 @@
-// training::ScoreTracker and TrainingStats::update (src/training.rs) on the
+// training::ScoreTracker and TrainingStats::update (src/training/stats.rs) on the
 // GPU agent state, and Schedule::update_stats.
 #pragma once
 #include "rays.h"

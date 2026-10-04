@@ -1,5 +1,5 @@
 {
-  "source": "docs/traces/rally_a07_contact_reference.json",
+  "source": "Recorded Rally A07 contact trace; see tests/fixtures/README.md.",
   "frames": [
     {
       "tick": 2,

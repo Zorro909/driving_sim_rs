@@ -1,7 +1,7 @@
 //! Full WebGPU training windows. Evolution and checkpoint serialization stay
 //! in Rust; sensing, inference, statistics and physics run entirely in WGSL.
 use super::{js_error, Shared, Simulation};
-use crate::gpu_sim::{self, GpuAgent, GpuCar, RayNode, TrackArrays};
+use crate::gpu::simulation::{self, GpuAgent, GpuCar, RayNode, TrackArrays};
 use js_sys::{Promise, Uint32Array};
 use std::{
     cell::{Cell, RefCell},
@@ -66,16 +66,14 @@ const MAX_WINDOW_TICKS: u32 = 120;
 const _: () = {
     assert!(std::mem::size_of::<GpuCar>() == 3200);
     assert!(std::mem::size_of::<GpuAgent>() == 376);
-    assert!(std::mem::size_of::<gpu_sim::VehicleDesc>() == 336);
-    assert!(std::mem::size_of::<gpu_sim::SensorDesc>() == 24);
+    assert!(std::mem::size_of::<simulation::VehicleDesc>() == 336);
+    assert!(std::mem::size_of::<simulation::SensorDesc>() == 24);
     assert!(std::mem::offset_of!(GpuCar, contacts) == 384);
     assert!(std::mem::offset_of!(GpuAgent, flags) == 368);
 };
 fn words<T: Copy>(values: &[T]) -> Vec<u32> {
     assert_eq!(std::mem::size_of::<T>() % 4, 0);
-    let bytes = unsafe {
-        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
-    };
+    let bytes = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values)) };
     bytes
         .chunks_exact(4)
         .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
@@ -86,11 +84,7 @@ fn append<T: Copy>(data: &mut Vec<u32>, values: &[T]) -> Result<u32, String> {
     data.extend(words(values));
     Ok(offset)
 }
-unsafe fn append_ptr<T: Copy>(
-    data: &mut Vec<u32>,
-    pointer: *const T,
-    count: usize,
-) -> Result<u32, String> {
+unsafe fn append_ptr<T: Copy>(data: &mut Vec<u32>, pointer: *const T, count: usize) -> Result<u32, String> {
     if count == 0 {
         return Ok(0);
     }
@@ -101,9 +95,9 @@ unsafe fn append_ptr<T: Copy>(
 struct Inner {
     backend: Backend,
     shared: Rc<Shared>,
-    surfaces: RefCell<gpu_sim::SurfaceTable>,
+    surfaces: RefCell<simulation::SurfaceTable>,
     /// The session track the world buffer encodes.
-    world: RefCell<std::sync::Arc<crate::world::World>>,
+    world: RefCell<std::sync::Arc<crate::track::world::World>>,
     base: RefCell<Vec<u32>>,
     tag: Cell<Option<(u64, u64)>>,
     population: Cell<usize>,
@@ -223,16 +217,15 @@ impl GpuSimulation {
                 Err(e) => Err(e),
                 Ok(expected) => match run_window(&inner, ticks, false, None).await {
                     Err(e) => Err(e),
-                    Ok(_) => {
-                        canonical_state(&inner.shared.session.borrow().runner, &inner.surfaces.borrow())
-                            .and_then(|actual| {
-                                if actual != expected {
-                                    Err("WebGPU simulation verification differs from WASM".into())
-                                } else {
-                                    Ok(expected.len() as u32)
-                                }
-                            })
-                    }
+                    Ok(_) => canonical_state(&inner.shared.session.borrow().runner, &inner.surfaces.borrow()).and_then(
+                        |actual| {
+                            if actual != expected {
+                                Err("WebGPU simulation verification differs from WASM".into())
+                            } else {
+                                Ok(expected.len() as u32)
+                            }
+                        },
+                    ),
                 },
             };
             {
@@ -242,10 +235,7 @@ impl GpuSimulation {
                 s.runner.batch_index = batch;
             }
             inner.tag.set(None);
-            inner
-                .shared
-                .revision
-                .set(inner.shared.revision.get().wrapping_add(1));
+            inner.shared.revision.set(inner.shared.revision.get().wrapping_add(1));
             inner.busy.set(false);
             inner.shared.busy.set(false);
             result.map(JsValue::from).map_err(|e| js_error(e).into())
@@ -254,17 +244,11 @@ impl GpuSimulation {
 }
 fn canonical_state(
     r: &crate::training::TrainingRunner,
-    surfaces: &gpu_sim::SurfaceTable,
+    surfaces: &simulation::SurfaceTable,
 ) -> Result<Vec<u32>, String> {
     let mut cars = Vec::new();
     let mut agents = Vec::new();
-    crate::training::export_state_into(
-        &r.agents,
-        &r.world.vehicle,
-        surfaces,
-        &mut cars,
-        &mut agents,
-    )?;
+    crate::training::export_state_into(&r.agents, &r.world.vehicle, surfaces, &mut cars, &mut agents)?;
     let mut out = words(&cars);
     out.extend(words(&agents));
     Ok(out)
@@ -272,94 +256,88 @@ fn canonical_state(
 struct Encoded {
     world: Vec<u32>,
     base: Vec<u32>,
-    surfaces: gpu_sim::SurfaceTable,
+    surfaces: simulation::SurfaceTable,
     shape: Vec<usize>,
 }
 /// The world buffer (track, vehicle, sensors, network shape and controls)
 /// and the uniform base describing its layout.
-fn encode(session: &crate::session::Session) -> Result<Encoded, String> {
+fn encode(session: &crate::training::session::Session) -> Result<Encoded, String> {
     let runner = &session.runner;
 
-
-            if runner.world.track.native_broadphase || runner.world.track.shapes.is_empty() {
-                return Err("WebGPU simulation needs independent cars and physics shapes".into());
+    if runner.world.track.native_broadphase || runner.world.track.shapes.is_empty() {
+        return Err("WebGPU simulation needs independent cars and physics shapes".into());
+    }
+    let arrays = TrackArrays::new(&runner.world)?;
+    let (nodes, walls, magnitude, depth) = runner
+        .world
+        .track
+        .ray_tree()
+        .ok_or("WebGPU simulation needs a BSP ray tree")?
+        .gpu_arrays();
+    if depth > 48 {
+        return Err("BSP exceeds WebGPU ray stack depth".into());
+    }
+    let rays = (
+        nodes
+            .into_iter()
+            .map(|(links, own, subtree)| RayNode { links, own, subtree })
+            .collect(),
+        walls,
+        magnitude,
+        depth,
+    );
+    let mut world = world::encode_world(&arrays.desc(&rays))?;
+    let vehicle = simulation::vehicle_desc(&runner.world.vehicle)?;
+    let vehicle_offset = append(&mut world, &[vehicle])?;
+    let sensors: Vec<_> = runner
+        .layout
+        .sensors
+        .iter()
+        .map(|sensor| {
+            let mut desc = simulation::sensor_desc(sensor);
+            if desc.kind == 0 {
+                let angle = (desc.a - 90.0f32) * (std::f32::consts::PI / 180.0);
+                desc.offset = [
+                    crate::math::native_math::cos(angle) * desc.b,
+                    crate::math::native_math::sin(angle) * desc.b,
+                ];
             }
-            let arrays = TrackArrays::new(&runner.world)?;
-            let (nodes, walls, magnitude, depth) = runner
-                .world
-                .track
-                .ray_tree()
-                .ok_or("WebGPU simulation needs a BSP ray tree")?
-                .gpu_arrays();
-            if depth > 48 {
-                return Err("BSP exceeds WebGPU ray stack depth".into());
-            }
-            let rays = (
-                nodes
-                    .into_iter()
-                    .map(|(links, own, subtree)| RayNode {
-                        links,
-                        own,
-                        subtree,
-                    })
-                    .collect(),
-                walls,
-                magnitude,
-                depth,
-            );
-            let mut world = world::encode_world(&arrays.desc(&rays))?;
-            let vehicle = gpu_sim::vehicle_desc(&runner.world.vehicle)?;
-            let vehicle_offset = append(&mut world, &[vehicle])?;
-            let sensors: Vec<_> = runner
-                .layout
-                .sensors
-                .iter()
-                .map(|sensor| {
-                    let mut desc = gpu_sim::sensor_desc(sensor);
-                    if desc.kind == 0 {
-                        let angle = (desc.a - 90.0f32) * (std::f32::consts::PI / 180.0);
-                        desc.offset = [
-                            crate::native_math::cos(angle) * desc.b,
-                            crate::native_math::sin(angle) * desc.b,
-                        ];
-                    }
-                    desc
-                })
-                .collect();
-            if sensors.len() > 64 {
-                return Err("WebGPU supports at most 64 sensor inputs".into());
-            }
-            let sensors_offset = append(&mut world, &sensors)?;
-            let first = runner
-                .agents
-                .first()
-                .ok_or("the session has not started")?;
-            if first.network.shape.iter().any(|&n| n > 64) {
-                return Err("WebGPU supports layer widths up to 64".into());
-            }
-            let shape: Vec<u32> = first.network.shape.iter().map(|&n| n as u32).collect();
-            let shape_offset = append(&mut world, &shape)?;
-            let sources = gpu_sim::control_sources(session.output_names());
-            let control_offset = append(&mut world, &sources)?;
-            let mut base = vec![0u32; 24];
-            base[12] = 0;
-            base[13] = vehicle_offset;
-            base[14] = sensors_offset;
-            base[15] = sensors.len() as u32;
-            base[16] = shape.len() as u32;
-            base[17] = first.network.params.len() as u32;
-            base[18] = shape_offset;
-            base[19] = control_offset;
-            base[20] = sensors.iter().any(|s| s.kind == 11 || s.kind == 12) as u32;
-            base[23] = MAX_WINDOW_TICKS;
-            if base[20] != 0
-                && runner.world.track.curve.is_none()
-                && runner.world.track.path.len() >= 2
-            {
-                return Err("WebGPU path sensors need the scene's Curve2D control points".into());
-            }
-            Ok(Encoded { world, base, surfaces: arrays.surfaces, shape: first.network.shape.clone() })
-        }
+            desc
+        })
+        .collect();
+    if sensors.len() > 64 {
+        return Err("WebGPU supports at most 64 sensor inputs".into());
+    }
+    let sensors_offset = append(&mut world, &sensors)?;
+    let first = runner.agents.first().ok_or("the session has not started")?;
+    if first.network.shape.iter().any(|&n| n > 64) {
+        return Err("WebGPU supports layer widths up to 64".into());
+    }
+    let shape: Vec<u32> = first.network.shape.iter().map(|&n| n as u32).collect();
+    let shape_offset = append(&mut world, &shape)?;
+    let sources = simulation::control_sources(session.output_names());
+    let control_offset = append(&mut world, &sources)?;
+    let mut base = vec![0u32; 24];
+    base[12] = 0;
+    base[13] = vehicle_offset;
+    base[14] = sensors_offset;
+    base[15] = sensors.len() as u32;
+    base[16] = shape.len() as u32;
+    base[17] = first.network.params.len() as u32;
+    base[18] = shape_offset;
+    base[19] = control_offset;
+    base[20] = sensors.iter().any(|s| s.kind == 11 || s.kind == 12) as u32;
+    base[23] = MAX_WINDOW_TICKS;
+    if base[20] != 0 && runner.world.track.curve.is_none() && runner.world.track.path.len() >= 2 {
+        return Err("WebGPU path sensors need the scene's Curve2D control points".into());
+    }
+    Ok(Encoded {
+        world,
+        base,
+        surfaces: arrays.surfaces,
+        shape: first.network.shape.clone(),
+    })
+}
 impl Inner {
     /// Re-encodes the world buffer after `Simulation.replaceTrack`.
     fn sync_world(&self) -> Result<(), String> {
@@ -388,51 +366,50 @@ impl Inner {
     }
     async fn upload_if_needed(&self) -> Result<(), String> {
         self.sync_world()?;
-        let session = self.shared.session.borrow();
-        let r = &session.runner;
-        if self.tag.get() == Some((r.generation, self.shared.revision.get()))
-            && self.population.get() == r.agents.len()
-        {
-            return Ok(());
-        }
-        let mut cars = Vec::new();
-        let mut agents = Vec::new();
-        crate::training::export_state_into(
-            &r.agents,
-            &r.world.vehicle,
-            &self.surfaces.borrow(),
-            &mut cars,
-            &mut agents,
-        )?;
-        if r.is_paused() {
-            return Err("WebGPU does not model frozen cars".into());
-        }
-        let first = r.agents.first().ok_or("no agents")?;
-        if first.network.shape != self.shape {
-            return Err("network shape changed; recreate the GPU simulator".into());
-        }
-        let mut params = Vec::new();
-        for a in &r.agents {
-            if a.network.shape != first.network.shape {
-                return Err("population network shapes differ".into());
+        let (upload, generation, population) = {
+            let session = self.shared.session.borrow();
+            let r = &session.runner;
+            if self.tag.get() == Some((r.generation, self.shared.revision.get()))
+                && self.population.get() == r.agents.len()
+            {
+                return Ok(());
             }
-            params.extend_from_slice(&a.network.params);
-        }
-        let mut base = self.base.borrow_mut();
-        base[0] = r.agents.len() as u32;
-        let generation = r.generation;
-        let population = r.agents.len();
-        let upload = self.backend.upload(
-            &Uint32Array::from(words(&cars).as_slice()),
-            &Uint32Array::from(words(&agents).as_slice()),
-            &Uint32Array::from(words(&params).as_slice()),
-            &Uint32Array::from(base.as_slice()),
-        );
-        drop(base);
-        drop(session);
-        JsFuture::from(upload)
-            .await
-            .map_err(|e| format!("GPU upload: {e:?}"))?;
+            let mut cars = Vec::new();
+            let mut agents = Vec::new();
+            crate::training::export_state_into(
+                &r.agents,
+                &r.world.vehicle,
+                &self.surfaces.borrow(),
+                &mut cars,
+                &mut agents,
+            )?;
+            if r.is_paused() {
+                return Err("WebGPU does not model frozen cars".into());
+            }
+            let first = r.agents.first().ok_or("no agents")?;
+            if first.network.shape != self.shape {
+                return Err("network shape changed; recreate the GPU simulator".into());
+            }
+            let mut params = Vec::new();
+            for a in &r.agents {
+                if a.network.shape != first.network.shape {
+                    return Err("population network shapes differ".into());
+                }
+                params.extend_from_slice(&a.network.params);
+            }
+            let mut base = self.base.borrow_mut();
+            base[0] = r.agents.len() as u32;
+            let generation = r.generation;
+            let population = r.agents.len();
+            let upload = self.backend.upload(
+                &Uint32Array::from(words(&cars).as_slice()),
+                &Uint32Array::from(words(&agents).as_slice()),
+                &Uint32Array::from(words(&params).as_slice()),
+                &Uint32Array::from(base.as_slice()),
+            );
+            (upload, generation, population)
+        };
+        JsFuture::from(upload).await.map_err(|e| format!("GPU upload: {e:?}"))?;
         self.tag.set(Some((generation, self.shared.revision.get())));
         self.population.set(population);
         Ok(())
@@ -451,27 +428,18 @@ fn advance_window(inner: Rc<Inner>, ticks: u32, stop: bool, limit: Option<u32>) 
         }
         inner.busy.set(false);
         inner.shared.busy.set(false);
-        result
-            .map(|n| JsValue::from(n))
-            .map_err(|e| js_error(e).into())
+        result.map(JsValue::from).map_err(|e| js_error(e).into())
     })
 }
-async fn run_window(
-    inner: &Inner,
-    ticks: u32,
-    stop: bool,
-    limit: Option<u32>,
-) -> Result<u32, String> {
+async fn run_window(inner: &Inner, ticks: u32, stop: bool, limit: Option<u32>) -> Result<u32, String> {
     let total = {
         let s = inner.shared.session.borrow();
         let r = &s.runner;
         if limit.is_some() && r.stats_phase != 0 {
             return Err("generation needs statistics phase zero".into());
         }
-        let total = u32::try_from(limit.map_or(ticks as u64, |t| {
-            ((t as u64 / 6 + 2) * 6).saturating_sub(r.tick)
-        }))
-        .map_err(|_| "GPU generation window exceeds u32 range")?;
+        let total = u32::try_from(limit.map_or(ticks as u64, |t| ((t as u64 / 6 + 2) * 6).saturating_sub(r.tick)))
+            .map_err(|_| "GPU generation window exceeds u32 range")?;
         let tick = u32::try_from(r.tick).map_err(|_| "GPU tick exceeds u32 range")?;
         tick.checked_add(total)
             .filter(|&n| n < u32::MAX)
@@ -527,13 +495,9 @@ async fn run_chunk(
             (bits >> 32) as u32,
         ]
     };
-    let value = JsFuture::from(
-        inner
-            .backend
-            .advance(&Uint32Array::from(window.as_slice()), reset),
-    )
-    .await
-    .map_err(|e| format!("WebGPU window: {e:?}"))?;
+    let value = JsFuture::from(inner.backend.advance(&Uint32Array::from(window.as_slice()), reset))
+        .await
+        .map_err(|e| format!("WebGPU window: {e:?}"))?;
     let data = Uint32Array::new(&value).to_vec();
     let n = inner.population.get();
     let car_words = std::mem::size_of::<GpuCar>() / 4;
@@ -551,10 +515,7 @@ async fn run_chunk(
             .collect()
     }
     let cars = decode::<GpuCar>(&data[..n * car_words], car_words);
-    let agents = decode::<GpuAgent>(
-        &data[n * car_words..n * (car_words + agent_words)],
-        agent_words,
-    );
+    let agents = decode::<GpuAgent>(&data[n * car_words..n * (car_words + agent_words)], agent_words);
     let header = &data[n * (car_words + agent_words)..];
     let executed = header[0];
     let transition = header[1];
@@ -576,12 +537,13 @@ async fn run_chunk(
     }
     let mut session = inner.shared.session.borrow_mut();
     let r = &mut session.runner;
-    if cars.iter().any(|c| {
-        c.pair_count as usize > gpu_sim::MAX_PAIRS
-            || c.contact_count as usize > gpu_sim::MAX_CONTACTS
-    }) || agents.iter().any(|a| {
-        a.recent_len as usize > gpu_sim::RECENT || a.recent_start as usize >= gpu_sim::RECENT
-    }) {
+    if cars
+        .iter()
+        .any(|c| c.pair_count as usize > simulation::MAX_PAIRS || c.contact_count as usize > simulation::MAX_CONTACTS)
+        || agents
+            .iter()
+            .any(|a| a.recent_len as usize > simulation::RECENT || a.recent_start as usize >= simulation::RECENT)
+    {
         return Err("GPU returned invalid collision or statistics counts".into());
     }
     if cars.iter().any(|c| {
@@ -593,14 +555,8 @@ async fn run_chunk(
     }
     r.import_state(&cars, &agents, &inner.surfaces.borrow())?;
     r.tick += executed as u64;
-    r.batch_index =
-        (r.batch_index + ((executed - transition) as usize % 8) * r.batches_per_tick()) % 8;
-    inner
-        .shared
-        .revision
-        .set(inner.shared.revision.get().wrapping_add(1));
-    inner
-        .tag
-        .set(Some((r.generation, inner.shared.revision.get())));
+    r.batch_index = (r.batch_index + ((executed - transition) as usize % 8) * r.batches_per_tick()) % 8;
+    inner.shared.revision.set(inner.shared.revision.get().wrapping_add(1));
+    inner.tag.set(Some((r.generation, inner.shared.revision.get())));
     Ok((executed, transition != 0))
 }

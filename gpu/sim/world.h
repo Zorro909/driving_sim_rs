@@ -1,4 +1,4 @@
-// Static track data on the device. `World` is filled by Rust (src/gpu_sim.rs
+// Static track data on the device. `World` is filled by Rust (src/gpu/simulation.rs
 // mirrors it) with host pointers and copied field by field to the device by
 // altd_gpu_world_create.
 #pragma once
@@ -31,7 +31,7 @@ struct ShapeDev {
 };
 
 // Cell lists of the segments that can be nearest to any point of the cell
-// (gpu_sim::near_grid). Points outside the grid use the full scan.
+// (gpu::simulation::near_grid). Points outside the grid use the full scan.
 struct NearGrid {
     double x0, y0, cell;
     uint32_t nx, ny;
@@ -68,7 +68,7 @@ struct World {
     const Vec2* shape_local;
     const Vec2* shape_normals;
     // Shapes per cell whose box (grown by 1) meets the cell grown by
-    // shape_margin, ascending (gpu_sim::shape_grid).
+    // shape_margin, ascending (gpu::simulation::shape_grid).
     NearGrid shape_grid;
     double shape_margin;
     // Track::path as (x, y) pairs, path_points of them (Track::path_position).
