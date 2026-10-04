@@ -125,6 +125,8 @@ jobs:
         run: git diff --exit-code -- wasm/test
       - name: Build diagnostic serial and threaded packages
         run: |
+          # rust-cache restores target/ without package files, which build.sh refuses to replace.
+          rm -rf target/wasm-thread-test
           TEST_THREADS=1 THREADS=1 OUT=target/wasm-thread-test/threads wasm/build.sh
           TEST_THREADS=1 THREADS=0 OUT=target/wasm-thread-test/single wasm/build.sh
       - name: Generate the native thread reference
