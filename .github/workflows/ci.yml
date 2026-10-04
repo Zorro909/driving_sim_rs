@@ -81,7 +81,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Install the pinned threaded toolchain
-        run: rustup toolchain install "$(cat wasm/thread-toolchain)" --profile minimal --component rust-src --target wasm32-unknown-unknown
+        run: rustup toolchain install "$(cat wasm/thread-toolchain)" --profile minimal --component rust-src,clippy --target wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm-x86-64-webgpu-nightly-2025-11-15
@@ -104,6 +104,15 @@ jobs:
             cargo install wasm-bindgen-cli --version "$version" --locked --root target/wasm-bindgen-cli
           fi
           echo "$GITHUB_WORKSPACE/target/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - name: Lint threaded WASM
+        env:
+          RUSTFLAGS: --cfg=web_sys_unstable_apis -C target-feature=+atomics,+bulk-memory
+        run: |
+          toolchain=$(cat wasm/thread-toolchain)
+          for features in wasm,wasm-threads wasm,wasm-threads,wasm-thread-test; do
+            cargo +"$toolchain" clippy --locked -Z build-std=panic_abort,std --target-dir target/wasm-threads \
+              --target wasm32-unknown-unknown --no-default-features --features "$features" -- -D warnings
+          done
       - name: Build the library and serial package
         run: |
           cargo build --locked --lib --target wasm32-unknown-unknown --no-default-features --features wasm
@@ -112,6 +121,8 @@ jobs:
         env:
           RUSTFLAGS: -C target-cpu=x86-64
         run: cargo run --locked --release --example wasm_reference -- --generate-fixtures
+      - name: Check committed browser references
+        run: git diff --exit-code -- wasm/test
       - name: Build diagnostic serial and threaded packages
         run: |
           TEST_THREADS=1 THREADS=1 OUT=target/wasm-thread-test/threads wasm/build.sh

@@ -7,6 +7,8 @@ use altd_sim::{
     track::world::World,
 };
 use serde_json::Value;
+#[path = "support/oracle.rs"]
+mod oracle;
 fn f(v: &Value) -> f64 {
     v.as_f64().unwrap() as f32 as f64
 }
@@ -80,7 +82,7 @@ fn check_sensor_sample(data: &Value, world: &World, car: &Car, tick: usize, phas
 }
 fn replay(data: &str, check_contacts: bool) {
     let data: Value = serde_json::from_str(data).unwrap();
-    let mut scene = data["scene"].clone();
+    let mut scene = oracle::scene(&data);
     let mut w = World::from_scene(&scene);
     let eliminate = data["eliminate"].as_bool().unwrap_or(false);
     let states = data["states"].as_array().unwrap();
@@ -264,7 +266,7 @@ fn replay(data: &str, check_contacts: bool) {
 }
 #[test]
 fn standalone_car_matches_native_tilemap_contacts_and_reset() {
-    replay(include_str!("fixtures/native_tilemap_single600.json"), true);
+    replay(include_str!("fixtures/native_tilemap_generated_single600.json"), true);
 }
 #[test]
 fn free_drive_matches_every_captured_bit() {
@@ -315,11 +317,11 @@ fn offset_collision_shapes_and_centers_of_mass_match_native_contacts() {
 }
 #[test]
 fn crossing_onto_dirt_matches_original_vehicle() {
-    replay(include_str!("fixtures/native_dirt180.json"), false);
+    replay(include_str!("fixtures/native_generated_dirt180.json"), false);
 }
 #[test]
 fn ice_drive_matches_original_vehicle() {
-    replay(include_str!("fixtures/native_ice180.json"), false);
+    replay(include_str!("fixtures/native_generated_ice180.json"), false);
 }
 #[test]
 fn simultaneous_corner_contacts_match_original_engine() {
@@ -327,7 +329,7 @@ fn simultaneous_corner_contacts_match_original_engine() {
 }
 #[test]
 fn waiting_preserves_wheels_while_native_basis_settles() {
-    let data: Value = serde_json::from_str(include_str!("fixtures/native_warmup_a01.json")).unwrap();
+    let data: Value = serde_json::from_str(include_str!("fixtures/native_warmup_unwrapped.json")).unwrap();
     let world = World::from_scene(&data["scene"]);
     let position = vec(&data["states"][0]["position"]);
     let mut car = Car::new(&world, position, data["reset_rotation"].as_f64().unwrap());
@@ -347,7 +349,7 @@ fn waiting_preserves_wheels_while_native_basis_settles() {
         car.passive_step(&world, DT, false);
     }
     assert_eq!(car.tick, 0);
-    replay(include_str!("fixtures/native_warmup_a01.json"), false);
+    replay(include_str!("fixtures/native_warmup_unwrapped.json"), false);
 }
 
 #[test]
@@ -484,7 +486,7 @@ fn network_uses_game_order_and_windows_activation() {
 
 #[test]
 fn native_curve_baking_and_samples_match_shipped_engine() {
-    let data: Value = serde_json::from_str(include_str!("fixtures/native_curve_a07.json")).unwrap();
+    let data: Value = serde_json::from_str(include_str!("fixtures/native_generated_curve_mixed.json")).unwrap();
     let curve = altd_sim::track::curve::Curve::from_json(&data["curve"]);
     let baked = data["curve"]["baked"].as_array().unwrap();
     assert_eq!(curve.points.len(), baked.len());
@@ -546,7 +548,7 @@ fn native_sensor_bits_cover_pending_requests_and_property_changes() {
 
 #[test]
 fn track_sensor_bits_follow_deferred_resets() {
-    replay(include_str!("fixtures/native_path_sensors32.json"), true);
+    replay(include_str!("fixtures/native_generated_path_sensors32.json"), true);
 }
 
 #[test]
@@ -581,5 +583,5 @@ fn generated_world_matches_original_tilemap_drive_and_reset() {
 
 #[test]
 fn ordered_sensor_parameters_and_duplicates_match_game() {
-    replay(include_str!("fixtures/native_ordered_sensors32.json"), true);
+    replay(include_str!("fixtures/native_generated_ordered_sensors32.json"), true);
 }

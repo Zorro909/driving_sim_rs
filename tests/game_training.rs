@@ -193,7 +193,7 @@ fn generation_stop_matches_original_scheduler_callbacks() {
 
 #[test]
 fn installed_generation_reaches_native_waiting_state_before_drive() {
-    let oracle: Value = serde_json::from_str(include_str!("fixtures/native_warmup_a01.json")).unwrap();
+    let oracle: Value = serde_json::from_str(include_str!("fixtures/native_warmup_unwrapped.json")).unwrap();
     let first = &oracle["states"][0];
     let mut runner = tiny_runner();
     runner.rotation = oracle["reset_rotation"].as_f64().unwrap();
@@ -395,7 +395,8 @@ fn process_hash_seed_matches_original_track_catalog_and_generation() {
 }
 #[test]
 fn exact_sensor_export_retains_order_and_parameters() {
-    let fixture: Value = serde_json::from_str(include_str!("fixtures/native_ordered_sensors32.json")).unwrap();
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/native_generated_ordered_sensors32.json")).unwrap();
     let model = serde_json::json!({"sensor_layout":fixture["sensor_layout"]});
     let network = serde_json::json!({"inputs":fixture["sensor_layout"]["names"]});
     let layout = altd_sim::training::SensorLayout::from_exports(&network, &model);

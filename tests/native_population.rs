@@ -8,10 +8,13 @@ use altd_sim::{
 use serde_json::Value;
 use std::sync::Arc;
 
+#[path = "support/oracle.rs"]
+mod oracle;
+
 fn check_game_population(fixture: &str, expected: u64) {
     let data: Value = serde_json::from_str(fixture).unwrap();
     let result = game_population::verify(
-        &data["scene"],
+        &oracle::scene(&data),
         data["states"].as_array().unwrap(),
         data["controls"].as_array().unwrap(),
     );
@@ -21,17 +24,23 @@ fn check_game_population(fixture: &str, expected: u64) {
 
 #[test]
 fn coalesced_track_initialization_preserves_native_cell_order() {
-    check_game_population(include_str!("fixtures/native_tilemap_coalesced600.json"), 1797);
+    check_game_population(
+        include_str!("fixtures/native_tilemap_generated_coalesced600.json"),
+        1797,
+    );
 }
 
 #[test]
 fn tilemap_redraw_preserves_native_wall_lifecycle() {
-    check_game_population(include_str!("fixtures/native_tilemap_redraw600.json"), 1797);
+    check_game_population(include_str!("fixtures/native_tilemap_generated_redraw600.json"), 1797);
 }
 
 #[test]
 fn track_redraw_and_population_resize_preserve_deferred_order() {
-    check_game_population(include_str!("fixtures/native_tilemap_redraw_resize600.json"), 2097);
+    check_game_population(
+        include_str!("fixtures/native_tilemap_generated_redraw_resize600.json"),
+        2097,
+    );
 }
 
 fn bits(v: F2) -> [u32; 2] {
@@ -118,12 +127,18 @@ fn packed_game_population_preserves_reset_callbacks_and_contacts() {
     check_game_population(include_str!("fixtures/native_game_population180.json"), 537);
 }
 #[test]
-fn original_tilemap_population_matches_native_drives_and_resets() {
+fn generated_tilemap_population_matches_native_drives_and_resets() {
     for (fixture, expected) in [
-        (include_str!("fixtures/native_tilemap_a01_drive.json"), 537),
-        (include_str!("fixtures/native_tilemap_b06_drive.json"), 537),
-        (include_str!("fixtures/native_tilemap_a01_contact600.json"), 1797),
-        (include_str!("fixtures/native_tilemap_b06_contact600.json"), 1797),
+        (include_str!("fixtures/native_tilemap_generated_slot05_drive.json"), 537),
+        (include_str!("fixtures/native_tilemap_generated_slot06_drive.json"), 537),
+        (
+            include_str!("fixtures/native_tilemap_generated_slot05_contact600.json"),
+            1797,
+        ),
+        (
+            include_str!("fixtures/native_tilemap_generated_slot06_contact600.json"),
+            1797,
+        ),
     ] {
         check_game_population(fixture, expected);
     }
@@ -131,8 +146,14 @@ fn original_tilemap_population_matches_native_drives_and_resets() {
 #[test]
 fn packed_vehicle_resize_preserves_mixed_native_pair_orientation() {
     for (fixture, expected) in [
-        (include_str!("fixtures/native_tilemap_a01_resize600.json"), 2097),
-        (include_str!("fixtures/native_tilemap_b06_resize600.json"), 2097),
+        (
+            include_str!("fixtures/native_tilemap_generated_slot05_resize600.json"),
+            2097,
+        ),
+        (
+            include_str!("fixtures/native_tilemap_generated_slot06_resize600.json"),
+            2097,
+        ),
     ] {
         check_game_population(fixture, expected);
     }
@@ -140,8 +161,11 @@ fn packed_vehicle_resize_preserves_mixed_native_pair_orientation() {
 #[test]
 fn original_vehicle_types_preserve_native_tilemap_contact_bits() {
     for (fixture, expected) in [
-        (include_str!("fixtures/native_tilemap_truck600.json"), 1797),
-        (include_str!("fixtures/native_tilemap_snowmobile600.json"), 1797),
+        (include_str!("fixtures/native_tilemap_generated_truck600.json"), 1797),
+        (
+            include_str!("fixtures/native_tilemap_generated_snowmobile600.json"),
+            1797,
+        ),
     ] {
         check_game_population(fixture, expected);
     }

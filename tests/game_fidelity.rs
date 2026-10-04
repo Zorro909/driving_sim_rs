@@ -82,9 +82,9 @@ fn replay_transition(world: &World, trace: &Value) -> Car {
     car
 }
 #[test]
-fn a07_tick_four_reproduces_recorded_free_motion() {
+fn recorded_tick_four_reproduces_free_motion() {
     let world = free_world();
-    let trace: Value = serde_json::from_str(include_str!("fixtures/a07_tick4.json")).unwrap();
+    let trace: Value = serde_json::from_str(include_str!("fixtures/recorded_rally_tick4.json")).unwrap();
     let car = replay_transition(&world, &trace);
     let expected = &trace["frames"][2];
     assert!(car.wall_contacts.is_empty());
@@ -95,17 +95,17 @@ fn a07_tick_four_reproduces_recorded_free_motion() {
 }
 
 #[test]
-fn a07_tick_two_reproduces_velocity_bits() {
+fn recorded_tick_two_reproduces_velocity_bits() {
     let world = free_world();
-    let trace: Value = serde_json::from_str(include_str!("fixtures/a07_tick2.json")).unwrap();
+    let trace: Value = serde_json::from_str(include_str!("fixtures/recorded_rally_tick2.json")).unwrap();
     let car = replay_transition(&world, &trace);
     assert_eq!(car.velocity, vector(&trace["frames"][2]["velocity"]));
 }
 
 #[test]
-fn b06_tick_four_reproduces_rotation_bits() {
+fn recorded_turn_reproduces_rotation_bits() {
     let world = free_world();
-    let trace: Value = serde_json::from_str(include_str!("fixtures/b06_tick4.json")).unwrap();
+    let trace: Value = serde_json::from_str(include_str!("fixtures/recorded_rally_turn4.json")).unwrap();
     let car = replay_transition(&world, &trace);
     assert_eq!(car.rotation, float(&trace["frames"][2]["rotation"]));
 }
@@ -216,10 +216,10 @@ fn trace_restoration_preserves_basis_sensors_and_contact_impulses() {
 }
 
 #[test]
-fn a07_recorded_velocity_inputs_use_native_float_remap() {
+fn recorded_velocity_inputs_use_native_float_remap() {
     use altd_sim::physics::car::{Sensor, SensorScratch};
     let world = World::from_scene(&scene());
-    let trace: Value = serde_json::from_str(include_str!("fixtures/a07_tick4.json")).unwrap();
+    let trace: Value = serde_json::from_str(include_str!("fixtures/recorded_rally_tick4.json")).unwrap();
     // Game refreshes inputs on tick 3 from the body state at tick 2.
     let car = altd_sim::physics::trace_state::car_from_frame(&world, &trace["frames"][0], None, None);
     let actual = trace["frames"][1]["sensors"].as_array().unwrap();

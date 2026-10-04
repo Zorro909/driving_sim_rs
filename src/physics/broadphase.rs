@@ -790,33 +790,32 @@ impl BroadPhase {
 mod tests {
     use super::*;
     #[test]
-    fn original_tilemap_deferred_wall_query_order() {
+    fn generated_tilemap_deferred_wall_query_order() {
         for data in [
-            include_str!("../../tests/fixtures/native_tilemap_a01.json"),
-            include_str!("../../tests/fixtures/native_tilemap_b06.json"),
+            include_str!("../../tests/fixtures/native_tilemap_generated_slot05.json"),
+            include_str!("../../tests/fixtures/native_tilemap_generated_slot06.json"),
         ] {
             let data: serde_json::Value = serde_json::from_str(data).unwrap();
-            let walls: Vec<_> = data["walls"]
-                .as_array()
-                .unwrap()
+            let recipe = &data["recipe"];
+            let settings = serde_json::from_str(include_str!("../../assets/random_track_settings.json")).unwrap();
+            let template = serde_json::from_str(include_str!("../../assets/scenes/rally_template.json")).unwrap();
+            let (_, scene) = crate::track::training_tracks::training_scene_at(
+                &template,
+                &settings,
+                None,
+                recipe["seed"].as_i64().unwrap(),
+                recipe["generation"].as_u64().unwrap(),
+                recipe["slot"].as_u64().unwrap() as usize,
+            )
+            .unwrap();
+            let world = crate::track::world::World::from_scene(&scene);
+            let walls: Vec<_> = world
+                .track
+                .shapes
                 .iter()
-                .map(|w| {
-                    let points: Vec<_> = w["world_points"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(crate::track::curve::json_vector)
-                        .collect();
-                    Aabb {
-                        min: F2 {
-                            x: points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min),
-                            y: points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min),
-                        },
-                        max: F2 {
-                            x: points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max),
-                            y: points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max),
-                        },
-                    }
+                .map(|shape| Aabb {
+                    min: F2::from(shape.min),
+                    max: F2::from(shape.max),
                 })
                 .collect();
             let mut tree = Tree::new(&walls);

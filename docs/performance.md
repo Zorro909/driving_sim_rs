@@ -28,7 +28,7 @@ The runner works from any directory, keeps every JSON sample and reports medians
 
 ## Historical HIP measurements
 
-AMD Radeon RX 7900 XTX, gfx1100, HIP 7.1.52802, ROCm clang 20 and Ryzen 9 7950X with eight Rayon workers. Inputs were a B06 Rally scene and a frozen 8,192-network checkpoint, repeated for larger populations. Shape was `20,16,16,16,16,12,12,8,5`, with 1,661 double parameters per car and two inference batches. The desktop remained active.
+AMD Radeon RX 7900 XTX, gfx1100, HIP 7.1.52802, ROCm clang 20 and Ryzen 9 7950X with eight Rayon workers. Inputs were a captured Rally campaign scene and a frozen 8,192-network checkpoint, repeated for larger populations. Shape was `20,16,16,16,16,12,12,8,5`, with 1,661 double parameters per car and two inference batches. The desktop remained active.
 
 Full generation medians after one warmup and three measured runs were 2.094 seconds at 8,192 cars, 5.715 at 32,768 and 40.315 at 262,144. Wall and idle elimination were disabled; the 5,400-tick limit ended at statistics callback 5,406. Timers included packing, transfers, simulation and state import, and excluded reset, hashing, reproduction and checkpoint I/O. A later kernel investigation recorded production wall times of about 1.86, 4.93 and 36.2 seconds with unchanged digests, but did not record the same repeated-median protocol. Treat those later values as diagnostic observations.
 
