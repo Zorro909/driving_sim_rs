@@ -2,7 +2,7 @@
 // Runs wasm/test/index.html in headless Chromium: serves the repository root
 // on a local port and prints the page's report. Exits 1 on any mismatch.
 // Needs wasm/pkg (wasm/build.sh), wasm/test/reference.json
-// (cargo run --release --example wasm_reference) and Playwright with its
+// (cargo run --release --example wasm_reference -- --generate-fixtures) and Playwright with its
 // Chromium (npm i -g playwright && npx playwright install chromium).
 // CHROMIUM=/path/to/chrome overrides the browser; GPU=hardware uses Vulkan
 // and rejects software adapters, GPU=software selects SwiftShader (default).

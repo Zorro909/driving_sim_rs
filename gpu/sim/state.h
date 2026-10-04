@@ -1,5 +1,5 @@
 // Host/device layouts of the simulation state, mirrored field by field by
-// #[repr(C)] structs in src/gpu.rs. Every car value the CPU keeps as f64 is
+// #[repr(C)] structs in src/gpu/simulation.rs. Every car value the CPU keeps as f64 is
 // float32-representable (the exporter checks), so cars store f32.
 #pragma once
 #include <cstdint>

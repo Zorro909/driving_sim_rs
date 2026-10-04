@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "CPU game-fidelity simulator and trainer for AI Learns To Drive"
 license = "MIT"
+repository = "https://github.com/Zorro909/driving_sim_rs"
+readme = "README.md"
+keywords = ["simulation", "driving", "training", "neural-network", "wasm"]
+categories = ["simulation", "science", "command-line-utilities"]
+rust-version = "1.93"
+exclude = ["tests/fixtures/", "wasm/test/"]
 
 [lib]
 # Keep native test artifacts distinct. wasm/build.sh selects cdylib explicitly.
@@ -41,7 +47,7 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# dlopen of the HIP simulator (src/gpu.rs) and process statistics in the CLI.
+# dlopen of the HIP simulator (src/gpu/hip.rs) and process statistics in the CLI.
 libc = "0.2"
 sha2 = "0.10"
 
@@ -56,5 +62,5 @@ debug = "line-tables-only"
 
 [[bin]]
 name = "altd-sim"
-path = "src/bin/altd-sim.rs"
+path = "src/bin/altd-sim/main.rs"
 required-features = ["cli"]

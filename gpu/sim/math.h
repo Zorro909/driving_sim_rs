@@ -1,5 +1,5 @@
-// Bit-exact device ports of the CPU math in src/native_math.rs,
-// src/godot_math.rs (managed_sin_cos), src/double_math.rs and src/network.rs.
+// Bit-exact device ports of the CPU math in src/math/native_math.rs,
+// src/math/godot_math.rs (managed_sin_cos), src/math/double_math.rs and src/nn/network.rs.
 // Build with -ffp-contract=off: a fused multiply-add rounds once and breaks
 // bit equality. Arguments outside the ported domains set an `err` bit instead
 // of taking the rare large-argument paths of the CPU code.
@@ -415,7 +415,7 @@ __device__ inline double game_tanh_branchy(double value) {
 // lanes of a wave never serialize the tanh ranges or the expm1 cases. Each
 // lane's selected expression is exactly what the scalar code evaluates on
 // that path; unselected values are computed and dropped. This is the scalar
-// form of `tanh4`/`expm1_tanh` in src/network_simd.rs, whose CPU tests
+// form of `tanh4`/`expm1_tanh` in src/nn/network_simd.rs, whose CPU tests
 // compare it with the scalar functions bit for bit over every branch,
 // threshold and special value.
 

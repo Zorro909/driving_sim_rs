@@ -1,5 +1,5 @@
 {
- "source": "SensorsEditor.CalculateSensorLength(float) from the shipped AILearnsToDrive.dll, invoked under Windows .NET 8.0.2 in Proton Hotfix wine (experiments/driving_sim_rs_fidelity/vision_length_probe).",
+ "source": "SensorsEditor.CalculateSensorLength(float) from the shipped AILearnsToDrive.dll, invoked under Windows .NET 8.0.2 in Proton Hotfix wine.",
  "rows_are": "[degrees, float32 bits of the length]",
  "rows": [
   [-180, 1145569280],

@@ -1,0 +1,103 @@
+{
+  "vehicle": {
+    "type": "Formula",
+    "mass": 2,
+    "inertia_property": 0,
+    "inertia_server": 1038.1666259765625,
+    "shape_size": [
+      73,
+      30
+    ],
+    "shape_position": [
+      0,
+      0
+    ],
+    "shape_rotation": 1.5708,
+    "gravity_scale": 1,
+    "linear_damp": 0,
+    "angular_damp": 0,
+    "max_contacts_reported": 4,
+    "friction": 0.95,
+    "bounce": 0.1,
+    "grip": 2,
+    "steering_speed": 0.4000000059604645,
+    "center_steering": true,
+    "air_resistance": 0.10000000149011612,
+    "max_velocity": 1200,
+    "surfaces": {
+      "asphalt": {
+        "grip": 1,
+        "power": 1,
+        "steering": 1
+      },
+      "dirt": {
+        "grip": 0.8,
+        "power": 0.5,
+        "steering": 1
+      },
+      "ice": {
+        "grip": 0.3,
+        "power": 0.5,
+        "steering": 1
+      }
+    },
+    "wheels": [
+      {
+        "position": [
+          -11,
+          -17
+        ],
+        "steering": true,
+        "max_angle_deg": 35,
+        "power": 0,
+        "brake_power": 3.5,
+        "handbrake_power": 0
+      },
+      {
+        "position": [
+          11,
+          -17
+        ],
+        "steering": true,
+        "max_angle_deg": 35,
+        "power": 0,
+        "brake_power": 3.5,
+        "handbrake_power": 0
+      },
+      {
+        "position": [
+          -13,
+          29
+        ],
+        "steering": false,
+        "max_angle_deg": 0,
+        "power": 6,
+        "brake_power": 3,
+        "handbrake_power": 3
+      },
+      {
+        "position": [
+          13,
+          29
+        ],
+        "steering": false,
+        "max_angle_deg": 0,
+        "power": 6,
+        "brake_power": 3,
+        "handbrake_power": 3
+      }
+    ]
+  },
+  "track": {
+    "name": "Generated track template",
+    "tiles": [],
+    "path": [],
+    "walls": [],
+    "physics_shapes": []
+  },
+  "reset_position": [
+    0,
+    0
+  ],
+  "reset_rotation": 0
+}

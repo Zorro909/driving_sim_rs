@@ -4,7 +4,7 @@
 #include <cstring>
 #include <ctime>
 // libaltd_gpu.so: GPU parts of the fidelity simulator behind a C ABI.
-// Rust loads it with dlopen (src/gpu.rs); examples/gpu_check.rs compares
+// Rust loads it with dlopen (src/gpu/hip.rs); examples/gpu_check/main.rs compares
 // every part bit for bit with the CPU code.
 #include <hip/hip_runtime.h>
 #include <cstdint>

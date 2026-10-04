@@ -20,8 +20,19 @@ def main():
     parser.add_argument("--training", action="store_true", help="include turnover across consecutive generations")
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--binary", type=Path, help="gpu_check executable (also supports saved baselines)")
+    parser.add_argument("--checkpoint", type=Path, help="saved train-scratch population; otherwise use the fixed generated fixture")
+    parser.add_argument("--scene", type=Path, help="explicit scene instead of the generated track")
+    parser.add_argument("--spawn-trace", type=Path, help="spawn trace for an explicit scene")
+    parser.add_argument("--network", type=Path, help="sensor/control names")
+    parser.add_argument("--model", type=Path, help="vehicle sensor model")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    for key, variable in [("checkpoint", "ALTD_GPU_CKPT"), ("scene", "ALTD_GPU_SCENE"),
+                          ("spawn_trace", "ALTD_GPU_SPAWN"), ("network", "ALTD_GPU_NETWORK"),
+                          ("model", "ALTD_GPU_MODEL")]:
+        value = getattr(args, key)
+        if value is not None:
+            os.environ[variable] = str(value.resolve())
     root = Path(__file__).resolve().parent.parent
     library = args.library.resolve()
     binary = args.binary.resolve() if args.binary else root / "target/release/examples/gpu_check"
@@ -47,9 +58,15 @@ def main():
         "eliminate": not args.no_elimination,
         "results": [],
     }
-    checkpoint = Path(os.environ.get("ALTD_GPU_CKPT", "/tmp/altd-gpu-ckpt"))
-    metadata = json.loads((checkpoint / "checkpoint.json").read_text())
-    report["checkpoint_sha256"] = hashlib.sha256((checkpoint / metadata["population_file"]).read_bytes()).hexdigest()
+    report["fixture_inputs"] = {key: os.environ[key] for key in [
+        "ALTD_GPU_CKPT", "ALTD_GPU_SCENE", "ALTD_GPU_SPAWN", "ALTD_GPU_NETWORK", "ALTD_GPU_MODEL"
+    ] if key in os.environ}
+    if "ALTD_GPU_CKPT" in os.environ:
+        checkpoint = Path(os.environ["ALTD_GPU_CKPT"])
+        metadata = json.loads((checkpoint / "checkpoint.json").read_text())
+        report["checkpoint_sha256"] = hashlib.sha256((checkpoint / metadata["population_file"]).read_bytes()).hexdigest()
+    else:
+        report["population_recipe"] = {"initialization": "Xavier", "seed": 1, "shape": [20,16,16,16,16,12,12,8,5]}
     for cars in args.cars:
         env = dict(os.environ, ALTD_GPU_LIB=str(library), ALTD_GPU_BENCH_CARS=str(cars),
                    ALTD_GPU_BENCH_TICKS=str(args.ticks), ALTD_GPU_BENCH_SAMPLES=str(args.samples),

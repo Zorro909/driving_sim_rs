@@ -1,0 +1,494 @@
+{
+  "source": "Recorded Rally vehicle states from AI Learns To Drive. The capture harness is not distributed. Track geometry is omitted.",
+  "frames": [
+    {
+      "tick": 661,
+      "engine_frame": 8363,
+      "generation_time": 17.1,
+      "position": [
+        4179.525,
+        3591.7954
+      ],
+      "rotation": -0.2059238,
+      "velocity": [
+        -218.16641,
+        -187.41559
+      ],
+      "angular_velocity": -6.8518934,
+      "cached_position": [
+        4179.525,
+        3591.7954
+      ],
+      "cached_velocity": [
+        -218.16641,
+        -187.41559
+      ],
+      "cached_acceleration": [
+        87.041016,
+        37.78032
+      ],
+      "boost_energy": 0,
+      "active": true,
+      "collision_count": 10,
+      "physics_contacts": [
+        {
+          "local_position": [
+            4168.3984,
+            3626.5576
+          ],
+          "local_normal": [
+            0.9543991,
+            -0.2985335
+          ],
+          "collider_position": [
+            4172.026,
+            3625.423
+          ],
+          "impulse": [
+            0,
+            0
+          ],
+          "collider_shape": 8,
+          "collider_rid": "RID(439211945623564)"
+        }
+      ],
+      "score": 51.35560035705566,
+      "wheel_angles": [
+        19.614374,
+        19.614374,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": 0.9999999999956486
+        },
+        {
+          "name": "Acceleration",
+          "value": 1
+        },
+        {
+          "name": "Handbrake",
+          "value": -0.9999999999999146
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999912330556
+        },
+        {
+          "name": "Boost",
+          "value": 0.9971358869314503
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.960523247718811
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.887830913066864
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.9378840327262878
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.917312741279602
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.861665666103363
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.6731891632080078
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0.4361628293991089
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.6329613327980042
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.6054075956344604
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.5344219207763672
+        },
+        {
+          "name": "AngVel",
+          "value": 0.5373589992523193
+        },
+        {
+          "name": "Boost",
+          "value": 0
+        },
+        {
+          "name": "Dir",
+          "value": 0.9249335527420044
+        },
+        {
+          "name": "Grip",
+          "value": 0.41999998688697815
+        },
+        {
+          "name": "VelF",
+          "value": 0.23224616050720215
+        },
+        {
+          "name": "VelS",
+          "value": -0.5997548699378967
+        },
+        {
+          "name": "Curve",
+          "value": 0.12594299018383026
+        }
+      ]
+    },
+    {
+      "tick": 662,
+      "engine_frame": 8364,
+      "generation_time": 17.1,
+      "position": [
+        4175.919,
+        3588.6433
+      ],
+      "rotation": -0.31488305,
+      "velocity": [
+        -216.34448,
+        -189.12074
+      ],
+      "angular_velocity": -6.5375533,
+      "cached_position": [
+        4175.919,
+        3588.6433
+      ],
+      "cached_velocity": [
+        -216.34448,
+        -189.12074
+      ],
+      "cached_acceleration": [
+        1.8219299,
+        -1.7051544
+      ],
+      "boost_energy": 0,
+      "active": true,
+      "collision_count": 10,
+      "physics_contacts": [
+        {
+          "local_position": [
+            4171.67,
+            3625.1052
+          ],
+          "local_normal": [
+            0.9543959,
+            -0.298544
+          ],
+          "collider_position": [
+            4171.9033,
+            3625.0322
+          ],
+          "impulse": [
+            242.64134,
+            119.18939
+          ],
+          "collider_shape": 8,
+          "collider_rid": "RID(439211945623564)"
+        }
+      ],
+      "score": 51.35560035705566,
+      "wheel_angles": [
+        20.275782,
+        20.275782,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": 0.9999999999956486
+        },
+        {
+          "name": "Acceleration",
+          "value": 1
+        },
+        {
+          "name": "Handbrake",
+          "value": -0.9999999999999146
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999912330556
+        },
+        {
+          "name": "Boost",
+          "value": 0.9971358869314503
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.960523247718811
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.887830913066864
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.9378840327262878
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.917312741279602
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.861665666103363
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.6731891632080078
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0.4361628293991089
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.6329613327980042
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.6054075956344604
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.5344219207763672
+        },
+        {
+          "name": "AngVel",
+          "value": 0.5373589992523193
+        },
+        {
+          "name": "Boost",
+          "value": 0
+        },
+        {
+          "name": "Dir",
+          "value": 0.9249335527420044
+        },
+        {
+          "name": "Grip",
+          "value": 0.41999998688697815
+        },
+        {
+          "name": "VelF",
+          "value": 0.23224616050720215
+        },
+        {
+          "name": "VelS",
+          "value": -0.5997548699378967
+        },
+        {
+          "name": "Curve",
+          "value": 0.12594299018383026
+        }
+      ]
+    },
+    {
+      "tick": 663,
+      "engine_frame": 8365,
+      "generation_time": 17.1,
+      "position": [
+        4175.7046,
+        3587.097
+      ],
+      "rotation": -0.30470005,
+      "velocity": [
+        -12.875311,
+        -92.7899
+      ],
+      "angular_velocity": 0.6109809,
+      "cached_position": [
+        4175.7046,
+        3587.097
+      ],
+      "cached_velocity": [
+        -12.875311,
+        -92.7899
+      ],
+      "cached_acceleration": [
+        203.46918,
+        96.33084
+      ],
+      "boost_energy": 0,
+      "active": true,
+      "collision_count": 10,
+      "physics_contacts": [
+        {
+          "local_position": [
+            4152.5312,
+            3563.6582
+          ],
+          "local_normal": [
+            0.95440036,
+            -0.29852957
+          ],
+          "collider_position": [
+            4152.6904,
+            3563.6084
+          ],
+          "impulse": [
+            0,
+            0
+          ],
+          "collider_shape": 8,
+          "collider_rid": "RID(439211945623564)"
+        }
+      ],
+      "score": 51.35560035705566,
+      "wheel_angles": [
+        20.771265,
+        20.771265,
+        0,
+        0
+      ],
+      "outputs": [
+        {
+          "name": "Steering",
+          "value": 0.9999999999956486
+        },
+        {
+          "name": "Acceleration",
+          "value": 1
+        },
+        {
+          "name": "Handbrake",
+          "value": -0.9999999999999146
+        },
+        {
+          "name": "Brake",
+          "value": -0.9999999912330556
+        },
+        {
+          "name": "Boost",
+          "value": 0.9971358869384767
+        }
+      ],
+      "sensors": [
+        {
+          "name": "\u2191 -135\u00b0",
+          "value": 0.959746778011322
+        },
+        {
+          "name": "\u2191 -90\u00b0",
+          "value": 0.9121991991996765
+        },
+        {
+          "name": "\u2191 -60\u00b0",
+          "value": 0.9597195982933044
+        },
+        {
+          "name": "\u2191 -35\u00b0",
+          "value": 0.9564553499221802
+        },
+        {
+          "name": "\u2191 -20\u00b0",
+          "value": 0.9421788454055786
+        },
+        {
+          "name": "\u2191 -10\u00b0",
+          "value": 0.9222280979156494
+        },
+        {
+          "name": "\u2191 0\u00b0",
+          "value": 0.8667263984680176
+        },
+        {
+          "name": "\u2191 10\u00b0",
+          "value": 0.5915482044219971
+        },
+        {
+          "name": "\u2191 20\u00b0",
+          "value": 0
+        },
+        {
+          "name": "\u2191 35\u00b0",
+          "value": 0.28564465045928955
+        },
+        {
+          "name": "\u2191 60\u00b0",
+          "value": 0.5544644594192505
+        },
+        {
+          "name": "\u2191 90\u00b0",
+          "value": 0.04943227767944336
+        },
+        {
+          "name": "\u2191 135\u00b0",
+          "value": 0.23031961917877197
+        },
+        {
+          "name": "AngVel",
+          "value": -1
+        },
+        {
+          "name": "Boost",
+          "value": 0
+        },
+        {
+          "name": "Dir",
+          "value": 0.9973663687705994
+        },
+        {
+          "name": "Grip",
+          "value": 0.41999998688697815
+        },
+        {
+          "name": "VelF",
+          "value": 0.2468252182006836
+        },
+        {
+          "name": "VelS",
+          "value": -0.2942713499069214
+        },
+        {
+          "name": "Curve",
+          "value": 0.11647874861955643
+        }
+      ]
+    }
+  ]
+}

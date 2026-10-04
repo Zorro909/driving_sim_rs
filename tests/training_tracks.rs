@@ -1,12 +1,11 @@
-use altd_sim::training_tracks::{RandomTrainingTrackSettings, TrainingTrackBuffer};
+use altd_sim::track::training_tracks::{RandomTrainingTrackSettings, TrainingTrackBuffer};
 use serde_json::{json, Value};
 
 // HIP graph capture uses the process's legacy stream; GPU cases must not overlap.
 static GPU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn template() -> Value {
-    serde_json::from_str::<Value>(include_str!("fixtures/native_free180.json")).unwrap()["scene"]
-        .clone()
+    serde_json::from_str::<Value>(include_str!("fixtures/native_free180.json")).unwrap()["scene"].clone()
 }
 
 #[test]
@@ -48,19 +47,51 @@ fn batched_track_slots_are_queue_independent_and_keep_track_zero() {
             let track = a.next_track().unwrap();
             assert_eq!((track.generation, track.track_index), (generation, track_index));
             assert_eq!(track.track, b.next_track().unwrap().track);
-            if track_index == 0 { assert_eq!(track.track, single.next_track().unwrap().track); }
+            if track_index == 0 {
+                assert_eq!(track.track, single.next_track().unwrap().track);
+            }
         }
     }
 }
 
-fn batch_runner(world: std::sync::Arc<altd_sim::world::World>, position: altd_sim::vec2::V2,
-                rotation: f64) -> altd_sim::training::TrainingRunner {
-    use altd_sim::{car::Sensor, evolution::EvolutionSettings, network::Network, pyrandom::PyRandom,
-                   training::{SensorLayout, TrainingRunner}};
-    let settings = EvolutionSettings { population: 17, selection_size: 4, mutation_rate: 0.01, ..Default::default() };
-    let layout = SensorLayout { names: vec!["ray".into()], sensors: vec![Sensor::Raycast { degrees: 0.0, length: 800.0 }] };
-    let mut runner = TrainingRunner::new(world, position, rotation, layout, &["Acceleration".into(), "Steering".into()],
-                                         settings, PyRandom::new(9), 2, 0, false, true);
+fn batch_runner(
+    world: std::sync::Arc<altd_sim::track::world::World>,
+    position: altd_sim::math::vec2::V2,
+    rotation: f64,
+) -> altd_sim::training::TrainingRunner {
+    use altd_sim::{
+        nn::network::Network,
+        physics::car::Sensor,
+        training::evolution::EvolutionSettings,
+        training::pyrandom::PyRandom,
+        training::{SensorLayout, TrainingRunner},
+    };
+    let settings = EvolutionSettings {
+        population: 17,
+        selection_size: 4,
+        mutation_rate: 0.01,
+        ..Default::default()
+    };
+    let layout = SensorLayout {
+        names: vec!["ray".into()],
+        sensors: vec![Sensor::Raycast {
+            degrees: 0.0,
+            length: 800.0,
+        }],
+    };
+    let mut runner = TrainingRunner::new(
+        world,
+        position,
+        rotation,
+        layout,
+        &["Acceleration".into(), "Steering".into()],
+        settings,
+        PyRandom::new(9),
+        2,
+        0,
+        false,
+        true,
+    );
     runner.start(&Network::from_vector(&[1, 2], vec![0.01, 0.01, 0.7, 0.2]));
     runner
 }
@@ -72,8 +103,16 @@ fn reset_keeps_networks_rng_and_novelty_and_restarts_eliminated_agents() {
     let mut runner = batch_runner(first.world, first.position, first.rotation);
     runner.advance_generation(30);
     let rng = runner.rng.to_json();
-    let networks: Vec<_> = runner.agents.iter().map(|a| (a.network.clone(), a.network.params.as_ptr(), a.stats.network_novelty)).collect();
-    for agent in &mut runner.agents { agent.car.active = false; agent.stats.idle_ticks = 999; agent.pending_contact = true; }
+    let networks: Vec<_> = runner
+        .agents
+        .iter()
+        .map(|a| (a.network.clone(), a.network.params.as_ptr(), a.stats.network_novelty))
+        .collect();
+    for agent in &mut runner.agents {
+        agent.car.active = false;
+        agent.stats.idle_ticks = 999;
+        agent.pending_contact = true;
+    }
     let next = buffer.next_track().unwrap();
     runner.replace_track(next.world, next.position, next.rotation);
     runner.reset_evaluation();
@@ -100,12 +139,12 @@ fn scored_single_track_turnover_preserves_both_rng_backends() {
         let mut a = batch_runner(first.world.clone(), first.position, first.rotation);
         let mut b = batch_runner(first.world.clone(), first.position, first.rotation);
         if game {
-            a.rng = altd_sim::game_random::GameRandom::new([1, 2, 3, 4], 0).into();
+            a.rng = altd_sim::training::game_random::GameRandom::new([1, 2, 3, 4], 0).into();
             b.rng = a.rng.clone();
         }
         a.advance_generation(30);
         b.advance_generation(30);
-        let scores = altd_sim::evolution::reward_values(&b.results(), &b.settings.rewards);
+        let scores = altd_sim::training::evolution::reward_values(&b.results(), &b.settings.rewards);
         let original = a.next_generation();
         let scored = b.next_generation_with_fitness(scores);
         assert_eq!(original.networks, scored.networks);
@@ -118,9 +157,14 @@ fn scored_single_track_turnover_preserves_both_rng_backends() {
 #[ignore = "requires a HIP GPU and gpu/build.sh"]
 fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
     let _gpu_lock = GPU_TEST_LOCK.lock().unwrap();
-    use altd_sim::{batch_evaluation::BatchEvaluation, gpu::{Gpu, GpuWorld}};
+    use altd_sim::{
+        gpu::hip::{Gpu, GpuWorld},
+        training::batch_evaluation::BatchEvaluation,
+    };
     let gpu = Gpu::open(None).unwrap();
-    let buffer = TrainingTrackBuffer::new_batched(template(), RandomTrainingTrackSettings::default(), 83, 0, 4, true, 3).unwrap();
+    let buffer =
+        TrainingTrackBuffer::new_batched(template(), RandomTrainingTrackSettings::default(), 83, 0, 4, true, 3)
+            .unwrap();
     let mut first = buffer.next_track().unwrap();
     let mut cpu = batch_runner(first.world.clone(), first.position, first.rotation);
     let mut on_gpu = batch_runner(first.world.clone(), first.position, first.rotation);
@@ -133,7 +177,10 @@ fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
         for slot in 0..3 {
             if slot > 0 || generation > 0 {
                 let mut track = buffer.next_track().unwrap();
-                for runner in [&mut cpu, &mut on_gpu] { runner.replace_track(track.world.clone(), track.position, track.rotation); runner.reset_evaluation(); }
+                for runner in [&mut cpu, &mut on_gpu] {
+                    runner.replace_track(track.world.clone(), track.position, track.rotation);
+                    runner.reset_evaluation();
+                }
                 let next = GpuWorld::from_prepared(&gpu, track.gpu_world.take().unwrap());
                 sim.set_world(&next);
                 world = next;
@@ -142,7 +189,10 @@ fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
             on_gpu.advance_generation_gpu(&mut sim, &world, 180).unwrap();
             assert_eq!(cpu.rng.to_json(), rng);
             assert_eq!(sim.network_tag, Some(generation));
-            for (left, right) in cpu.agents.iter().zip(&on_gpu.agents) { assert_eq!(left.stats.metrics(), right.stats.metrics()); assert_eq!(left.network, right.network); }
+            for (left, right) in cpu.agents.iter().zip(&on_gpu.agents) {
+                assert_eq!(left.stats.metrics(), right.stats.metrics());
+                assert_eq!(left.network, right.network);
+            }
             a.record(&cpu.results(), &cpu.settings.rewards);
             b.record(&on_gpu.results(), &on_gpu.settings.rewards);
         }
@@ -152,7 +202,9 @@ fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
         on_gpu.next_generation_gpu_with_fitness(&mut sim, b.fitness).unwrap();
         assert_eq!(cpu.generation, generation + 1);
         assert_eq!(cpu.rng.to_json(), on_gpu.rng.to_json());
-        for (a, b) in cpu.agents.iter().zip(&on_gpu.agents) { assert_eq!(a.network, b.network); }
+        for (a, b) in cpu.agents.iter().zip(&on_gpu.agents) {
+            assert_eq!(a.network, b.network);
+        }
     }
 }
 
@@ -161,24 +213,16 @@ fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
 fn gpu_track_switches_preserve_cpu_results_and_reuse_population_buffers() {
     let _gpu_lock = GPU_TEST_LOCK.lock().unwrap();
     use altd_sim::{
-        car::Sensor,
-        evolution::EvolutionSettings,
-        gpu::{Gpu, GpuWorld},
-        network::Network,
-        pyrandom::PyRandom,
+        gpu::hip::{Gpu, GpuWorld},
+        math::vec2::V2,
+        nn::network::Network,
+        physics::car::Sensor,
+        training::evolution::EvolutionSettings,
+        training::pyrandom::PyRandom,
         training::{SensorLayout, TrainingRunner},
-        vec2::V2,
     };
     let gpu = Gpu::open(None).unwrap();
-    let buffer = TrainingTrackBuffer::new(
-        template(),
-        RandomTrainingTrackSettings::default(),
-        83,
-        0,
-        4,
-        true,
-    )
-    .unwrap();
+    let buffer = TrainingTrackBuffer::new(template(), RandomTrainingTrackSettings::default(), 83, 0, 4, true).unwrap();
     let mut first = buffer.next_track().unwrap();
     let make_runner = || {
         let settings = EvolutionSettings {
@@ -240,13 +284,8 @@ fn gpu_track_switches_preserve_cpu_results_and_reuse_population_buffers() {
         }
         // Enough ticks to capture and replay a HIP graph before replacing it.
         cpu.advance_generation(300);
-        on_gpu
-            .advance_generation_gpu(&mut sim, &gpu_world, 300)
-            .unwrap();
-        assert_eq!(
-            (cpu.tick, cpu.batch_index),
-            (on_gpu.tick, on_gpu.batch_index)
-        );
+        on_gpu.advance_generation_gpu(&mut sim, &gpu_world, 300).unwrap();
+        assert_eq!((cpu.tick, cpu.batch_index), (on_gpu.tick, on_gpu.batch_index));
         assert_eq!(cpu.rng.to_json(), on_gpu.rng.to_json());
         for (a, b) in cpu.agents.iter().zip(&on_gpu.agents) {
             assert_eq!(a.network.params, b.network.params);

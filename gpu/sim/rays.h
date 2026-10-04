@@ -1,4 +1,4 @@
-// BSP queries of src/bsp.rs with explicit stacks instead of recursion:
+// BSP queries of src/track/bsp.rs with explicit stacks instead of recursion:
 // RayTree::raycast and Node::closest, which share the RayTree arena.
 #pragma once
 #include "world.h"

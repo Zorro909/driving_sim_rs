@@ -1,4 +1,4 @@
-// `Car::step` (src/car.rs) with its wall collision (src/collision.rs) for
+// `Car::step` (src/physics/car.rs) with its wall collision (src/physics/collision.rs) for
 // tracks with physics shapes and no native shared broadphase: one thread per
 // car. Every f64 expression of the CPU code whose operands are float32 values
 // and whose result is rounded to float32 at once (f32r, dot_f32, ...) is a
