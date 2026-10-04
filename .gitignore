@@ -1,0 +1,8 @@
+/target
+/wasm/pkg
+/wasm/pkg-threads
+/runs/
+/prof-*/
+/prof-*.tar.gz
+__pycache__/
+*.py[cod]

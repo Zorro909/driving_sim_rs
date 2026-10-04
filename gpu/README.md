@@ -1,0 +1,59 @@
+# AMD HIP backend
+
+The HIP library runs whole driving generations on an AMD GPU. Captured CPU/HIP checks compare simulation values, population parameters, RNG state and checkpoint bytes exactly. Rust owns evolution and checkpoint I/O; both backends can resume the same generation-boundary checkpoints. See [fidelity](../docs/fidelity.md) for the scope of that evidence.
+
+## Build and use
+
+Install ROCm with `hipcc`, then build from the repository root:
+
+```sh
+gpu/build.sh
+cargo build --release --offline
+
+target/release/altd-sim --threads 8 train-scratch --gpu \
+  --scene assets/scenes/rally_template.json --track-mode random \
+  --random-track-settings assets/random_track_settings.json \
+  --population 256 --generations 3 --ticks 600 --seed 1729 \
+  --eliminate-on-wall --idle-eliminate --out-dir runs/gpu-example
+```
+
+`OUT` overrides the library output directory, default `target/gpu`. `GPU_ARCH` overrides the architecture, default `gfx1100` for RX 7900 XTX. The script verifies the checked-in double tables against their Rust bit patterns without rewriting tracked files. `python3 gpu/gen_tables.py --output PATH` writes a header explicitly; `--check` validates it.
+
+The compiler flags `-ffp-contract=off` and `-fhip-fp32-correctly-rounded-divide-sqrt` preserve separate multiply/add rounding and correctly rounded float32 division/square root. Keep them when changing architecture. The native crate loads the library at runtime, so CPU-only builds do not require ROCm.
+
+GPU driving uses tick-major execution for independent cars. Native shared broadphase and paused windows are unsupported. Generated CLI tracks disable shared broadphase. Track preparation runs on a CPU producer with a bounded queue; `--track-buffer-size` sets its depth, default eight. Population/network buffers stay allocated while each fresh track replaces geometry.
+
+## Validation and measurements
+
+```sh
+cargo build --release --offline --example gpu_check
+target/release/examples/gpu_check --help
+target/release/examples/gpu_check schedules
+```
+
+The default check fixture is a fixed generated Rally track and seeded Xavier networks. `ALTD_GPU_SCENE`, `ALTD_GPU_SPAWN`, `ALTD_GPU_NETWORK`, `ALTD_GPU_MODEL` and `ALTD_GPU_CKPT` select explicit inputs or a saved population. No captured campaign scene is required. `gpu_check --help` lists primitive, query, sensing, inference, physics and generation checks. Exhaustive parts can take minutes.
+
+Run benchmarks on an otherwise idle GPU:
+
+```sh
+RAYON_NUM_THREADS=8 python3 gpu/benchmark.py \
+  --library target/gpu/libaltd_gpu.so --cars 8192 32768 \
+  --samples 5 --warmups 1 --no-elimination --output target/gpu-fixed.json
+RAYON_NUM_THREADS=8 python3 gpu/benchmark.py --training \
+  --library target/gpu/libaltd_gpu.so --cars 8192 --samples 5 \
+  --output target/gpu-training.json
+```
+
+The runner keeps every sample and validates result digests. `--checkpoint DIR` selects a saved population; omitting it uses the fixed Xavier recipe. `--scene`, `--spawn-trace`, `--network`, `--model` and `--binary` override inputs. Fixed-window timing excludes fixture construction, reset, hashing and reproduction; training timing includes consecutive generation turnover. Elimination can finish early, so inspect executed ticks before comparing results.
+
+`gpu/profile.sh` collects phase timings, optional rocprofv3 traces/counters and diagnostic kernel builds. `--only 1,2`, `--sizes "8192 32768"`, `--checkpoint DIR` and `--output target/profile` select the work. Profiling changes execution behavior; final timing should run with profiling disabled. [Performance notes](../docs/performance.md) retain measured hardware results.
+
+| Variable | Effect |
+| --- | --- |
+| `ALTD_GPU_LIB` | Runtime shared-library path |
+| `ALTD_GPU_GRAPH=0` | Direct launches instead of HIP graph replay |
+| `ALTD_GPU_SPLIT=0` | Fused instead of split physics |
+| `ALTD_GPU_PROFILE=1` | Device phase timings; `host` reports host/wall time only |
+| `ALTD_TRAIN_PROFILE=1` | CPU reproduction, installation and transfer timings |
+
+[Implementation notes](../docs/gpu.md) explain batching, graph lifetime, exact reduction order and memory costs. `gpu_engine_scan` is an exhaustive native/GPU trigonometry developer tool; it requires an explicit thread count and output header, and is not part of the regular test suite.
