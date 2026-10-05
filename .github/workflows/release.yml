@@ -1,8 +1,9 @@
 name: Release
 
-# A vX.Y.Z tag publishes a release; every push to main replaces the rolling
-# nightly pre-release. Pull requests touching the packaging build and smoke
-# test the archives without publishing them.
+# Only main publishes: a vX.Y.Z tag on a main commit publishes a release, and
+# every push to main replaces the rolling nightly pre-release. Pull requests
+# touching the packaging and manual runs build and smoke test dev archives
+# without publishing them.
 on:
   push:
     branches: [main]
@@ -36,26 +37,42 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       label: ${{ steps.version.outputs.label }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history, so a tag can be checked against main.
+          fetch-depth: 0
       - id: version
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_TYPE" = tag ]; then
             if [ "${GITHUB_REF_NAME#v}" != "$crate" ]; then
               echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
               exit 1
             fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::tag $GITHUB_REF_NAME is not on main; releases are only published from main"
+              exit 1
+            fi
             version=$crate
             label=$crate
-          else
+            publish=true
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
             # Nightly archives keep fixed names so download links stay stable.
             version="$crate-nightly.$(date -u +%Y%m%d)+${GITHUB_SHA::7}"
             label=nightly
+            publish=true
+          else
+            # Pull requests and manual runs only check the packaging.
+            version="$crate-dev+${GITHUB_SHA::7}"
+            label=dev
+            publish=false
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "label=$label" >> "$GITHUB_OUTPUT"
-          echo "Building $version" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Building $version (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
 
   gpu-library:
     runs-on: ubuntu-latest
@@ -183,7 +200,7 @@ jobs:
           grep -q "\"$PWD/libaltd_gpu.so\"" gpu-info.json
 
   publish:
-    if: github.event_name == 'push'
+    if: needs.version.outputs.publish == 'true' && github.event_name == 'push'
     needs: [version, package, gpu-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
