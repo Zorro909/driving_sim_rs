@@ -1,7 +1,7 @@
 //! Full WebGPU training windows. Evolution and checkpoint serialization stay
 //! in Rust; sensing, inference, statistics and physics run entirely in WGSL.
 use super::{js_error, Shared, Simulation};
-use crate::gpu::simulation::{self, GpuAgent, GpuCar, RayNode, TrackArrays};
+use crate::gpu::simulation::{self, words, GpuAgent, GpuCar, RayNode, TrackArrays};
 use js_sys::{Promise, Uint32Array};
 use std::{
     cell::{Cell, RefCell},
@@ -71,14 +71,6 @@ const _: () = {
     assert!(std::mem::offset_of!(GpuCar, contacts) == 384);
     assert!(std::mem::offset_of!(GpuAgent, flags) == 368);
 };
-fn words<T: Copy>(values: &[T]) -> Vec<u32> {
-    assert_eq!(std::mem::size_of::<T>() % 4, 0);
-    let bytes = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values)) };
-    bytes
-        .chunks_exact(4)
-        .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
-        .collect()
-}
 fn append<T: Copy>(data: &mut Vec<u32>, values: &[T]) -> Result<u32, String> {
     let offset = u32::try_from(data.len()).map_err(|_| "WebGPU world exceeds address range")?;
     data.extend(words(values));
@@ -206,7 +198,7 @@ impl GpuSimulation {
                 let tick = r.tick;
                 let batch = r.batch_index;
                 r.advance(ticks as u64, false);
-                let expected = canonical_state(r, &inner.surfaces.borrow());
+                let expected = r.canonical_state(&inner.surfaces.borrow());
                 r.agents = backup.clone();
                 r.tick = tick;
                 r.batch_index = batch;
@@ -217,15 +209,19 @@ impl GpuSimulation {
                 Err(e) => Err(e),
                 Ok(expected) => match run_window(&inner, ticks, false, None).await {
                     Err(e) => Err(e),
-                    Ok(_) => canonical_state(&inner.shared.session.borrow().runner, &inner.surfaces.borrow()).and_then(
-                        |actual| {
+                    Ok(_) => inner
+                        .shared
+                        .session
+                        .borrow()
+                        .runner
+                        .canonical_state(&inner.surfaces.borrow())
+                        .and_then(|actual| {
                             if actual != expected {
                                 Err("WebGPU simulation verification differs from WASM".into())
                             } else {
                                 Ok(expected.len() as u32)
                             }
-                        },
-                    ),
+                        }),
                 },
             };
             {
@@ -241,17 +237,6 @@ impl GpuSimulation {
             result.map(JsValue::from).map_err(|e| js_error(e).into())
         })
     }
-}
-fn canonical_state(
-    r: &crate::training::TrainingRunner,
-    surfaces: &simulation::SurfaceTable,
-) -> Result<Vec<u32>, String> {
-    let mut cars = Vec::new();
-    let mut agents = Vec::new();
-    crate::training::export_state_into(&r.agents, &r.world.vehicle, surfaces, &mut cars, &mut agents)?;
-    let mut out = words(&cars);
-    out.extend(words(&agents));
-    Ok(out)
 }
 struct Encoded {
     world: Vec<u32>,

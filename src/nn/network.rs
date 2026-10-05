@@ -368,11 +368,9 @@ mod tests {
     #[test]
     fn xavier_matches_python() {
         // Network.xavier([20,16,16,16,16,12,12,8,5], random.Random(1)).vector()
-        let v = Network::xavier(
-            &[20, 16, 16, 16, 16, 12, 12, 8, 5],
-            &mut crate::training::pyrandom::PyRandom::new(1),
-        )
-        .params;
+        let shape = [20, 16, 16, 16, 16, 12, 12, 8, 5];
+        let mut rng = crate::training::pyrandom::PyRandom::new(1);
+        let v = Network::xavier(&shape, &mut rng).params;
         assert_eq!(v.len(), 1661);
         assert_eq!(
             (v[0], v[319], v[320], v[1660]),
@@ -383,6 +381,58 @@ mod tests {
                 -0.05605915218919258
             )
         );
+        // The checksum was captured with Linux CPython's host libm. On macOS,
+        // compare every parameter and cached draw with CPython on that host:
+        // both libm rounding and LLVM's sin/cos merging need an exact oracle.
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(crate::math::pymath::py_sum(v.iter().copied()), 2.8926482371919495);
+        #[cfg(target_os = "macos")]
+        {
+            let reference = python_xavier_reference(&shape);
+            let expected_bits: Vec<u64> = serde_json::from_value(reference["param_bits"].clone()).unwrap();
+            assert_eq!(v.len(), expected_bits.len());
+            for (index, (actual, &expected)) in v.iter().zip(&expected_bits).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected,
+                    "parameter {index}: Rust {actual:?}, CPython {:?}",
+                    f64::from_bits(expected)
+                );
+            }
+            assert_eq!(rng.to_json(), reference["rng"], "Xavier RNG and cached Gaussian state");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn python_xavier_reference(shape: &[usize]) -> Value {
+        // CPython calls sin and cos separately. Keep the oracle outside Rust
+        // so LLVM cannot merge its operations with those under test.
+        const SCRIPT: &str = r#"
+import json, math, random, struct, sys
+shape = json.loads(sys.argv[1])
+rng = random.Random(1)
+params = []
+for inputs, outputs in zip(shape, shape[1:]):
+    deviation = math.sqrt(2.0 / (inputs + outputs))
+    params.extend(rng.gauss(0.0, deviation) for _ in range(inputs * outputs))
+    params.extend(rng.gauss(0.0, 0.1) for _ in range(outputs))
+_, state, cached = rng.getstate()
+def bits(value):
+    return struct.unpack('!Q', struct.pack('!d', value))[0]
+cached_bits = None if cached is None else bits(cached)
+print(json.dumps({'param_bits': [bits(value) for value in params], 'rng': {
+    'state': state[:-1], 'index': state[-1], 'gauss_next_bits': cached_bits
+}}))
+"#;
+        let output = std::process::Command::new("python3")
+            .args(["-c", SCRIPT, &serde_json::to_string(shape).unwrap()])
+            .output()
+            .expect("macOS Xavier fidelity test requires python3");
+        assert!(
+            output.status.success(),
+            "CPython Xavier oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("CPython Xavier oracle must return JSON")
     }
 }

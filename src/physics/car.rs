@@ -777,7 +777,18 @@ impl Car {
                 match track.closest_wall(position) {
                     None => 1.0,
                     Some(wall) => {
-                        ((F2::from(position) - F2::from(wall)).length() / max_distance as f32).clamp(0.0, 1.0) as f64
+                        let distance = (F2::from(position) - F2::from(wall)).length();
+                        let maximum = max_distance as f32;
+                        // x86 division produces a negative indefinite for 0/0
+                        // and infinity/infinity. Keep NaN operand payloads.
+                        let fraction = if (distance == 0.0 && maximum == 0.0)
+                            || (distance.is_infinite() && maximum.is_infinite())
+                        {
+                            f32::from_bits(0xffc0_0000)
+                        } else {
+                            distance / maximum
+                        };
+                        fraction.clamp(0.0, 1.0) as f64
                     }
                 }
             }

@@ -8,7 +8,7 @@ Three comparisons answer different questions:
 - Serial versus threaded WASM checks cover states, sensors, controls, metrics, rewards, summaries and binary checkpoints, including exchange between the two packages.
 - WebGPU versus WASM checks validate query or full-window device results against the WASM CPU implementation.
 
-Expanded native parity is incomplete. On the public generated Formula scenario, serial and threaded WASM matched each other in 253,311 values per mode, but both differed from native in 2,285 values per mode. Those differences comprised 703 controls, 405 metrics and 1,177 checkpoint bytes. The original captured-scene baseline had 2,532 native differences with the same exact serial/threaded equality. Counts depend on the scenario, build and checkpoint representation. `STRICT_NATIVE=1` makes the browser test fail on any expanded native difference.
+Expanded native parity is incomplete. On the public generated Formula scenario, serial and threaded WASM matched each other in 253,341 values per mode, including the optional score aggregates, but both differed from native in 2,285 values per mode. Those differences comprised 703 controls, 405 metrics and 1,177 checkpoint bytes. The original captured-scene baseline had 2,532 native differences with the same exact serial/threaded equality. Counts depend on the scenario, build and checkpoint representation. `STRICT_NATIVE=1` makes the browser test fail on any expanded native difference.
 
 ## Device arithmetic
 

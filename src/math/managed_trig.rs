@@ -8,11 +8,7 @@ fn f(bits: u32) -> f32 {
 
 pub(crate) fn sine_large(value: f32) -> f32 {
     if !value.is_finite() {
-        return if value.is_infinite() {
-            value * 0.0
-        } else {
-            value * value
-        };
+        return super::native_math::nonfinite_trig_result(value);
     }
     let bits = value.to_bits();
     let sign = bits & 0x80000000;

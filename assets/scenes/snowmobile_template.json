@@ -1,90 +1,102 @@
 {
   "vehicle": {
-    "type": "Formula",
-    "mass": 2,
+    "type": "Snowmobile",
+    "mass": 1.5,
     "inertia_property": 0,
-    "inertia_server": 1038.1666259765625,
+    "inertia_server": 552.625732421875,
     "shape_size": [
-      73,
-      30
+      65,
+      14.0002
     ],
     "shape_position": [
-      0,
-      0
+      -0.000114441,
+      0.499986
     ],
     "shape_rotation": 1.5708,
     "gravity_scale": 1,
     "linear_damp": 0,
     "angular_damp": 0,
     "max_contacts_reported": 4,
+    "continuous_cd": "Disabled",
     "friction": 0.95,
     "bounce": 0.1,
     "grip": 2,
-    "steering_speed": 0.4000000059604645,
+    "steering_speed": 0.2,
     "center_steering": true,
-    "air_resistance": 0.10000000149011612,
-    "max_velocity": 1200,
+    "air_resistance": 0.3,
+    "max_velocity": 600,
     "surfaces": {
       "asphalt": {
-        "grip": 1,
-        "power": 1,
-        "steering": 1
+        "grip": 0.9,
+        "power": 0.9,
+        "steering": 0.25
       },
       "dirt": {
-        "grip": 0.8,
-        "power": 0.5,
-        "steering": 1
+        "grip": 0.7,
+        "power": 0.8,
+        "steering": 0.7
       },
       "ice": {
-        "grip": 0.3,
-        "power": 0.5,
-        "steering": 1
+        "grip": 0.4,
+        "power": 0.8,
+        "steering": 0.7
       }
     },
     "wheels": [
       {
         "position": [
-          -11,
-          -17
+          -10,
+          -25
         ],
         "steering": true,
         "max_angle_deg": 35,
         "power": 0,
-        "brake_power": 3.5,
+        "brake_power": 0,
         "handbrake_power": 0
       },
       {
         "position": [
-          11,
-          -17
+          10,
+          -25
         ],
         "steering": true,
         "max_angle_deg": 35,
         "power": 0,
-        "brake_power": 3.5,
+        "brake_power": 0,
         "handbrake_power": 0
       },
       {
         "position": [
-          -13,
-          29
+          0,
+          28
         ],
         "steering": false,
         "max_angle_deg": 0,
-        "power": 6,
-        "brake_power": 3,
-        "handbrake_power": 3
+        "power": 1.3,
+        "brake_power": 1.5,
+        "handbrake_power": 0
       },
       {
         "position": [
-          13,
-          29
+          0,
+          22
         ],
         "steering": false,
         "max_angle_deg": 0,
-        "power": 6,
-        "brake_power": 3,
-        "handbrake_power": 3
+        "power": 1.3,
+        "brake_power": 1.5,
+        "handbrake_power": 0
+      },
+      {
+        "position": [
+          0,
+          16
+        ],
+        "steering": false,
+        "max_angle_deg": 0,
+        "power": 1.3,
+        "brake_power": 1.5,
+        "handbrake_power": 0
       }
     ]
   },

@@ -16,9 +16,11 @@ exclude = ["tests/fixtures/", "wasm/test/"]
 crate-type = ["rlib"]
 
 [features]
-default = ["cli"]
+default = ["cli", "server"]
 # The `altd-sim` command line (native only).
 cli = ["dep:clap"]
+# `altd-sim serve`: the WebSocket server Drive Lab can train on (native only).
+server = ["cli", "dep:tungstenite"]
 # The WebAssembly library in src/wasm: JavaScript bindings and the WebGPU raycaster.
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:console_error_panic_hook"]
 wasm-threads = ["wasm", "dep:wasm-bindgen-rayon"]
@@ -50,6 +52,8 @@ web-sys = { version = "0.3", optional = true, features = [
 # Runtime loading of the HIP simulator (src/gpu/hip.rs).
 libloading = "0.9"
 sha2 = "0.10"
+# Synchronous WebSockets for `altd-sim serve`, without TLS.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 
 # Process statistics in the CLI (src/bin/altd-sim/platform.rs).
 [target.'cfg(unix)'.dependencies]

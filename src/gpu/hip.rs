@@ -1,6 +1,6 @@
 //! Runtime loader for the HIP simulator parts in gpu/ (libaltd_gpu.so).
 //! Loaded at runtime so the crate builds and runs without ROCm.
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::path::{Path, PathBuf};
 
 /// Library file name, both in release archives and in gpu/build.sh output.
@@ -106,9 +106,54 @@ impl Gpu {
 
     /// Function pointer `name` of type `F` (an `unsafe extern "C" fn`).
     pub(crate) fn symbol<F: Copy>(&self, name: &str) -> F {
+        self.try_symbol(name)
+            .unwrap_or_else(|| panic!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+    }
+
+    /// `symbol`, or `None` when the library lacks `name`.
+    pub(crate) fn try_symbol<F: Copy>(&self, name: &str) -> Option<F> {
         assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
-        let symbol = unsafe { self.library.get::<F>(name) };
-        *symbol.unwrap_or_else(|_| panic!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+        unsafe { self.library.get::<F>(name.as_bytes()) }.ok().map(|s| *s)
+    }
+
+    /// A required function pointer, reporting incompatible libraries without panicking.
+    pub(crate) fn required_symbol<F: Copy>(&self, name: &str) -> Result<F, String> {
+        self.try_symbol(name)
+            .ok_or_else(|| format!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+    }
+
+    /// The device name, or the library path for older libraries. The legacy
+    /// math entry point probes device availability when no name is exported.
+    pub fn device_name(&self) -> Result<String, String> {
+        let f: Option<unsafe extern "C" fn(*mut std::ffi::c_char, i32) -> i32> =
+            self.try_symbol("altd_gpu_device_name");
+        let Some(f) = f else {
+            let probe: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 = self
+                .try_symbol("altd_gpu_math")
+                .ok_or("the HIP library lacks the device probe entry points")?;
+            let input = 0.0f32;
+            let mut output = 0.0f32;
+            let mut error = 0u32;
+            let status = unsafe {
+                probe(
+                    MathOp::NativeSin as i32,
+                    1,
+                    std::ptr::from_ref(&input).cast(),
+                    std::ptr::from_mut(&mut output).cast(),
+                    &mut error,
+                )
+            };
+            if status != 0 {
+                return Err(format!("no usable HIP device ({})", status_message(status)));
+            }
+            return Ok(self.path.display().to_string());
+        };
+        let mut name = [0 as std::ffi::c_char; 256];
+        let status = unsafe { f(name.as_mut_ptr(), name.len() as i32) };
+        if status != 0 {
+            return Err(format!("no usable HIP device ({})", status_message(status)));
+        }
+        Ok(unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned())
     }
 
     pub(crate) fn check(status: i32, what: &str) {
@@ -180,14 +225,14 @@ pub enum Query {
 pub struct GpuWorld<'a> {
     gpu: &'a Gpu,
     handle: *mut c_void,
+    free: unsafe extern "C" fn(*mut c_void),
     /// The exported track (surface table, nearest-segment grids).
     pub arrays: crate::gpu::simulation::TrackArrays,
 }
 
 impl Drop for GpuWorld<'_> {
     fn drop(&mut self) {
-        let free: unsafe extern "C" fn(*mut c_void) = self.gpu.symbol("altd_gpu_world_free");
-        unsafe { free(self.handle) };
+        unsafe { (self.free)(self.handle) };
     }
 }
 
@@ -226,15 +271,29 @@ impl<'a> GpuWorld<'a> {
 
     /// Upload CPU-prepared geometry without rebuilding spatial query arrays.
     pub fn from_prepared(gpu: &'a Gpu, prepared: PreparedGpuWorld) -> GpuWorld<'a> {
-        crate::gpu::simulation::check_layout(gpu);
+        Self::try_from_prepared(gpu, prepared).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `from_prepared`, returning unsupported geometry, missing symbols and upload failures.
+    pub fn try_from_prepared(gpu: &'a Gpu, prepared: PreparedGpuWorld) -> Result<GpuWorld<'a>, String> {
+        crate::gpu::simulation::layout_matches(gpu)?;
         let PreparedGpuWorld { arrays, rays } = prepared;
+        arrays.validate_counts(&rays)?;
         let desc = arrays.desc(&rays);
         let create: unsafe extern "C" fn(*const crate::gpu::simulation::WorldDesc) -> *mut c_void =
-            gpu.symbol("altd_gpu_world_create");
+            gpu.required_symbol("altd_gpu_world_create")?;
+        let free = gpu.required_symbol("altd_gpu_world_free")?;
         // The library copies every array; `rays` only has to outlive the call.
         let handle = unsafe { create(&desc) };
-        assert!(!handle.is_null(), "altd_gpu_world_create failed");
-        GpuWorld { gpu, handle, arrays }
+        if handle.is_null() {
+            return Err("altd_gpu_world_create failed to upload the track".into());
+        }
+        Ok(GpuWorld {
+            gpu,
+            handle,
+            free,
+            arrays,
+        })
     }
 
     pub(crate) fn gpu(&self) -> &'a Gpu {

@@ -89,6 +89,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
+      - name: Install the same-host Python math oracle
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - uses: Swatinem/rust-cache@v2
         with:
           key: platform-${{ matrix.os }}
@@ -109,6 +114,8 @@ jobs:
         with:
           key: hip-x86-64
       - run: GPU_ARCH=gfx1100 gpu/build.sh
+      - name: Check cleanup after HIP allocation and upload failures
+        run: python3 gpu/test_constructor_cleanup.py
       - name: Check the library against the Rust layouts
         # No GPU is needed: gpu-info checks the device struct layouts on the host.
         run: cargo run --locked --bin altd-sim -- gpu-info

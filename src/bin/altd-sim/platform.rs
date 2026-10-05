@@ -3,10 +3,7 @@
 use serde_json::{json, Value};
 
 /// `altd-sim --version`: the package version, or the CI build version of nightly packages.
-pub(super) const VERSION: &str = match option_env!("ALTD_BUILD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+pub(super) const VERSION: &str = altd_sim::VERSION;
 
 #[cfg(unix)]
 pub(super) fn process_cpu_seconds() -> f64 {

@@ -35,6 +35,17 @@ pub fn export_state_into(
 }
 
 impl TrainingRunner {
+    /// Every car's and agent's GPU state as words, for exact comparisons of
+    /// the CPU and GPU simulators.
+    pub(crate) fn canonical_state(&self, surfaces: &crate::gpu::simulation::SurfaceTable) -> Result<Vec<u32>, String> {
+        let mut cars = Vec::new();
+        let mut agents = Vec::new();
+        export_state_into(&self.agents, &self.world.vehicle, surfaces, &mut cars, &mut agents)?;
+        let mut out = crate::gpu::simulation::words(&cars);
+        out.extend(crate::gpu::simulation::words(&agents));
+        Ok(out)
+    }
+
     /// A GPU simulator for this runner's world, vehicle and sensors, with
     /// room for `capacity` agents.
     #[cfg(not(target_arch = "wasm32"))]
@@ -58,13 +69,21 @@ impl TrainingRunner {
                     .into(),
             );
         }
+        if self
+            .layout
+            .sensors
+            .iter()
+            .any(|sensor| matches!(sensor, Sensor::Raycast { length, .. } if *length <= 0.0 || !length.is_finite()))
+        {
+            return Err("the HIP simulator requires positive finite ray lengths".into());
+        }
         let sensors: Vec<_> = self
             .layout
             .sensors
             .iter()
             .map(crate::gpu::simulation::sensor_desc)
             .collect();
-        Ok(crate::gpu::simulation::GpuSim::new(world, &vehicle, &sensors, capacity))
+        crate::gpu::simulation::GpuSim::try_new(world, &vehicle, &sensors, capacity)
     }
 
     /// `advance_generation` on the GPU.
@@ -75,18 +94,18 @@ impl TrainingRunner {
         world: &crate::gpu::hip::GpuWorld,
         time_limit_ticks: u64,
     ) -> Result<u64, String> {
-        assert_eq!(
-            self.stats_phase, 0,
-            "fresh game generations use reset statistics counters"
-        );
-        let bound = (time_limit_ticks / 6 + 2) * 6;
-        self.advance_window_gpu(
-            sim,
-            world,
-            bound.saturating_sub(self.tick),
-            true,
-            Some(time_limit_ticks as f64 / 60.0),
-        )
+        let (ticks, time_limit) = self.gpu_generation_window(time_limit_ticks)?;
+        self.advance_window_gpu(sim, world, ticks, true, Some(time_limit))
+    }
+
+    /// The window length and time limit (seconds) of `advance_generation_gpu`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn gpu_generation_window(&self, time_limit_ticks: u64) -> Result<(u64, f64), String> {
+        if self.stats_phase != 0 {
+            return Err("GPU advance_generation needs statistics phase 0".into());
+        }
+        let bound = (time_limit_ticks / 6).saturating_add(2).saturating_mul(6);
+        Ok((bound.saturating_sub(self.tick), time_limit_ticks as f64 / 60.0))
     }
 
     /// `advance_window` on the GPU: agents and cars are uploaded, advanced in
@@ -101,21 +120,76 @@ impl TrainingRunner {
         stop_when_inactive: bool,
         time_limit: Option<f64>,
     ) -> Result<u64, String> {
-        use crate::gpu::simulation::*;
-        let mut profile = crate::training::training_profile::Profile::new("gpu_window");
         if ticks == 0 {
             return Ok(0);
         }
+        self.check_gpu_window()?;
+        self.upload_state_gpu(sim, world)?;
+        let executed = self.window_gpu(sim, ticks, stop_when_inactive, time_limit)?;
+        self.download_state_gpu(sim, world)?;
+        Ok(executed)
+    }
+
+    /// Why the GPU cannot run this runner's windows, if it cannot.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn check_gpu_window(&self) -> Result<(), String> {
         if self.user_paused || self.physics.is_some() {
             return Err("the GPU runner does not model paused or native-broadphase windows".into());
         }
         if self.agents.is_empty() {
             return Err("no agents".into());
         }
-        let surfaces = &world.arrays.surfaces;
-        let vehicle = &self.world.vehicle;
+        Ok(())
+    }
+
+    /// Uploads every car and agent, after clearing `deactivated_at` as a
+    /// window does (the device clears its copy when a window starts).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn upload_state_gpu(
+        &mut self,
+        sim: &mut crate::gpu::simulation::GpuSim,
+        world: &crate::gpu::hip::GpuWorld,
+    ) -> Result<(), String> {
+        let mut profile = crate::training::training_profile::Profile::new("gpu_upload");
         for agent in &mut self.agents {
             agent.deactivated_at = None;
+        }
+        // Retained staging buffers: filling them in place avoids allocating,
+        // page-faulting and concatenating population-sized vectors per window.
+        let (mut cars, mut agents) = sim.take_state_buffers();
+        let exported = export_state_into(
+            &self.agents,
+            &self.world.vehicle,
+            &world.arrays.surfaces,
+            &mut cars,
+            &mut agents,
+        );
+        profile.mark("export_state");
+        let uploaded = exported.and_then(|()| sim.try_upload(&cars, Some(&agents)));
+        profile.mark("upload_state");
+        sim.return_state_buffers(cars, agents);
+        uploaded
+    }
+
+    /// A window over the uploaded cars and agents, which stay on the device:
+    /// only `tick` and the batch index advance here. Networks are uploaded
+    /// when `sim.network_tag` differs from the generation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn window_gpu(
+        &mut self,
+        sim: &mut crate::gpu::simulation::GpuSim,
+        ticks: u64,
+        stop_when_inactive: bool,
+        time_limit: Option<f64>,
+    ) -> Result<u64, String> {
+        use crate::gpu::simulation::*;
+        let mut profile = crate::training::training_profile::Profile::new("gpu_window");
+        if ticks == 0 {
+            return Ok(0);
+        }
+        self.check_gpu_window()?;
+        if sim.cars != self.agents.len() {
+            return Err("the HIP simulator holds a different population".into());
         }
         if sim.network_tag != Some(self.generation) || sim.network_count() != self.agents.len() {
             let src = std::array::from_fn(|c| {
@@ -130,13 +204,6 @@ impl TrainingRunner {
             profile.mark("networks");
             sim.network_tag = Some(self.generation);
         }
-        // Retained staging buffers: filling them in place avoids allocating,
-        // page-faulting and concatenating population-sized vectors per window.
-        let (mut cars, mut agents) = sim.take_state_buffers();
-        export_state_into(&self.agents, vehicle, surfaces, &mut cars, &mut agents)?;
-        profile.mark("export_state");
-        sim.upload(&cars, Some(&agents));
-        profile.mark("upload_state");
         let args = WindowArgs {
             start_tick: self.tick,
             ticks,
@@ -150,18 +217,33 @@ impl TrainingRunner {
             pad: 0,
             time_limit: time_limit.unwrap_or(0.0),
         };
-        let (executed, transition_without_drive) = sim.window(&args);
+        let (executed, transition_without_drive) = sim.try_window(&args)?;
         profile.mark("window");
-        // The upload has finished. Read back into the same allocations.
-        sim.download(Some(&mut cars), Some(&mut agents));
-        profile.mark("download_state");
-        self.import_state(&cars, &agents, surfaces)?;
-        profile.mark("import_state");
-        sim.return_state_buffers(cars, agents);
         let bpt = self.batches_per_tick();
         self.tick += executed;
         self.batch_index = (self.batch_index + ((executed as usize - transition_without_drive as usize) % 8) * bpt) % 8;
         Ok(executed)
+    }
+
+    /// Reads every uploaded car and agent back into the runner.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn download_state_gpu(
+        &mut self,
+        sim: &mut crate::gpu::simulation::GpuSim,
+        world: &crate::gpu::hip::GpuWorld,
+    ) -> Result<(), String> {
+        let mut profile = crate::training::training_profile::Profile::new("gpu_download");
+        if sim.cars != self.agents.len() {
+            return Err("the HIP simulator holds a different population".into());
+        }
+        // Read back into the retained allocations.
+        let (mut cars, mut agents) = sim.take_state_buffers();
+        let downloaded = sim.try_download(Some(&mut cars), Some(&mut agents));
+        profile.mark("download_state");
+        let imported = downloaded.and_then(|()| self.import_state(&cars, &agents, &world.arrays.surfaces));
+        profile.mark("import_state");
+        sim.return_state_buffers(cars, agents);
+        imported
     }
 
     /// The rest of `gpu_import` for the whole population: `cars` and `agents`
@@ -232,7 +314,7 @@ impl TrainingRunner {
         });
         sim.upload_networks(&networks, src)?;
         profile.mark("networks");
-        let novelty = sim.novelty();
+        let novelty = sim.try_novelty()?;
         profile.mark("novelty");
         self.install_with_novelty(networks, true, Some(&novelty));
         self.stats_phase = 0;

@@ -577,6 +577,56 @@ fn distance_sensor_preserves_empty_raycasters_and_float_boundaries() {
 }
 
 #[test]
+fn distance_sensor_preserves_invalid_divisions_and_nan_payloads() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/native_free180.json")).unwrap();
+    // Extend the captured zero-distance/zero-maximum case across signed zero,
+    // float32 conversion boundaries and NaN operands. These bits also match
+    // the x86 division used by the captured runtime.
+    let indefinite = 0xffc0_0000;
+    let cases = [
+        (0.0, [indefinite, 0x3f80_0000, 0x3f80_0000]),
+        (-0.0, [indefinite, 0, 0]),
+        (f64::MIN_POSITIVE, [indefinite, 0x3f80_0000, 0x3f80_0000]),
+        (-f64::MIN_POSITIVE, [indefinite, 0, 0]),
+        (f64::MAX, [0, 0, indefinite]),
+        (-f64::MAX, [0x8000_0000, 0x8000_0000, indefinite]),
+        (f64::INFINITY, [0, 0, indefinite]),
+        (f64::NEG_INFINITY, [0x8000_0000, 0x8000_0000, indefinite]),
+        (f64::from_bits(0x7ff8_2468_a000_0000), [0x7fc1_2345; 3]),
+        (f64::from_bits(0xfff8_2468_a000_0000), [0xffc1_2345; 3]),
+        (f64::from_bits(0x7ff0_0000_2000_0000), [0x7fc0_0001; 3]),
+        (f64::from_bits(0xfff0_0000_2000_0000), [0xffc0_0001; 3]),
+    ];
+    for present in [false, true] {
+        let mut scene = fixture["scene"].clone();
+        scene["track"] = serde_json::json!({"tile_size":[768,768],"tiles":[],"polygons":[],"physics_shapes":[],"raycaster_present":present});
+        let world = World::from_scene(&scene);
+        let mut car = Car::new(&world, V2::ZERO, 0.0);
+        for (maximum, expected) in cases {
+            // Exercise runtime conversion; constant folding may discard NaN payloads.
+            let maximum = std::hint::black_box(maximum);
+            for (position, expected) in [V2::ZERO, V2::new(3.0, 4.0), V2::new(1e30, 0.0)]
+                .into_iter()
+                .zip(expected)
+            {
+                car.queue_reset(position, 0.0);
+                let value = car.sensor(
+                    &world,
+                    Sensor::DistanceFromWall { max_distance: maximum },
+                    &mut SensorScratch::default(),
+                );
+                assert_eq!(
+                    scalar_bits(value),
+                    if present { expected } else { 0x3f80_0000 },
+                    "raycaster {present}, position {position:?}, maximum bits {:016x}",
+                    maximum.to_bits()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn generated_world_matches_original_tilemap_drive_and_reset() {
     replay(include_str!("fixtures/native_generated_case2_180.json"), true);
 }

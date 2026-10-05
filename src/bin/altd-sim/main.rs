@@ -294,6 +294,8 @@ fn main() {
             write_report(&report, &result);
             print_without(&result, "rows");
         }
+        #[cfg(feature = "server")]
+        Command::Serve { port, allow_origin } => serve(port, allow_origin, threads),
         Command::GpuInfo { library } => {
             let gpu = altd_sim::gpu::hip::Gpu::open(library.as_deref()).unwrap_or_else(|error| {
                 eprintln!("gpu-info: {error}");
@@ -303,5 +305,37 @@ fn main() {
             let info = json!({"version": platform::VERSION, "library": gpu.path(), "layout": "ok"});
             println!("{}", serde_json::to_string_pretty(&info).unwrap());
         }
+    }
+}
+
+#[cfg(feature = "server")]
+fn serve(port: u16, allow_origin: Vec<String>, threads: usize) {
+    use altd_sim::server::{Config, Server, DEFAULT_ORIGIN, PATH};
+    let origins = if allow_origin.is_empty() {
+        vec![DEFAULT_ORIGIN.to_string()]
+    } else {
+        allow_origin
+    };
+    let server = Server::bind(Config {
+        port,
+        origins: origins.clone(),
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("altd-sim serve: cannot listen on 127.0.0.1:{port}: {e}");
+        std::process::exit(1);
+    });
+    let address = server.local_addr().expect("listener address");
+    let hip = server.hip_status();
+    let hip = match hip["available"].as_bool() {
+        Some(true) => format!("available ({})", hip["device"].as_str().unwrap_or("?")),
+        _ => format!("unavailable ({})", hip["reason"].as_str().unwrap_or("?")),
+    };
+    eprintln!("altd-sim serve: listening on ws://{address}{PATH}");
+    eprintln!("  allowed origins: {}", origins.join(", "));
+    eprintln!("  CPU threads: {threads}");
+    eprintln!("  HIP: {hip}");
+    if let Err(e) = server.run() {
+        eprintln!("altd-sim serve: {e}");
+        std::process::exit(1);
     }
 }

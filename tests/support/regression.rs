@@ -64,10 +64,19 @@ pub(crate) fn stats_bits(s: &TrainingStats) -> Value {
     })
 }
 pub(crate) fn session_snapshot(session: &Session) -> Value {
+    // These generated captures predate the optional score aggregates. Keep
+    // comparing every original summary field; Session tests cover the additions.
+    let mut summary = serde_json::to_value(session.generation_summary()).unwrap();
+    summary.as_object_mut().unwrap().retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "bestIndex" | "bestScore" | "lapped" | "active" | "lapIndex" | "lapTime"
+        )
+    });
     json!({
         "generation":session.runner.generation,"tick":session.runner.tick,
         "flat_states":bits(session.car_states()),"rng":session.runner.rng.to_json(),
-        "summary":session.generation_summary(),
+        "summary":summary,
         "cars":session.runner.agents.iter().map(|a|car_bits(&a.car)).collect::<Vec<_>>(),
         "stats":session.runner.agents.iter().map(|a|stats_bits(&a.stats)).collect::<Vec<_>>(),
         "network_parameters":session.runner.agents.iter().map(|a|bits(a.network.params.iter().copied())).collect::<Vec<_>>(),

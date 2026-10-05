@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <new>
 // libaltd_gpu.so: GPU parts of the fidelity simulator behind a C ABI.
 // Rust loads it with dlopen (src/gpu/hip.rs); examples/gpu_check/main.rs compares
 // every part bit for bit with the CPU code.
@@ -104,11 +105,13 @@ __global__ void query_kernel(World w, int op, int n, const float4* in, float4* o
 template <typename T>
 int upload(const T* host, size_t count, const T*& device) {
     T* d = nullptr;
+    device = nullptr;
     if (count) {
         CHECK(hipMalloc(&d, sizeof(T) * count));
+        // The owner must retain this allocation if copying fails.
+        device = d;
         CHECK(hipMemcpy(d, host, sizeof(T) * count, hipMemcpyHostToDevice));
     }
-    device = d;
     return 0;
 }
 
@@ -175,6 +178,7 @@ struct Sim {
     uint32_t* items;
     Vec2* pushes;
     uint32_t* host_stopped;  // pinned
+    uint32_t* active;        // altd_gpu_sim_active_count's result
     hipEvent_t chunk_done[4];
     hipStream_t stream;  // blocking, so ordered with the null stream
     hipGraphExec_t graph_exec;
@@ -435,6 +439,13 @@ __global__ void __launch_bounds__(STEP_THREADS) step_end_kernel(World w, Vehicle
     end_car(w, v, cars[i], agents[i], carry[i], pushes, drive != 0, eliminate_on_wall != 0, tick);
 }
 
+// Counts the cars with CAR_ACTIVE, one atomic per wave.
+__global__ void active_count_kernel(const Car* cars, uint32_t n, uint32_t* count) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t mask = __ballot(i < n && (cars[i].flags & CAR_ACTIVE));
+    if (mask && __lane_id() == (uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
+}
+
 uint32_t blocks(size_t n, uint32_t size = 256) { return (uint32_t)((n + size - 1) / size); }
 
 // ALTD_GPU_SPLIT=0: the step in one kernel (car_step) instead of the split step.
@@ -454,6 +465,9 @@ __attribute__((constructor)) void keep_scratch() { setenv("HSA_NO_SCRATCH_RECLAI
 
 extern "C" {
 
+void altd_gpu_world_free(World* w);
+void altd_gpu_sim_free(Sim* s);
+
 // Copies the track data to the device; returns an opaque handle or null.
 // `desc` holds host pointers and has the layout of World.
 World* altd_gpu_world_create(const World* desc) {
@@ -461,7 +475,29 @@ World* altd_gpu_world_create(const World* desc) {
         fprintf(stderr, "altd_gpu: BSP depth %u exceeds MAX_RAY_DEPTH %d\n", desc->ray_depth, MAX_RAY_DEPTH);
         return nullptr;
     }
-    World* w = new World(*desc);
+    World* w = new (std::nothrow) World(*desc);
+    if (!w) return nullptr;
+    // desc contains borrowed host pointers. Cleanup may only free pointers
+    // assigned by successful device allocations, including a failed copy.
+    w->ray_nodes = nullptr;
+    w->ray_walls = nullptr;
+    w->surfaces = nullptr;
+    w->tiles = nullptr;
+    w->path_segments = nullptr;
+    w->path_offsets = nullptr;
+    w->path_grid.start = nullptr;
+    w->path_grid.items = nullptr;
+    w->curve_position = nullptr;
+    w->curve_offsets = nullptr;
+    w->curve_forwards = nullptr;
+    w->curve_grid.start = nullptr;
+    w->curve_grid.items = nullptr;
+    w->shapes = nullptr;
+    w->shape_local = nullptr;
+    w->shape_normals = nullptr;
+    w->shape_grid.start = nullptr;
+    w->shape_grid.items = nullptr;
+    w->path_xy = nullptr;
     int bad = upload(desc->ray_nodes, desc->ray_node_count, w->ray_nodes)
         || upload(desc->ray_walls, desc->ray_wall_count, w->ray_walls)
         || upload(desc->surfaces, desc->surface_count, w->surfaces)
@@ -480,6 +516,7 @@ World* altd_gpu_world_create(const World* desc) {
         || upload(desc->path_xy, (size_t)desc->path_points * 2, w->path_xy);
     if (bad) {
         fprintf(stderr, "altd_gpu: world upload failed\n");
+        altd_gpu_world_free(w);
         return nullptr;
     }
     return w;
@@ -528,7 +565,8 @@ int altd_gpu_layout(uint64_t* out, int n) {
 Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const SensorDesc* sensors, uint32_t sensor_count,
                          uint32_t capacity) {
     if (sensor_count > (uint32_t)MAX_SENSORS || vehicle->wheel_count > (uint32_t)MAX_WHEELS) return nullptr;
-    Sim* s = new Sim{};
+    Sim* s = new (std::nothrow) Sim{};
+    if (!s) return nullptr;
     s->world = *world;
     s->vehicle = *vehicle;
     s->sensors.count = sensor_count;
@@ -546,10 +584,12 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
         || hipMalloc(&s->pushes, sizeof(Vec2) * capacity * MAX_PAIRS)
         || hipMalloc(&s->novelty, sizeof(double) * capacity)
         || hipMalloc(&s->state, sizeof(WindowState)) || hipHostMalloc(&s->host_stopped, sizeof(uint32_t) * 4)
+        || hipMalloc(&s->active, sizeof(uint32_t))
         || hipEventCreateWithFlags(&s->chunk_done[0], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[1], hipEventDisableTiming)
         || hipEventCreateWithFlags(&s->chunk_done[2], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[3], hipEventDisableTiming)
         || hipStreamCreate(&s->stream)) {
         fprintf(stderr, "altd_gpu: sim allocation failed\n");
+        altd_gpu_sim_free(s);
         return nullptr;
     }
     return s;
@@ -572,7 +612,7 @@ void altd_gpu_sim_free(Sim* s) {
     if (s->graph_exec) (void)hipGraphExecDestroy(s->graph_exec);
     for (void* p : {(void*)s->cars, (void*)s->agents, (void*)s->here, (void*)s->inputs, (void*)s->params, (void*)s->live[0],
                     (void*)s->live[1], (void*)s->steps[0], (void*)s->steps[1], (void*)s->settled_at, (void*)s->shadow, (void*)s->state,
-                    (void*)s->carry, (void*)s->items, (void*)s->pushes, (void*)s->mean, (void*)s->novelty})
+                    (void*)s->carry, (void*)s->items, (void*)s->pushes, (void*)s->mean, (void*)s->novelty, (void*)s->active})
         if (p) (void)hipFree(p);
     if (s->host_stopped) (void)hipHostFree(s->host_stopped);
     for (hipEvent_t e : s->chunk_done)
@@ -593,6 +633,16 @@ int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents
 int altd_gpu_sim_upload_agents(Sim* s, uint32_t n, const Agent* agents) {
     if (n != s->n) return -1;
     CHECK(hipMemcpy(s->agents, agents, sizeof(Agent) * n, hipMemcpyHostToDevice));
+    return 0;
+}
+
+// The number of uploaded cars that are active, without reading them back.
+int altd_gpu_sim_active_count(Sim* s, uint32_t* out) {
+    CHECK(hipMemsetAsync(s->active, 0, sizeof(uint32_t), s->stream));
+    if (s->n) active_count_kernel<<<blocks(s->n), 256, 0, s->stream>>>(s->cars, s->n, s->active);
+    CHECK(hipGetLastError());
+    CHECK(hipMemcpyAsync(out, s->active, sizeof(uint32_t), hipMemcpyDeviceToHost, s->stream));
+    CHECK(hipStreamSynchronize(s->stream));
     return 0;
 }
 
@@ -1196,7 +1246,21 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     return 0;
 }
 
-int altd_gpu_version() { return 8; }
+int altd_gpu_version() { return 9; }
+
+// Writes the current device's name, NUL-terminated and truncated to `len`
+// bytes; returns the HIP error, so it also tells whether a device is usable.
+int altd_gpu_device_name(char* out, int len) {
+    if (len <= 0) return (int)hipErrorInvalidValue;
+    int device = 0;
+    hipError_t e = hipGetDevice(&device);
+    if (e != hipSuccess) return (int)e;
+    hipDeviceProp_t prop;
+    e = hipGetDeviceProperties(&prop, device);
+    if (e != hipSuccess) return (int)e;
+    snprintf(out, (size_t)len, "%s", prop.name);
+    return 0;
+}
 
 // Runs one math primitive over `n` host inputs; `err` gets the per-element error bits.
 int altd_gpu_math(int op, int n, const void* in, void* out, uint32_t* err) {

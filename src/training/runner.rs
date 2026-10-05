@@ -72,7 +72,7 @@ pub(crate) const CAR_STATE_STRIDE: usize = 14;
 /// active flag, distance score, lap count, best lap time (-1 without a lap),
 /// wall contacts, boost energy, the steering wheel angle in degrees, and the
 /// statistics update count.
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(any(feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
 pub(crate) const CAR_STATE_FIELDS: [&str; CAR_STATE_STRIDE] = [
     "x",
     "y",
