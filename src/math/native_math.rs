@@ -49,8 +49,16 @@ fn reduce(x: f32) -> (i32, f64) {
     }
     (n as i32, y)
 }
-// x - x preserves the runtime NaN result for nonfinite inputs.
-#[allow(clippy::eq_op)]
+// Match x86 invalid-operation results and quiet NaNs without losing their bits.
+pub(crate) fn nonfinite_trig_result(value: f32) -> f32 {
+    let bits = value.to_bits();
+    f32::from_bits(if bits & 0x7fff_ffff == 0x7f80_0000 {
+        0xffc0_0000
+    } else {
+        bits | 0x0040_0000
+    })
+}
+
 pub fn sin(x: f32) -> f32 {
     let bits = x.to_bits() & 0x7fffffff;
     let negative = x.is_sign_negative();
@@ -80,7 +88,7 @@ pub fn sin(x: f32) -> f32 {
         return sin_kernel(if negative { a + 4.0 * p } else { a - 4.0 * p });
     }
     if !x.is_finite() {
-        return x - x;
+        return nonfinite_trig_result(x);
     }
     let (n, y) = reduce(x);
     match n & 3 {
@@ -90,8 +98,6 @@ pub fn sin(x: f32) -> f32 {
         _ => -cos_kernel(y),
     }
 }
-// x - x preserves the runtime NaN result for nonfinite inputs.
-#[allow(clippy::eq_op)]
 pub fn cos(x: f32) -> f32 {
     let bits = x.to_bits() & 0x7fffffff;
     let negative = x.is_sign_negative();
@@ -113,7 +119,7 @@ pub fn cos(x: f32) -> f32 {
         return sin_kernel(if negative { -a - 3.0 * p } else { a - 3.0 * p });
     }
     if !x.is_finite() {
-        return x - x;
+        return nonfinite_trig_result(x);
     }
     let (n, y) = reduce(x);
     match n & 3 {
