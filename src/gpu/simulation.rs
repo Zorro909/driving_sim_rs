@@ -28,6 +28,12 @@ pub(crate) const MAX_CONTACTS: usize = 32;
 pub(crate) const MAX_SHAPE_POINTS: usize = 16;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_SENSORS: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LAYERS: usize = 12;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_WIDTH: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+const LANES: usize = 16;
 pub const RECENT: usize = 10;
 
 pub(crate) const CONTACT_WALL_FIRST: u32 = 1;
@@ -828,6 +834,41 @@ impl TrackArrays {
         })
     }
 
+    /// Checks every count represented by a u32 in the native C descriptor.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn validate_counts(&self, rays: &(Vec<RayNode>, Vec<[f32; 4]>, f32, usize)) -> Result<(), String> {
+        for (what, count) in [
+            ("BSP nodes", rays.0.len()),
+            ("BSP walls", rays.1.len()),
+            ("BSP depth", rays.3),
+            ("surfaces", self.surface_rows.len()),
+            ("path points", self.path_offsets.len()),
+            ("curve points", self.curve_position.len()),
+            ("physics shapes", self.shapes.len()),
+            ("physics shape points", self.shape_local.len()),
+        ] {
+            u32::try_from(count).map_err(|_| format!("too many {what} for the HIP simulator"))?;
+        }
+        // gpu/sim/world.h fixes the BSP traversal stack at 48 entries.
+        if rays.3 > 48 {
+            return Err("BSP depth exceeds the HIP simulator's maximum of 48".into());
+        }
+        for grid in [&self.path_grid, &self.curve_grid, &self.shape_grid]
+            .into_iter()
+            .flatten()
+        {
+            u32::try_from(grid.items.len()).map_err(|_| "too many grid entries for the HIP simulator")?;
+            let cells = (grid.nx as usize)
+                .checked_mul(grid.ny as usize)
+                .and_then(|n| n.checked_add(1))
+                .ok_or("HIP grid cell count overflow")?;
+            if grid.start.len() != cells {
+                return Err("HIP grid dimensions do not match its offsets".into());
+            }
+        }
+        Ok(())
+    }
+
     /// The descriptor; `rays` are the BSP arrays of `bsp::RayTree::gpu_arrays`.
     pub(crate) fn desc(&self, rays: &(Vec<RayNode>, Vec<[f32; 4]>, f32, usize)) -> WorldDesc {
         let (x0, y0, nx, ny, tiles) = &self.tiles;
@@ -1007,6 +1048,8 @@ impl ReadMask {
 pub struct GpuSim<'a> {
     gpu: &'a Gpu,
     handle: *mut c_void,
+    free: unsafe extern "C" fn(*mut c_void),
+    capacity: usize,
     pub(crate) sensor_count: usize,
     pub(crate) cars: usize,
     /// Caller-chosen tag of the uploaded networks (e.g. the generation), so
@@ -1041,8 +1084,7 @@ pub(crate) struct WindowArgs {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for GpuSim<'_> {
     fn drop(&mut self) {
-        let free: unsafe extern "C" fn(*mut c_void) = self.gpu.symbol("altd_gpu_sim_free");
-        unsafe { free(self.handle) };
+        unsafe { (self.free)(self.handle) };
     }
 }
 
@@ -1057,30 +1099,108 @@ fn check(status: i32, what: &str) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn try_check(status: i32, what: &str) -> Result<(), String> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "GPU {what} failed with {}",
+            crate::gpu::hip::status_message(status)
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn network_size(shape: &[usize], sensor_count: usize, control_src: [i32; 5]) -> Result<usize, String> {
+    if !(2..=MAX_LAYERS).contains(&shape.len()) {
+        return Err(format!("the HIP simulator needs 2..{MAX_LAYERS} network layers"));
+    }
+    if shape[0] != sensor_count {
+        return Err(format!(
+            "the HIP network has {} inputs but the simulator has {sensor_count} sensors",
+            shape[0]
+        ));
+    }
+    for (layer, &width) in shape.iter().enumerate() {
+        let limit = if layer == 0 { MAX_WIDTH } else { LANES };
+        if width == 0 || width > limit {
+            return Err(format!(
+                "HIP network layer {layer} has width {width}; supported widths are 1..{limit}"
+            ));
+        }
+    }
+    let outputs = *shape.last().unwrap();
+    if control_src.iter().any(|&index| index < -1 || index >= outputs as i32) {
+        return Err("HIP control mapping is outside the network output layer".into());
+    }
+    shape.windows(2).try_fold(0usize, |size, layer| {
+        layer[0]
+            .checked_add(1)
+            .and_then(|rows| rows.checked_mul(layer[1]))
+            .and_then(|count| size.checked_add(count))
+            .ok_or_else(|| "HIP network parameter count overflow".to_string())
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> GpuSim<'a> {
     pub fn new(world: &GpuWorld<'a>, vehicle: &VehicleDesc, sensors: &[SensorDesc], capacity: usize) -> GpuSim<'a> {
+        Self::try_new(world, vehicle, sensors, capacity).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `new`, reporting invalid capacities, unsupported sensors and allocation failures.
+    pub fn try_new(
+        world: &GpuWorld<'a>,
+        vehicle: &VehicleDesc,
+        sensors: &[SensorDesc],
+        capacity: usize,
+    ) -> Result<GpuSim<'a>, String> {
         let gpu = world.gpu();
+        if sensors.len() > MAX_SENSORS {
+            return Err(format!(
+                "{} sensors exceed the HIP maximum of {MAX_SENSORS}",
+                sensors.len()
+            ));
+        }
+        if vehicle.wheel_count as usize > MAX_WHEELS {
+            return Err(format!(
+                "{} wheels exceed the HIP maximum of {MAX_WHEELS}",
+                vehicle.wheel_count
+            ));
+        }
+        let count = u32::try_from(capacity).map_err(|_| "population exceeds the HIP maximum of 4294967295")?;
+        if count == 0 || count > u32::MAX - 7 {
+            return Err("HIP population capacity must be positive and leave room for eight inference batches".into());
+        }
+        for size in [
+            std::mem::size_of::<GpuCar>(),
+            std::mem::size_of::<GpuAgent>(),
+            MAX_SENSORS * std::mem::size_of::<f64>(),
+        ] {
+            if capacity
+                .checked_mul(size)
+                .is_none_or(|bytes| bytes > isize::MAX as usize)
+            {
+                return Err("HIP population capacity exceeds the native address space".into());
+            }
+        }
         let create: unsafe extern "C" fn(
             *const c_void,
             *const VehicleDesc,
             *const SensorDesc,
             u32,
             u32,
-        ) -> *mut c_void = gpu.symbol("altd_gpu_sim_create");
-        assert!(sensors.len() <= MAX_SENSORS);
-        let handle = unsafe {
-            create(
-                world.handle(),
-                vehicle,
-                sensors.as_ptr(),
-                sensors.len() as u32,
-                capacity as u32,
-            )
-        };
-        assert!(!handle.is_null(), "altd_gpu_sim_create failed");
-        GpuSim {
+        ) -> *mut c_void = gpu.required_symbol("altd_gpu_sim_create")?;
+        let free = gpu.required_symbol("altd_gpu_sim_free")?;
+        let handle = unsafe { create(world.handle(), vehicle, sensors.as_ptr(), sensors.len() as u32, count) };
+        if handle.is_null() {
+            return Err("altd_gpu_sim_create failed to allocate the HIP simulator".into());
+        }
+        Ok(GpuSim {
             gpu,
             handle,
+            free,
+            capacity,
             sensor_count: sensors.len(),
             cars: 0,
             network_tag: None,
@@ -1088,18 +1208,23 @@ impl<'a> GpuSim<'a> {
             parameter_buffer: Vec::new(),
             car_buffer: Vec::new(),
             agent_buffer: Vec::new(),
-        }
+        })
     }
 
     /// Switch uploaded tracks while retaining population and network buffers.
     /// Keep `world` alive until the next switch or until this simulator is dropped.
     pub fn set_world(&mut self, world: &GpuWorld<'a>) {
-        assert!(
-            std::ptr::eq(self.gpu, world.gpu()),
-            "GPU world belongs to another device handle"
-        );
-        let f: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 = self.gpu.symbol("altd_gpu_sim_set_world");
-        check(unsafe { f(self.handle, world.handle()) }, "set_world");
+        self.try_set_world(world).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// `set_world`, reporting incompatible handles and HIP failures.
+    pub fn try_set_world(&mut self, world: &GpuWorld<'a>) -> Result<(), String> {
+        if !std::ptr::eq(self.gpu, world.gpu()) {
+            return Err("GPU world belongs to another device handle".into());
+        }
+        let f: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 =
+            self.gpu.required_symbol("altd_gpu_sim_set_world")?;
+        try_check(unsafe { f(self.handle, world.handle()) }, "set_world")
     }
 
     /// The retained host state buffers (empty on first use); return them with
@@ -1116,36 +1241,51 @@ impl<'a> GpuSim<'a> {
     }
 
     pub fn upload(&mut self, cars: &[GpuCar], agents: Option<&[GpuAgent]>) {
-        let f: unsafe extern "C" fn(*mut c_void, u32, *const GpuCar, *const GpuAgent) -> i32 =
-            self.gpu.symbol("altd_gpu_sim_upload");
-        if let Some(a) = agents {
-            assert_eq!(a.len(), cars.len());
+        self.try_upload(cars, agents).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// `upload`, reporting invalid state counts and HIP failures.
+    pub fn try_upload(&mut self, cars: &[GpuCar], agents: Option<&[GpuAgent]>) -> Result<(), String> {
+        if cars.len() > self.capacity {
+            return Err("car population exceeds the HIP simulator capacity".into());
         }
-        check(
+        let count = u32::try_from(cars.len()).map_err(|_| "too many cars for the HIP simulator")?;
+        let f: unsafe extern "C" fn(*mut c_void, u32, *const GpuCar, *const GpuAgent) -> i32 =
+            self.gpu.required_symbol("altd_gpu_sim_upload")?;
+        if let Some(a) = agents {
+            if a.len() != cars.len() {
+                return Err("HIP car and agent counts differ".into());
+            }
+        }
+        try_check(
             unsafe {
                 f(
                     self.handle,
-                    cars.len() as u32,
+                    count,
                     cars.as_ptr(),
                     agents.map_or(std::ptr::null(), |a| a.as_ptr()),
                 )
             },
             "upload",
-        );
+        )?;
         self.cars = cars.len();
+        Ok(())
     }
 
     /// A training window over the uploaded cars (`TrainingRunner::advance_window`
     /// order); returns (executed ticks, transition_without_drive).
-    pub(crate) fn window(&self, args: &WindowArgs) -> (u64, bool) {
+    pub(crate) fn try_window(&self, args: &WindowArgs) -> Result<(u64, bool), String> {
         let f: unsafe extern "C" fn(*mut c_void, *const WindowArgs, *mut u64, *mut u32) -> i32 =
-            self.gpu.symbol("altd_gpu_sim_window");
+            self.gpu.required_symbol("altd_gpu_sim_window")?;
         let (mut executed, mut transition) = (0u64, 0u32);
-        check(
+        try_check(
             unsafe { f(self.handle, args, &mut executed, &mut transition) },
             "window",
-        );
-        (executed, transition != 0)
+        )?;
+        if executed > args.ticks || transition > 1 || executed < transition as u64 {
+            return Err("HIP window returned invalid tick counters".into());
+        }
+        Ok((executed, transition != 0))
     }
 
     /// Replaces the agents of the uploaded cars.
@@ -1159,17 +1299,34 @@ impl<'a> GpuSim<'a> {
     }
 
     pub fn download(&self, cars: Option<&mut Vec<GpuCar>>, agents: Option<&mut Vec<GpuAgent>>) {
+        self.try_download(cars, agents).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// `download`, reporting allocation, missing-symbol and HIP failures.
+    pub fn try_download(
+        &self,
+        cars: Option<&mut Vec<GpuCar>>,
+        agents: Option<&mut Vec<GpuAgent>>,
+    ) -> Result<(), String> {
         let f: unsafe extern "C" fn(*mut c_void, *mut GpuCar, *mut GpuAgent) -> i32 =
-            self.gpu.symbol("altd_gpu_sim_download");
-        let cars = cars.map(|c| {
-            c.resize(self.cars, GpuCar::zeroed());
-            c.as_mut_ptr()
-        });
-        let agents = agents.map(|a| {
-            a.resize(self.cars, GpuAgent::default());
-            a.as_mut_ptr()
-        });
-        check(
+            self.gpu.required_symbol("altd_gpu_sim_download")?;
+        let cars = cars
+            .map(|c| {
+                c.try_reserve(self.cars.saturating_sub(c.len()))
+                    .map_err(|e| format!("HIP car readback allocation failed: {e}"))?;
+                c.resize(self.cars, GpuCar::zeroed());
+                Ok::<_, String>(c.as_mut_ptr())
+            })
+            .transpose()?;
+        let agents = agents
+            .map(|a| {
+                a.try_reserve(self.cars.saturating_sub(a.len()))
+                    .map_err(|e| format!("HIP agent readback allocation failed: {e}"))?;
+                a.resize(self.cars, GpuAgent::default());
+                Ok::<_, String>(a.as_mut_ptr())
+            })
+            .transpose()?;
+        try_check(
             unsafe {
                 f(
                     self.handle,
@@ -1178,28 +1335,42 @@ impl<'a> GpuSim<'a> {
                 )
             },
             "download",
-        );
+        )
     }
 
     /// One network per car: `params` holds `networks` flat parameter vectors of `shape`.
     pub fn networks(&mut self, shape: &[usize], params: &[f64], control_src: [i32; 5]) {
+        self.try_networks(shape, params, control_src)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// `networks`, validating the HIP kernel limits before upload and allocation.
+    pub fn try_networks(&mut self, shape: &[usize], params: &[f64], control_src: [i32; 5]) -> Result<(), String> {
+        let size = network_size(shape, self.sensor_count, control_src)?;
+        if params.is_empty() || !params.len().is_multiple_of(size) {
+            return Err("HIP network parameters do not contain complete networks".into());
+        }
+        let count = params.len() / size;
+        if count > self.capacity {
+            return Err("network population exceeds the HIP simulator capacity".into());
+        }
+        let count = u32::try_from(count).map_err(|_| "too many networks for the HIP simulator")?;
         let f: unsafe extern "C" fn(*mut c_void, u32, *const u32, u32, *const f64, *const i32) -> i32 =
-            self.gpu.symbol("altd_gpu_sim_networks");
+            self.gpu.required_symbol("altd_gpu_sim_networks")?;
         let widths: Vec<u32> = shape.iter().map(|&w| w as u32).collect();
-        let size = crate::nn::network::parameter_count(shape);
-        assert_eq!(params.len() % size, 0);
         let status = unsafe {
             f(
                 self.handle,
                 widths.len() as u32,
                 widths.as_ptr(),
-                (params.len() / size) as u32,
+                count,
                 params.as_ptr(),
                 control_src.as_ptr(),
             )
         };
-        check(status, "networks");
+        try_check(status, "networks")?;
         self.network_count = params.len() / size;
+        Ok(())
     }
 
     pub(crate) fn network_count(&self) -> usize {
@@ -1237,7 +1408,10 @@ impl<'a> GpuSim<'a> {
     ) -> Result<(), String> {
         use rayon::prelude::*;
         let first = networks.first().ok_or("no networks")?;
-        let size = crate::nn::network::parameter_count(&first.shape);
+        let size = network_size(&first.shape, self.sensor_count, control_src)?;
+        if networks.len() > self.capacity {
+            return Err("network population exceeds the HIP simulator capacity".into());
+        }
         if networks
             .iter()
             .any(|n| n.shape != first.shape || n.params.len() != size)
@@ -1246,33 +1420,43 @@ impl<'a> GpuSim<'a> {
         }
         let mut profile = crate::training::training_profile::Profile::new("network_upload");
         let mut params = std::mem::take(&mut self.parameter_buffer);
-        params.resize(
-            networks
-                .len()
-                .checked_mul(size)
-                .ok_or("network parameter count overflow")?,
-            0.0,
-        );
+        let length = networks
+            .len()
+            .checked_mul(size)
+            .ok_or("network parameter count overflow")?;
+        params
+            .try_reserve(length.saturating_sub(params.len()))
+            .map_err(|e| format!("HIP network upload allocation failed: {e}"))?;
+        params.resize(length, 0.0);
         params
             .par_chunks_mut(size)
             .zip(networks.par_iter())
             .for_each(|(out, network)| out.copy_from_slice(&network.params));
         profile.mark("pack");
-        self.networks(&first.shape, &params, control_src);
+        let result = self.try_networks(&first.shape, &params, control_src);
         profile.mark("upload");
         self.parameter_buffer = params;
-        Ok(())
+        result
     }
 
     /// Exact population novelty for the currently uploaded networks.
     pub fn novelty(&self) -> Vec<f64> {
-        let f: unsafe extern "C" fn(*mut c_void, u32, *mut f64) -> i32 = self.gpu.symbol("altd_gpu_sim_novelty");
-        let mut out = vec![0.0; self.network_count];
-        check(
+        self.try_novelty().unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `novelty`, reporting allocation, missing-symbol and HIP failures.
+    pub fn try_novelty(&self) -> Result<Vec<f64>, String> {
+        let f: unsafe extern "C" fn(*mut c_void, u32, *mut f64) -> i32 =
+            self.gpu.required_symbol("altd_gpu_sim_novelty")?;
+        let mut out = Vec::new();
+        out.try_reserve(self.network_count)
+            .map_err(|e| format!("HIP novelty allocation failed: {e}"))?;
+        out.resize(self.network_count, 0.0);
+        try_check(
             unsafe { f(self.handle, self.network_count as u32, out.as_mut_ptr()) },
             "population novelty",
-        );
-        out
+        )?;
+        Ok(out)
     }
 
     /// Sensors and network forward for the cars in `mask` (sets their controls).
@@ -1427,4 +1611,67 @@ pub fn agent_import(g: &GpuAgent, a: &mut crate::training::TrainingAgent) {
     s.recent_score_diffs.clear();
     s.recent_score_diffs
         .extend((0..g.recent_len as usize).map(|k| g.recent[(g.recent_start as usize + k) % RECENT]));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_validation_tests {
+    use super::*;
+
+    #[test]
+    fn network_limits_match_the_hip_forward_kernel() {
+        let controls = [0, 1, 2, 3, 4];
+        assert_eq!(network_size(&[20, 16, 5], 20, controls).unwrap(), 421);
+        assert!(network_size(&[32, 16, 5], 32, controls).is_ok());
+        assert!(network_size(&[20, 32, 5], 20, controls)
+            .unwrap_err()
+            .contains("width 32"));
+        assert!(network_size(&[20, 5, 17], 20, controls).unwrap_err().contains("1..16"));
+        assert!(network_size(&[33, 5], 33, controls).unwrap_err().contains("1..32"));
+        assert!(network_size(&[20, 0, 5], 20, controls).is_err());
+        assert!(network_size(&[20], 20, controls).is_err());
+        assert!(network_size(&[20; MAX_LAYERS + 1], 20, controls)
+            .unwrap_err()
+            .contains("network layers"));
+        assert!(network_size(&[20, 5], 19, controls).unwrap_err().contains("sensors"));
+        assert!(network_size(&[20, 5], 20, [0, 1, 2, 3, 5])
+            .unwrap_err()
+            .contains("control mapping"));
+        assert!(network_size(&[20, 5], 20, [-2; 5]).is_err());
+        assert!(network_size(&[20, 5], 20, [-1; 5]).is_ok());
+    }
+
+    #[test]
+    fn a_hip_window_error_returns_without_panicking() {
+        let gpu = match crate::training::session::hip_device() {
+            Ok((gpu, _)) => gpu,
+            Err(reason) => {
+                eprintln!("skipping HIP window error check: {reason}");
+                return;
+            }
+        };
+        let template = serde_json::from_str(include_str!("../../assets/scenes/formula_template.json")).unwrap();
+        let settings = serde_json::from_str(include_str!("../../assets/random_track_settings.json")).unwrap();
+        let (_, scene) =
+            crate::track::training_tracks::training_scene_at(&template, &settings, None, 1729, 0, 0).unwrap();
+        let world = World::from_scene(&scene);
+        let prepared = crate::gpu::hip::PreparedGpuWorld::new(&world).unwrap();
+        let uploaded = GpuWorld::try_from_prepared(gpu, prepared).unwrap();
+        let mut sim = GpuSim::try_new(
+            &uploaded,
+            &vehicle_desc(&world.vehicle).unwrap(),
+            &[sensor_desc(&Sensor::Speed)],
+            1,
+        )
+        .unwrap();
+        // An empty simulator has no uploaded networks, which the C API rejects.
+        let error = sim
+            .try_window(&WindowArgs {
+                ticks: 1,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(error.contains("window") && error.contains("-2"), "{error}");
+        let error = sim.try_networks(&[1, 32, 5], &[], [0, 1, 2, 3, 4]).unwrap_err();
+        assert!(error.contains("width 32"), "{error}");
+    }
 }

@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <new>
 // libaltd_gpu.so: GPU parts of the fidelity simulator behind a C ABI.
 // Rust loads it with dlopen (src/gpu/hip.rs); examples/gpu_check/main.rs compares
 // every part bit for bit with the CPU code.
@@ -104,11 +105,13 @@ __global__ void query_kernel(World w, int op, int n, const float4* in, float4* o
 template <typename T>
 int upload(const T* host, size_t count, const T*& device) {
     T* d = nullptr;
+    device = nullptr;
     if (count) {
         CHECK(hipMalloc(&d, sizeof(T) * count));
+        // The owner must retain this allocation if copying fails.
+        device = d;
         CHECK(hipMemcpy(d, host, sizeof(T) * count, hipMemcpyHostToDevice));
     }
-    device = d;
     return 0;
 }
 
@@ -454,6 +457,9 @@ __attribute__((constructor)) void keep_scratch() { setenv("HSA_NO_SCRATCH_RECLAI
 
 extern "C" {
 
+void altd_gpu_world_free(World* w);
+void altd_gpu_sim_free(Sim* s);
+
 // Copies the track data to the device; returns an opaque handle or null.
 // `desc` holds host pointers and has the layout of World.
 World* altd_gpu_world_create(const World* desc) {
@@ -461,7 +467,29 @@ World* altd_gpu_world_create(const World* desc) {
         fprintf(stderr, "altd_gpu: BSP depth %u exceeds MAX_RAY_DEPTH %d\n", desc->ray_depth, MAX_RAY_DEPTH);
         return nullptr;
     }
-    World* w = new World(*desc);
+    World* w = new (std::nothrow) World(*desc);
+    if (!w) return nullptr;
+    // desc contains borrowed host pointers. Cleanup may only free pointers
+    // assigned by successful device allocations, including a failed copy.
+    w->ray_nodes = nullptr;
+    w->ray_walls = nullptr;
+    w->surfaces = nullptr;
+    w->tiles = nullptr;
+    w->path_segments = nullptr;
+    w->path_offsets = nullptr;
+    w->path_grid.start = nullptr;
+    w->path_grid.items = nullptr;
+    w->curve_position = nullptr;
+    w->curve_offsets = nullptr;
+    w->curve_forwards = nullptr;
+    w->curve_grid.start = nullptr;
+    w->curve_grid.items = nullptr;
+    w->shapes = nullptr;
+    w->shape_local = nullptr;
+    w->shape_normals = nullptr;
+    w->shape_grid.start = nullptr;
+    w->shape_grid.items = nullptr;
+    w->path_xy = nullptr;
     int bad = upload(desc->ray_nodes, desc->ray_node_count, w->ray_nodes)
         || upload(desc->ray_walls, desc->ray_wall_count, w->ray_walls)
         || upload(desc->surfaces, desc->surface_count, w->surfaces)
@@ -480,6 +508,7 @@ World* altd_gpu_world_create(const World* desc) {
         || upload(desc->path_xy, (size_t)desc->path_points * 2, w->path_xy);
     if (bad) {
         fprintf(stderr, "altd_gpu: world upload failed\n");
+        altd_gpu_world_free(w);
         return nullptr;
     }
     return w;
@@ -528,7 +557,8 @@ int altd_gpu_layout(uint64_t* out, int n) {
 Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const SensorDesc* sensors, uint32_t sensor_count,
                          uint32_t capacity) {
     if (sensor_count > (uint32_t)MAX_SENSORS || vehicle->wheel_count > (uint32_t)MAX_WHEELS) return nullptr;
-    Sim* s = new Sim{};
+    Sim* s = new (std::nothrow) Sim{};
+    if (!s) return nullptr;
     s->world = *world;
     s->vehicle = *vehicle;
     s->sensors.count = sensor_count;
@@ -550,6 +580,7 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
         || hipEventCreateWithFlags(&s->chunk_done[2], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[3], hipEventDisableTiming)
         || hipStreamCreate(&s->stream)) {
         fprintf(stderr, "altd_gpu: sim allocation failed\n");
+        altd_gpu_sim_free(s);
         return nullptr;
     }
     return s;

@@ -69,13 +69,21 @@ impl TrainingRunner {
                     .into(),
             );
         }
+        if self
+            .layout
+            .sensors
+            .iter()
+            .any(|sensor| matches!(sensor, Sensor::Raycast { length, .. } if *length <= 0.0 || !length.is_finite()))
+        {
+            return Err("the HIP simulator requires positive finite ray lengths".into());
+        }
         let sensors: Vec<_> = self
             .layout
             .sensors
             .iter()
             .map(crate::gpu::simulation::sensor_desc)
             .collect();
-        Ok(crate::gpu::simulation::GpuSim::new(world, &vehicle, &sensors, capacity))
+        crate::gpu::simulation::GpuSim::try_new(world, &vehicle, &sensors, capacity)
     }
 
     /// `advance_generation` on the GPU.
@@ -86,11 +94,10 @@ impl TrainingRunner {
         world: &crate::gpu::hip::GpuWorld,
         time_limit_ticks: u64,
     ) -> Result<u64, String> {
-        assert_eq!(
-            self.stats_phase, 0,
-            "fresh game generations use reset statistics counters"
-        );
-        let bound = (time_limit_ticks / 6 + 2) * 6;
+        if self.stats_phase != 0 {
+            return Err("GPU advance_generation needs statistics phase 0".into());
+        }
+        let bound = (time_limit_ticks / 6).saturating_add(2).saturating_mul(6);
         self.advance_window_gpu(
             sim,
             world,
@@ -146,7 +153,7 @@ impl TrainingRunner {
         let (mut cars, mut agents) = sim.take_state_buffers();
         export_state_into(&self.agents, vehicle, surfaces, &mut cars, &mut agents)?;
         profile.mark("export_state");
-        sim.upload(&cars, Some(&agents));
+        sim.try_upload(&cars, Some(&agents))?;
         profile.mark("upload_state");
         let args = WindowArgs {
             start_tick: self.tick,
@@ -161,10 +168,10 @@ impl TrainingRunner {
             pad: 0,
             time_limit: time_limit.unwrap_or(0.0),
         };
-        let (executed, transition_without_drive) = sim.window(&args);
+        let (executed, transition_without_drive) = sim.try_window(&args)?;
         profile.mark("window");
         // The upload has finished. Read back into the same allocations.
-        sim.download(Some(&mut cars), Some(&mut agents));
+        sim.try_download(Some(&mut cars), Some(&mut agents))?;
         profile.mark("download_state");
         self.import_state(&cars, &agents, surfaces)?;
         profile.mark("import_state");
@@ -243,7 +250,7 @@ impl TrainingRunner {
         });
         sim.upload_networks(&networks, src)?;
         profile.mark("networks");
-        let novelty = sim.novelty();
+        let novelty = sim.try_novelty()?;
         profile.mark("novelty");
         self.install_with_novelty(networks, true, Some(&novelty));
         self.stats_phase = 0;
