@@ -17,7 +17,7 @@ use bench::bench;
 use comparisons::{
     compare_closed_loop, compare_network, compare_one_step, compare_score, compare_sensors, compare_trace,
 };
-use io::{load, print_without, write_report};
+use io::{load, load_or, print_without, write_report, RALLY_MODEL};
 use scratch::{train_scratch, ScratchConfig, StopRules};
 use train::train;
 
@@ -54,7 +54,7 @@ fn main() {
             let result = bench(
                 &load(&scene),
                 &load(&network),
-                &load(&model),
+                &load_or(model.as_deref(), &RALLY_MODEL),
                 &load(&spawn_trace),
                 population,
                 ticks,
@@ -293,6 +293,15 @@ fn main() {
             let result = compare_score(&world, &load(&trace));
             write_report(&report, &result);
             print_without(&result, "rows");
+        }
+        Command::GpuInfo { library } => {
+            let gpu = altd_sim::gpu::hip::Gpu::open(library.as_deref()).unwrap_or_else(|error| {
+                eprintln!("gpu-info: {error}");
+                std::process::exit(1);
+            });
+            gpu.check_layout();
+            let info = json!({"version": platform::VERSION, "library": gpu.path(), "layout": "ok"});
+            println!("{}", serde_json::to_string_pretty(&info).unwrap());
         }
     }
 }

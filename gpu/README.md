@@ -4,7 +4,7 @@ The HIP library runs whole driving generations on an AMD GPU. Captured CPU/HIP c
 
 ## Build and use
 
-Install ROCm with `hipcc`, then build from the repository root:
+Linux release archives include `libaltd_gpu.so` beside `altd-sim`, built with ROCm 7.1 for the targets in `release-targets`. They need a ROCm 7.x runtime that provides `libamdhip64.so.7`, but no compiler. `altd-sim gpu-info` reports the loaded library. To build the library yourself, install ROCm with `hipcc`, then build from the repository root:
 
 ```sh
 gpu/build.sh
@@ -17,7 +17,19 @@ target/release/altd-sim --threads 8 train-scratch --gpu \
   --eliminate-on-wall --idle-eliminate --out-dir runs/gpu-example
 ```
 
-`OUT` overrides the library output directory, default `target/gpu`. `GPU_ARCH` overrides the architecture, default `gfx1100` for RX 7900 XTX. The script verifies the checked-in double tables against their Rust bit patterns without rewriting tracked files. `python3 gpu/gen_tables.py --output PATH` writes a header explicitly; `--check` validates it.
+`OUT` overrides the library output directory, default `target/gpu`. `GPU_ARCH` lists one or more architectures separated by commas or spaces, default `gfx1100` for RX 7900 XTX; `rocminfo` reports a GPU's name. `GPU_ARCH="$(cat gpu/release-targets)"` builds the release library for every consumer target.
+
+`--gpu` and `gpu-info` load `ALTD_GPU_LIB` when set. Otherwise they try `libaltd_gpu.so` beside the executable, then `target/gpu` of the checkout that built the binary. Load errors list each attempted path.
+
+| Targets | GPUs |
+| --- | --- |
+| gfx803, gfx900, gfx902, gfx906, gfx909, gfx90c | Polaris and Vega: RX 470-590, Vega 56/64, Radeon VII, Vega APUs |
+| gfx1010-gfx1013 | RDNA1: RX 5500-5700 XT |
+| gfx1030-gfx1036 | RDNA2: RX 6400-6950 XT, Steam Deck, Radeon 610M/680M |
+| gfx1100-gfx1103, gfx1150-gfx1153 | RDNA3 and RDNA3.5: RX 7600-7900 XTX, Radeon 780M/890M, Strix Halo |
+| gfx1200, gfx1201 | RDNA4: RX 9060/9070 |
+
+The ROCm 7.1 runtime officially supports fewer consumer GPUs than this list; the remaining targets are best effort. The captured CPU/HIP equivalence checks have run on gfx1100 only. The script verifies the checked-in double tables against their Rust bit patterns without rewriting tracked files. `python3 gpu/gen_tables.py --output PATH` writes a header explicitly; `--check` validates it.
 
 The compiler flags `-ffp-contract=off` and `-fhip-fp32-correctly-rounded-divide-sqrt` preserve separate multiply/add rounding and correctly rounded float32 division/square root. Keep them when changing architecture. The native crate loads the library at runtime, so CPU-only builds do not require ROCm.
 
