@@ -134,6 +134,12 @@ pub struct GenerationSummary {
     /// The first car with the highest distance score.
     pub(crate) best_index: usize,
     pub(crate) best_score: f64,
+    /// Scores added in car order, starting at +0, then divided by population.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) average_score: Option<f64>,
+    /// JavaScript `Math.min` semantics, including NaN and negative zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worst_score: Option<f64>,
     /// Cars with at least one completed lap.
     pub(crate) lapped: usize,
     pub(crate) active: usize,
@@ -684,8 +690,16 @@ impl Session {
     pub fn generation_summary(&self) -> GenerationSummary {
         let agents = &self.runner.agents;
         let mut best = 0;
+        let mut total_score = 0.0;
+        let mut worst_score = f64::INFINITY;
         for (i, a) in agents.iter().enumerate() {
-            if a.stats.total_score > agents[best].stats.total_score {
+            let score = a.stats.total_score;
+            total_score += score;
+            if score.is_nan() || score < worst_score || (score == 0.0 && worst_score == 0.0 && score.is_sign_negative())
+            {
+                worst_score = score;
+            }
+            if score > agents[best].stats.total_score {
                 best = i;
             }
         }
@@ -693,6 +707,8 @@ impl Session {
         GenerationSummary {
             best_index: best,
             best_score: agents.get(best).map_or(f64::NAN, |a| a.stats.total_score),
+            average_score: (!agents.is_empty()).then(|| total_score / agents.len() as f64),
+            worst_score: (!agents.is_empty()).then_some(worst_score),
             lapped: agents.iter().filter(|a| a.stats.score.lap_count >= 1).count(),
             active: self.active_count(),
             lap_index: lap.map(|l| l.0),
@@ -1158,6 +1174,85 @@ mod tests {
             )
             .is_err());
         assert_eq!(s.network_json(1).unwrap(), t.network_json(0).unwrap());
+    }
+
+    #[test]
+    fn generation_summary_score_aggregates_follow_exported_scores_through_turnover() {
+        let mut session = generated_session(r#"{"population":6,"seed":5,"eliminateOnWall":true}"#);
+        session.start_with_shape(&[20, 8, 5]).unwrap();
+        for generation in 0..2 {
+            session.advance_generation(240).unwrap();
+            assert_eq!(session.runner.generation, generation);
+            let states = session.car_states();
+            let scores: Vec<f64> = states.chunks_exact(CAR_STATE_STRIDE).map(|car| car[7]).collect();
+            // The worker adds exported scores in car order, starting at +0.
+            let average = scores.iter().fold(0.0, |sum, score| sum + score) / scores.len() as f64;
+            let worst = scores.iter().copied().min_by(f64::total_cmp).unwrap();
+            let summary = serde_json::to_value(session.generation_summary()).unwrap();
+            assert_eq!(
+                summary["averageScore"]
+                    .as_f64()
+                    .expect("summary averageScore")
+                    .to_bits(),
+                average.to_bits(),
+                "generation {generation} average"
+            );
+            assert_eq!(
+                summary["worstScore"].as_f64().expect("summary worstScore").to_bits(),
+                worst.to_bits(),
+                "generation {generation} worst"
+            );
+            session.next_generation().unwrap();
+            let summary = serde_json::to_value(session.generation_summary()).unwrap();
+            assert_eq!(summary["averageScore"].as_f64().unwrap().to_bits(), 0.0f64.to_bits());
+            assert_eq!(summary["worstScore"].as_f64().unwrap().to_bits(), 0.0f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn generation_summary_score_aggregates_preserve_javascript_rounding_and_minimum() {
+        let mut session = generated_session(r#"{"population":3,"seed":5}"#);
+        let summary = serde_json::to_value(session.generation_summary()).unwrap();
+        assert!(summary.get("averageScore").is_none());
+        assert!(summary.get("worstScore").is_none());
+        session.start_with_shape(&[20, 8, 5]).unwrap();
+        for (scores, average, worst) in [
+            ([1e16, 1.0, -1e16], 0.0, -1e16),
+            ([0.0, -0.0, 0.0], 0.0, -0.0),
+            ([-0.0, 0.0, 0.0], 0.0, -0.0),
+            ([-0.0, -0.0, -0.0], 0.0, -0.0),
+            ([f64::MAX, f64::MAX, 0.0], f64::INFINITY, 0.0),
+            ([f64::INFINITY, 1.0, 2.0], f64::INFINITY, 1.0),
+            ([f64::NEG_INFINITY, 1.0, 2.0], f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ([f64::INFINITY, f64::NEG_INFINITY, 0.0], f64::NAN, f64::NEG_INFINITY),
+            ([f64::NAN, 1.0, -2.0], f64::NAN, f64::NAN),
+            ([1.0, f64::NAN, -2.0], f64::NAN, f64::NAN),
+            ([1.0, -2.0, f64::NAN], f64::NAN, f64::NAN),
+        ] {
+            for (agent, score) in session.runner.agents.iter_mut().zip(scores) {
+                agent.stats.total_score = score;
+            }
+            let summary = session.generation_summary();
+            let wire = serde_json::to_value(&summary).unwrap();
+            for (key, actual, expected) in [
+                ("averageScore", summary.average_score.unwrap(), average),
+                ("worstScore", summary.worst_score.unwrap(), worst),
+            ] {
+                if expected.is_nan() {
+                    assert!(actual.is_nan(), "{key} for {scores:?}");
+                } else {
+                    assert_eq!(actual.to_bits(), expected.to_bits(), "{key} for {scores:?}");
+                }
+                if expected.is_finite() {
+                    assert_eq!(wire[key].as_f64().unwrap().to_bits(), expected.to_bits());
+                } else {
+                    assert!(
+                        wire.get(key).unwrap().is_null(),
+                        "nonfinite {key} is unavailable on the wire"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
