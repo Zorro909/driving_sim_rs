@@ -270,7 +270,7 @@ impl Session {
         if self.network.get("weights").is_some() {
             let seed = Network::try_from_game_export(&self.network)?;
             self.check_shape(&seed.shape)?;
-            let lineage = self.runner.start_traced(&seed);
+            let lineage = self.runner_mut()?.start_traced(&seed);
             self.record(lineage);
             self.networks_changed();
             Ok(())
@@ -286,8 +286,9 @@ impl Session {
     /// from the session RNG as `train-scratch` does.
     pub fn start_with_shape(&mut self, shape: &[usize]) -> Result<(), String> {
         self.check_shape(shape)?;
-        let seed = self.runner.rng.xavier(shape);
-        let lineage = self.runner.start_traced(&seed);
+        let runner = self.runner_mut()?;
+        let seed = runner.rng.xavier(shape);
+        let lineage = runner.start_traced(&seed);
         self.record(lineage);
         self.networks_changed();
         Ok(())
@@ -365,22 +366,59 @@ impl Session {
     /// The HIP simulator, after its startup comparison with the CPU; `None`
     /// on the CPU backend. A failed comparison moves the session to the CPU.
     #[cfg(not(target_arch = "wasm32"))]
-    fn hip(&mut self) -> Option<&mut hip::HipState> {
-        let state = self.hip.as_mut()?;
+    fn hip(&mut self) -> Result<Option<&mut hip::HipState>, String> {
+        let Some(state) = self.hip.as_mut() else {
+            return Ok(None);
+        };
         if state.needs_verify() {
+            // The CPU continues from the runner if the comparison fails.
+            state.sync(&mut self.runner)?;
             if let Err(reason) = state.verify(&mut self.runner) {
                 self.hip = None;
                 self.backend_note = Some(reason);
-                return None;
+                return Ok(None);
             }
         }
-        self.hip.as_mut()
+        Ok(self.hip.as_mut())
+    }
+
+    /// Reads the cars and agents back from the HIP simulator if a window left
+    /// them only there. On HIP, `advance` and `advance_generation` do not
+    /// update the runner's cars and agents (only `tick` and the batch
+    /// index); call this before reading them, directly or with `car_states`,
+    /// `metrics`, `sensors`, `controls`, `best_lap` or `generation_summary`.
+    pub fn sync(&mut self) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(hip) = &mut self.hip {
+            hip.sync(&mut self.runner)?;
+        }
+        Ok(())
+    }
+
+    /// The runner, current and about to change its cars or agents.
+    fn runner_mut(&mut self) -> Result<&mut TrainingRunner, String> {
+        self.sync()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(hip) = &mut self.hip {
+            hip.host_changed();
+        }
+        Ok(&mut self.runner)
+    }
+
+    /// Panics if the runner's cars and agents are older than the HIP
+    /// simulator's (a missing `sync`).
+    fn assert_current(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(
+            !self.hip.as_ref().is_some_and(hip::HipState::stale),
+            "the HIP simulator holds newer cars and agents; call Session::sync first"
+        );
     }
 
     pub fn advance(&mut self, ticks: u64, stop_when_inactive: bool) -> Result<u64, String> {
         self.require_started()?;
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hip().is_some() {
+        if self.hip()?.is_some() {
             let hip = self.hip.as_mut().unwrap();
             return hip.advance(&mut self.runner, ticks, stop_when_inactive);
         }
@@ -393,7 +431,7 @@ impl Session {
             return Err("advance_generation needs statistics phase 0".into());
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hip().is_some() {
+        if self.hip()?.is_some() {
             let hip = self.hip.as_mut().unwrap();
             return hip.advance_generation(&mut self.runner, time_limit_ticks);
         }
@@ -404,7 +442,7 @@ impl Session {
     /// parent count and every car's reward.
     pub fn next_generation(&mut self) -> Result<(usize, Vec<f64>), String> {
         self.require_started()?;
-        let (turnover, lineage) = self.runner.next_generation_traced();
+        let (turnover, lineage) = self.runner_mut()?.next_generation_traced();
         self.record(lineage);
         Ok((turnover.preserved_count, turnover.rewards))
     }
@@ -446,6 +484,7 @@ impl Session {
 
     /// `CAR_STATE_STRIDE` values per car (`training::CAR_STATE_FIELDS`).
     pub fn car_states(&self) -> Vec<f64> {
+        self.assert_current();
         let mut out = Vec::with_capacity(self.runner.agents.len() * CAR_STATE_STRIDE);
         self.runner.car_states(&mut out);
         out
@@ -453,6 +492,7 @@ impl Session {
 
     /// The training metrics of car `index` in `METRIC_NAMES` order (NaN when unset).
     pub fn metrics(&self, index: usize) -> Result<Vec<f64>, String> {
+        self.assert_current();
         Ok(self
             .agent(index)?
             .stats
@@ -469,6 +509,7 @@ impl Session {
 
     /// The sensor inputs car `index` would read now.
     pub fn sensors(&self, index: usize) -> Result<Vec<f64>, String> {
+        self.assert_current();
         let agent = self.agent(index)?;
         let mut scratch = crate::physics::car::SensorScratch::default();
         let mut out = Vec::new();
@@ -490,6 +531,7 @@ impl Session {
 
     /// `[acceleration, steering, brake, handbrake, boost]` of car `index`.
     pub fn controls(&self, index: usize) -> Result<[f64; 5], String> {
+        self.assert_current();
         let c = self.agent(index)?.controls;
         Ok([c.acceleration, c.steering, c.brake, c.handbrake, c.boost])
     }
@@ -523,6 +565,7 @@ impl Session {
 
     /// The best lap of the current generation: `(car, seconds)`.
     pub(crate) fn best_lap(&self) -> Option<(usize, f64)> {
+        self.assert_current();
         self.runner
             .agents
             .iter()
@@ -604,10 +647,11 @@ impl Session {
             .chunks(size)
             .map(|p| Network::from_vector(shape, p.to_vec()))
             .collect();
+        let runner = self.runner_mut()?;
         if let Some(rng) = rng {
-            self.runner.rng = rng;
+            runner.rng = rng;
         }
-        self.runner.resume(&networks, generation);
+        runner.resume(&networks, generation);
         self.snapshot_population();
         self.networks_changed();
         Ok(())
@@ -647,8 +691,9 @@ impl Session {
         lineage.validate()?;
         self.check_shape(&lineage.parents[0].shape)?;
         let (networks, rng) = lineage.rebuild();
-        self.runner.rng = rng;
-        self.runner.resume_owned(networks, generation);
+        let runner = self.runner_mut()?;
+        runner.rng = rng;
+        runner.resume_owned(networks, generation);
         self.record(lineage);
         self.networks_changed();
         Ok(())
@@ -688,6 +733,7 @@ impl Session {
 
     /// Statistics of the current generation (see `GenerationSummary`).
     pub fn generation_summary(&self) -> GenerationSummary {
+        self.assert_current();
         let agents = &self.runner.agents;
         let mut best = 0;
         let mut total_score = 0.0;
@@ -716,8 +762,13 @@ impl Session {
         }
     }
 
-    /// Cars that still drive.
+    /// Cars that still drive (counted on the device while the runner's cars
+    /// are stale).
     pub(crate) fn active_count(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(active) = self.hip.as_ref().and_then(hip::HipState::active_count) {
+            return active;
+        }
         self.runner.agents.iter().filter(|a| a.car.active).count()
     }
 
@@ -779,7 +830,7 @@ impl Session {
         if world.track.native_broadphase != self.runner.world.track.native_broadphase {
             return Err("a replacement track must keep the broadphase mode".into());
         }
-        self.runner
+        self.runner_mut()?
             .replace_track(world, V2::new(position.x, position.y), rotation);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(hip) = &mut self.hip {
@@ -1305,7 +1356,8 @@ mod tests {
         assert!(t.restore_checkpoint_bytes(b"ALTDCKP0").is_err());
     }
 
-    fn state_bits(s: &Session) -> Vec<u64> {
+    fn state_bits(s: &mut Session) -> Vec<u64> {
+        s.sync().unwrap();
         s.car_states().iter().map(|v| v.to_bits()).collect()
     }
 
@@ -1349,7 +1401,7 @@ mod tests {
             for _ in 0..2 {
                 s.advance_generation(120).unwrap();
                 u.advance_generation(120).unwrap();
-                assert_eq!(state_bits(&u), state_bits(&s));
+                assert_eq!(state_bits(&mut u), state_bits(&mut s));
                 assert_eq!(u.next_generation().unwrap(), s.next_generation().unwrap());
                 assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
             }
@@ -1509,14 +1561,35 @@ mod tests {
         gpu.start_with_shape(&[20, 8, 5]).unwrap();
         for (ticks, stop) in [(1, false), (37, false), (90, true)] {
             assert_eq!(cpu.advance(ticks, stop).unwrap(), gpu.advance(ticks, stop).unwrap());
-            assert_eq!(state_bits(&gpu), state_bits(&cpu), "window of {ticks}");
+            assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "window of {ticks}");
         }
+        // Consecutive windows keep the cars on the device, which counts the
+        // active ones; older libraries without the count read every window back.
+        let resident = hip_device()
+            .unwrap()
+            .0
+            .try_symbol::<unsafe extern "C" fn()>("altd_gpu_sim_active_count")
+            .is_some();
+        for ticks in [6, 1, 47, 120] {
+            assert_eq!(cpu.advance(ticks, true).unwrap(), gpu.advance(ticks, true).unwrap());
+            assert_eq!(gpu.hip.as_ref().unwrap().stale(), resident);
+            assert_eq!(
+                (gpu.runner.tick, gpu.runner.batch_index),
+                (cpu.runner.tick, cpu.runner.batch_index)
+            );
+            assert_eq!(gpu.active_count(), cpu.active_count(), "window of {ticks}");
+        }
+        if resident {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu.car_states())).is_err());
+        }
+        assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "consecutive windows");
+        assert!(!gpu.hip.as_ref().unwrap().stale());
         assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
         assert_eq!(
             cpu.advance_generation(600).unwrap(),
             gpu.advance_generation(600).unwrap()
         );
-        assert_eq!(state_bits(&gpu), state_bits(&cpu));
+        assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu));
         for generation in 1..=2 {
             assert_eq!(gpu.next_generation().unwrap(), cpu.next_generation().unwrap());
             assert_eq!(gpu.checkpoint_bytes().unwrap(), cpu.checkpoint_bytes().unwrap());
@@ -1524,7 +1597,8 @@ mod tests {
                 cpu.advance_generation(600).unwrap(),
                 gpu.advance_generation(600).unwrap()
             );
-            assert_eq!(state_bits(&gpu), state_bits(&cpu), "generation {generation}");
+            assert_eq!(gpu.active_count(), cpu.active_count());
+            assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "generation {generation}");
             assert_eq!(gpu.generation_summary(), cpu.generation_summary());
         }
         // Checkpoints move between the backends.
@@ -1536,7 +1610,7 @@ mod tests {
         from_gpu.restore_checkpoint_bytes(&saved).unwrap();
         for s in [&mut gpu, &mut from_gpu] {
             assert_eq!(s.advance_generation(600).unwrap(), cpu.runner.tick);
-            assert_eq!(state_bits(s), state_bits(&cpu));
+            assert_eq!(state_bits(s), state_bits(&mut cpu));
         }
         assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
         // A stage change to another generated track.
@@ -1555,7 +1629,7 @@ mod tests {
             s.next_generation().unwrap();
             s.advance_generation(600).unwrap();
         }
-        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the replaced track");
+        assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "the replaced track");
         assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
 
         // An already verified session can restart with a different network
@@ -1567,7 +1641,7 @@ mod tests {
         for s in [&mut cpu, &mut gpu] {
             s.advance(30, false).unwrap();
         }
-        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the restarted session");
+        assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "the restarted session");
         assert!(!gpu.hip.as_ref().unwrap().needs_verify());
         let checkpoint = cpu.checkpoint_bytes().unwrap();
         for s in [&mut cpu, &mut gpu] {
@@ -1581,7 +1655,7 @@ mod tests {
             s.next_generation().unwrap();
             s.advance_generation(120).unwrap();
         }
-        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the larger population");
+        assert_eq!(state_bits(&mut gpu), state_bits(&mut cpu), "the larger population");
         assert_eq!(gpu.checkpoint_bytes().unwrap(), cpu.checkpoint_bytes().unwrap());
         assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
     }
@@ -1623,7 +1697,7 @@ mod tests {
         second.start_with_shape(&[20, 8, 5]).unwrap();
         first.advance(30, false).unwrap();
         second.advance(30, false).unwrap();
-        assert_eq!(state_bits(&first), state_bits(&second));
+        assert_eq!(state_bits(&mut first), state_bits(&mut second));
         drop(first);
         assert_eq!(session(&generated_scene()).backend(), Backend::Hip);
 
@@ -1637,7 +1711,7 @@ mod tests {
         }
         assert_eq!(wide.backend(), Backend::Cpu);
         assert!(wide.backend_note().unwrap().contains("16"), "{:?}", wide.backend_note());
-        assert_eq!(state_bits(&wide), state_bits(&cpu));
+        assert_eq!(state_bits(&mut wide), state_bits(&mut cpu));
     }
 
     #[test]

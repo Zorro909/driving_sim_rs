@@ -1298,6 +1298,23 @@ impl<'a> GpuSim<'a> {
         );
     }
 
+    /// The number of active uploaded cars, counted on the device; `None` when
+    /// the library predates `altd_gpu_sim_active_count`.
+    pub(crate) fn try_active_count(&self) -> Result<Option<usize>, String> {
+        let Some(f) = self
+            .gpu
+            .try_symbol::<unsafe extern "C" fn(*mut c_void, *mut u32) -> i32>("altd_gpu_sim_active_count")
+        else {
+            return Ok(None);
+        };
+        let mut count = 0u32;
+        try_check(unsafe { f(self.handle, &mut count) }, "active_count")?;
+        if count as usize > self.cars {
+            return Err("HIP active count exceeds the uploaded cars".into());
+        }
+        Ok(Some(count as usize))
+    }
+
     pub fn download(&self, cars: Option<&mut Vec<GpuCar>>, agents: Option<&mut Vec<GpuAgent>>) {
         self.try_download(cars, agents).unwrap_or_else(|e| panic!("{e}"));
     }

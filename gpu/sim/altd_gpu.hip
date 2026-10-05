@@ -178,6 +178,7 @@ struct Sim {
     uint32_t* items;
     Vec2* pushes;
     uint32_t* host_stopped;  // pinned
+    uint32_t* active;        // altd_gpu_sim_active_count's result
     hipEvent_t chunk_done[4];
     hipStream_t stream;  // blocking, so ordered with the null stream
     hipGraphExec_t graph_exec;
@@ -438,6 +439,13 @@ __global__ void __launch_bounds__(STEP_THREADS) step_end_kernel(World w, Vehicle
     end_car(w, v, cars[i], agents[i], carry[i], pushes, drive != 0, eliminate_on_wall != 0, tick);
 }
 
+// Counts the cars with CAR_ACTIVE, one atomic per wave.
+__global__ void active_count_kernel(const Car* cars, uint32_t n, uint32_t* count) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t mask = __ballot(i < n && (cars[i].flags & CAR_ACTIVE));
+    if (mask && __lane_id() == (uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
+}
+
 uint32_t blocks(size_t n, uint32_t size = 256) { return (uint32_t)((n + size - 1) / size); }
 
 // ALTD_GPU_SPLIT=0: the step in one kernel (car_step) instead of the split step.
@@ -576,6 +584,7 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
         || hipMalloc(&s->pushes, sizeof(Vec2) * capacity * MAX_PAIRS)
         || hipMalloc(&s->novelty, sizeof(double) * capacity)
         || hipMalloc(&s->state, sizeof(WindowState)) || hipHostMalloc(&s->host_stopped, sizeof(uint32_t) * 4)
+        || hipMalloc(&s->active, sizeof(uint32_t))
         || hipEventCreateWithFlags(&s->chunk_done[0], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[1], hipEventDisableTiming)
         || hipEventCreateWithFlags(&s->chunk_done[2], hipEventDisableTiming) || hipEventCreateWithFlags(&s->chunk_done[3], hipEventDisableTiming)
         || hipStreamCreate(&s->stream)) {
@@ -603,7 +612,7 @@ void altd_gpu_sim_free(Sim* s) {
     if (s->graph_exec) (void)hipGraphExecDestroy(s->graph_exec);
     for (void* p : {(void*)s->cars, (void*)s->agents, (void*)s->here, (void*)s->inputs, (void*)s->params, (void*)s->live[0],
                     (void*)s->live[1], (void*)s->steps[0], (void*)s->steps[1], (void*)s->settled_at, (void*)s->shadow, (void*)s->state,
-                    (void*)s->carry, (void*)s->items, (void*)s->pushes, (void*)s->mean, (void*)s->novelty})
+                    (void*)s->carry, (void*)s->items, (void*)s->pushes, (void*)s->mean, (void*)s->novelty, (void*)s->active})
         if (p) (void)hipFree(p);
     if (s->host_stopped) (void)hipHostFree(s->host_stopped);
     for (hipEvent_t e : s->chunk_done)
@@ -624,6 +633,16 @@ int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents
 int altd_gpu_sim_upload_agents(Sim* s, uint32_t n, const Agent* agents) {
     if (n != s->n) return -1;
     CHECK(hipMemcpy(s->agents, agents, sizeof(Agent) * n, hipMemcpyHostToDevice));
+    return 0;
+}
+
+// The number of uploaded cars that are active, without reading them back.
+int altd_gpu_sim_active_count(Sim* s, uint32_t* out) {
+    CHECK(hipMemsetAsync(s->active, 0, sizeof(uint32_t), s->stream));
+    if (s->n) active_count_kernel<<<blocks(s->n), 256, 0, s->stream>>>(s->cars, s->n, s->active);
+    CHECK(hipGetLastError());
+    CHECK(hipMemcpyAsync(out, s->active, sizeof(uint32_t), hipMemcpyDeviceToHost, s->stream));
+    CHECK(hipStreamSynchronize(s->stream));
     return 0;
 }
 
@@ -1227,7 +1246,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     return 0;
 }
 
-int altd_gpu_version() { return 8; }
+int altd_gpu_version() { return 9; }
 
 // Writes the current device's name, NUL-terminated and truncated to `len`
 // bytes; returns the HIP error, so it also tells whether a device is usable.

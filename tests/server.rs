@@ -459,7 +459,33 @@ fn hip_sessions_end_with_their_connection() {
     );
     for c in [&mut client, &mut second] {
         c.call("startWithShape", json!({"shape": [20, 8, 5]}));
-        c.call("advanceGeneration", json!({"timeLimitTicks": 300}));
+    }
+    // Drive Lab's turnover: windows (the cars stay on the device between
+    // them), the rest of the generation, its summary and the next generation.
+    for generation in 0..2 {
+        for ticks in [6, 30, 66] {
+            let args = json!({"ticks": ticks, "stopWhenInactive": true});
+            let (hip, _) = client.call_raw("advance", args.clone(), None);
+            let (cpu, _) = second.call_raw("advance", args, None);
+            assert_eq!(hip["ok"], cpu["ok"]);
+            assert_eq!(hip["state"]["tick"], cpu["state"]["tick"]);
+            assert_eq!(hip["state"]["activeCount"], cpu["state"]["activeCount"], "{hip}");
+        }
+        let generation_end = [&mut client, &mut second].map(|c| {
+            let (reply, _) = c.call_raw("advanceGeneration", json!({"timeLimitTicks": 300}), None);
+            (reply["ok"].clone(), reply["state"]["activeCount"].clone())
+        });
+        assert_eq!(generation_end[0], generation_end[1]);
+        assert_eq!(
+            client.call("generationSummary", Value::Null),
+            second.call("generationSummary", Value::Null)
+        );
+        if generation == 0 {
+            assert_eq!(
+                client.call("nextGeneration", Value::Null),
+                second.call("nextGeneration", Value::Null)
+            );
+        }
     }
     let (reply, states) = client.call_raw("carStates", Value::Null, None);
     assert_eq!(reply["state"]["backend"], "hip", "{reply}");

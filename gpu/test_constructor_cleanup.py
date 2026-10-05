@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
     if (!sim) fail("successful sim constructor returned null");
     std::array<size_t, OPERATIONS> sim_calls{};
     for (int operation = 0; operation < OPERATIONS; ++operation) sim_calls[operation] = calls(operation);
-    if (sim_calls[DEVICE_ALLOC] != 15 || sim_calls[HOST_ALLOC] != 1
+    if (sim_calls[DEVICE_ALLOC] != 16 || sim_calls[HOST_ALLOC] != 1
         || sim_calls[EVENT_CREATE] != 4 || sim_calls[STREAM_CREATE] != 1)
         fail("sim fixture did not exercise all allocations through the fake runtime");
     sim_free(sim);
