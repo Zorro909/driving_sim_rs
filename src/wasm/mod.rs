@@ -427,8 +427,8 @@ impl Simulation {
         }
     }
 
-    /// Statistics of the generation so far: `{bestIndex, bestScore, lapped,
-    /// active, lapIndex, lapTime}` (lap fields null without a lap).
+    /// Statistics of the generation so far: `{bestIndex, bestScore, averageScore,
+    /// worstScore, lapped, active, lapIndex, lapTime}` (lap fields null without a lap).
     #[wasm_bindgen(js_name = generationSummary)]
     pub fn generation_summary(&self) -> Result<JsValue, JsError> {
         let s = self.session().generation_summary();
@@ -441,6 +441,8 @@ impl Simulation {
         let number = |v: Option<f64>| v.map_or(JsValue::NULL, JsValue::from);
         set("bestIndex", JsValue::from(s.best_index as u32))?;
         set("bestScore", JsValue::from(s.best_score))?;
+        set("averageScore", number(s.average_score))?;
+        set("worstScore", number(s.worst_score))?;
         set("lapped", JsValue::from(s.lapped as u32))?;
         set("active", JsValue::from(s.active as u32))?;
         set("lapIndex", number(s.lap_index.map(|i| i as f64)))?;

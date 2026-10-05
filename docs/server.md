@@ -70,7 +70,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | `nextGeneration` | None | `{preservedCount, rewards}` |
 | `setEvolutionSettings` | `json` as an evolution-settings JSON string | `null` |
 | `replaceTrack` | `scene` as a scene JSON string | `null` |
-| `generationSummary` | None | `{bestIndex, bestScore, lapped, active, lapIndex, lapTime}` |
+| `generationSummary` | None | `{bestIndex, bestScore, lapped, active, lapIndex, lapTime}`, optional `averageScore` and `worstScore` |
 | `networkJson` | `index` | Network JSON string |
 | `carStates` | None | Number of `f64` values, with a binary payload |
 | `checkpointBytes` | None | `null`, with a binary payload |
