@@ -269,6 +269,9 @@ fn packed_math_full_float_range_matches_original_runtime() {
     }
 }
 
+// The captures include arguments beyond the domain where the portable
+// non-x86 fallback has been shown to equal x87 `FSINCOS`.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[test]
 fn engine_math_full_float_range_matches_original_runtime() {
     let rows: Vec<[u32; 4]> = serde_json::from_str(include_str!("fixtures/native_full_math_bits.json")).unwrap();

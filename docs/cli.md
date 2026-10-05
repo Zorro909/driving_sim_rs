@@ -1,6 +1,6 @@
 # CLI reference
 
-Run commands from the repository root. `--threads N` sets the Rayon pool; the default respects CPU affinity. `--mode independent|lockstep` selects native scheduling. Both are global flags. Each command's `--help` is the complete argument reference.
+Run commands from the repository root or an unpacked release archive; both contain `assets/`. `altd-sim --version` identifies the build, including nightly packages. `--threads N` sets the Rayon pool; the default respects CPU affinity. `--mode independent|lockstep` selects native scheduling. Both are global flags. Each command's `--help` is the complete argument reference.
 
 ## Commands and inputs
 
@@ -16,8 +16,9 @@ Run commands from the repository root. `--threads N` sets the Rayon pool; the de
 | `compare-network` | Positional network, trace and report; compare inference with recorded controls |
 | `compare-sensors` | Positional scene, trace, model, trajectory and report; compare sensor observations |
 | `compare-score` | Positional scene, trace and report; compare lap/score statistics |
+| `gpu-info` | Optional `--library`; load the HIP library used by `--gpu` and check its struct layouts |
 
-Scene and capture paths have no campaign defaults. `bench` and `train-scratch` default their sensor model to `assets/models/rally.json`. Scratch training defaults its sensor/control names to `assets/networks/rally.json`; these templates have no trained weights. Formula runs should explicitly use the Formula network/model assets and scene template.
+Scene and capture paths have no campaign defaults. `bench` and `train-scratch` default their sensor model to `assets/models/rally.json`. Scratch training defaults its sensor/control names to `assets/networks/rally.json`; these templates have no trained weights. The defaults are compiled into the binary, and `run.json` records them as `builtin:<path>`. Formula runs should explicitly use the Formula network/model assets and scene template.
 
 A fixed track requires `--spawn-trace` for `train` and `train-scratch`. The trace's first frame supplies the initial pose. Random mode needs only a geometry-free scene template; generated geometry supplies its reset pose. `--spawn-trace` is ignored in random mode. `bench` always requires its explicit spawn trace and supports `--spawn-index`.
 
