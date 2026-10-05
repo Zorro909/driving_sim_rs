@@ -277,7 +277,7 @@ pub fn engine_sin_cos(x: f32) -> (f32, f32) {
 }
 
 /// Inputs up to this magnitude have been compared exhaustively with x87 `FSINCOS`.
-#[cfg(test)]
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 const ENGINE_PORTABLE_DOMAIN: f32 = 16.0;
 
 /// `engine_sin_cos` without the x87 instruction set (the WebAssembly library
@@ -343,7 +343,8 @@ pub fn engine_cos(x: f32) -> f32 {
     engine_sin_cos(x).1
 }
 
-#[cfg(test)]
+/// Comparisons with x87 `FSINCOS`, which only x86 provides.
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 mod engine_tests {
     use super::*;
 
@@ -362,7 +363,6 @@ mod engine_tests {
 
     /// Every 61st float with |x| <= 16 plus the domain edges and specials,
     /// against the x87 instruction (`cargo test -- --ignored` runs the whole domain).
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     fn portable_engine_sin_cos_matches_x87() {
         let limit = ENGINE_PORTABLE_DOMAIN.to_bits();
@@ -395,7 +395,6 @@ mod engine_tests {
         }
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     #[ignore = "exhaustive: about two billion evaluations"]
     fn portable_engine_sin_cos_matches_x87_exhaustively() {

@@ -5,7 +5,9 @@ use super::stop::StopState;
 use super::{scheduled_rate, ScratchConfig};
 use crate::args::Schedule;
 use crate::inputs::{elimination_options, frames, num, output_names};
-use crate::io::{load, load_optional, write_atomic, write_atomic_report};
+use crate::io::{
+    describe_input, load, load_optional, load_or, write_atomic, write_atomic_report, RALLY_MODEL, RALLY_NETWORK,
+};
 use altd_sim::math::pymath::py_sum;
 use altd_sim::nn::network::Network;
 use altd_sim::track::training_tracks::TrainingTrackBuffer;
@@ -51,7 +53,9 @@ pub(super) fn final_candidate_leader(fitness: &[f64]) -> usize {
 }
 
 pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) {
-    let (scene, network_data, model) = (load(&config.scene), load(&config.network), load(&config.model));
+    let scene = load(&config.scene);
+    let network_data = load_or(config.network.as_deref(), &RALLY_NETWORK);
+    let model = load_or(config.model.as_deref(), &RALLY_MODEL);
     let track_settings = config.tracks.settings();
     let shape = &config.shape;
     let inputs = network_data["inputs"].as_array().expect("inputs").len();
@@ -109,7 +113,8 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
         "simulator": "game-fidelity-cpu-v1",
         "eliminate_on_wall": eliminate_on_wall, "idle_eliminate": idle_eliminate,
         "scene": config.scene, "track": scene["track"]["name"], "spawn_trace": config.spawn_trace,
-        "network_template": config.network, "model": config.model, "shape": shape,
+        "network_template": describe_input(config.network.as_deref(), &RALLY_NETWORK),
+        "model": describe_input(config.model.as_deref(), &RALLY_MODEL), "shape": shape,
         "population": config.population, "generations": config.generations, "ticks": config.ticks,
         "mutation_start": config.mutation_start, "mutation_end": config.mutation_end,
         "schedule": match config.schedule { Schedule::Geometric => "geometric", Schedule::Linear => "linear" },

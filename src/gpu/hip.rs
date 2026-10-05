@@ -1,9 +1,46 @@
 //! Runtime loader for the HIP simulator parts in gpu/ (libaltd_gpu.so).
-//! Loaded with dlopen so the crate builds and runs without ROCm.
-use std::ffi::{c_void, CStr, CString};
+//! Loaded at runtime so the crate builds and runs without ROCm.
+use std::ffi::{c_void, CStr};
+use std::path::{Path, PathBuf};
 
-/// Default library location written by gpu/build.sh; override with ALTD_GPU_LIB.
-pub(crate) const DEFAULT_LIBRARY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/gpu/libaltd_gpu.so");
+/// Library file name, both in release archives and in gpu/build.sh output.
+pub fn library_name() -> String {
+    format!(
+        "{}altd_gpu{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    )
+}
+
+/// Paths [`Gpu::open`] tries, in order. An explicit path or ALTD_GPU_LIB is the
+/// only candidate; otherwise the library beside the executable (release
+/// archives), then gpu/build.sh output in this source checkout.
+pub fn library_candidates(explicit: Option<&Path>, env: Option<PathBuf>, exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(path) = explicit.map(Path::to_path_buf).or(env) {
+        return vec![path];
+    }
+    let name = library_name();
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/gpu").join(&name);
+    exe_dir
+        .map(|dir| dir.join(&name))
+        .into_iter()
+        .chain([checkout])
+        .collect()
+}
+
+/// Explains a HIP status returned by the library.
+pub(crate) fn status_message(status: i32) -> String {
+    let hint = match status {
+        35 => " (hipErrorInsufficientDriver: the installed AMD driver is older than the ROCm runtime)",
+        100 => " (hipErrorNoDevice: ROCm sees no AMD GPU; check `rocminfo` and /dev/kfd permissions)",
+        209 => {
+            " (hipErrorNoBinaryForGpu: the library has no kernels for this GPU; \
+             rebuild it with GPU_ARCH set to the gfx name `rocminfo` reports)"
+        }
+        _ => "",
+    };
+    format!("HIP error {status}{hint}")
+}
 
 /// Math primitive selectors of `altd_gpu_math` (gpu/sim/altd_gpu.hip).
 #[repr(i32)]
@@ -20,47 +57,63 @@ pub enum MathOp {
 }
 
 pub struct Gpu {
-    handle: *mut c_void,
-}
-
-// The library has no thread-affine state beyond the HIP runtime's own locking.
-unsafe impl Send for Gpu {}
-unsafe impl Sync for Gpu {}
-
-impl Drop for Gpu {
-    fn drop(&mut self) {
-        unsafe { libc::dlclose(self.handle) };
-    }
+    library: libloading::Library,
+    path: PathBuf,
 }
 
 impl Gpu {
-    /// Opens `path`, or ALTD_GPU_LIB, or `DEFAULT_LIBRARY`.
-    pub fn open(path: Option<&str>) -> Result<Gpu, String> {
-        let env = std::env::var("ALTD_GPU_LIB").ok();
-        let path = path.or(env.as_deref()).unwrap_or(DEFAULT_LIBRARY);
-        let c_path = CString::new(path).map_err(|e| e.to_string())?;
-        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            let message = unsafe { CStr::from_ptr(libc::dlerror()) }
-                .to_string_lossy()
-                .into_owned();
-            return Err(format!("{path}: {message} (build it with gpu/build.sh)"));
+    /// Opens the first loadable path of [`library_candidates`] for `path`,
+    /// ALTD_GPU_LIB, and the running executable.
+    pub fn open(path: Option<&Path>) -> Result<Gpu, String> {
+        let env = std::env::var_os("ALTD_GPU_LIB").map(PathBuf::from);
+        let exe = std::env::current_exe().ok();
+        let candidates = library_candidates(path, env, exe.as_deref().and_then(Path::parent));
+        let mut errors = Vec::new();
+        for candidate in candidates {
+            match unsafe { load(&candidate) } {
+                Ok(library) => {
+                    return Ok(Gpu {
+                        library,
+                        path: candidate,
+                    })
+                }
+                Err(error) => {
+                    // libloading keeps the dlerror/LoadLibrary text in `source`.
+                    let detail = std::error::Error::source(&error).map_or(error.to_string(), ToString::to_string);
+                    let path = candidate.display().to_string();
+                    let mut message = if detail.contains(&path) {
+                        detail
+                    } else {
+                        format!("{path}: {detail}")
+                    };
+                    if message.contains("amdhip64") {
+                        message += " (install a ROCm 7.x runtime that provides libamdhip64)";
+                    }
+                    errors.push(message);
+                }
+            }
         }
-        Ok(Gpu { handle })
+        Err(format!(
+            "cannot load the HIP simulator library; build it with gpu/build.sh or set ALTD_GPU_LIB\n  {}",
+            errors.join("\n  ")
+        ))
+    }
+
+    /// Path of the loaded library.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Function pointer `name` of type `F` (an `unsafe extern "C" fn`).
     pub(crate) fn symbol<F: Copy>(&self, name: &str) -> F {
         self.try_symbol(name)
-            .unwrap_or_else(|| panic!("libaltd_gpu.so lacks {name}; rebuild it with gpu/build.sh"))
+            .unwrap_or_else(|| panic!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
     }
 
     /// `symbol`, or `None` when the library lacks `name`.
     pub(crate) fn try_symbol<F: Copy>(&self, name: &str) -> Option<F> {
         assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
-        let c_name = CString::new(name).unwrap();
-        let pointer = unsafe { libc::dlsym(self.handle, c_name.as_ptr()) };
-        (!pointer.is_null()).then(|| unsafe { std::mem::transmute_copy(&pointer) })
+        unsafe { self.library.get::<F>(name.as_bytes()) }.ok().map(|s| *s)
     }
 
     /// The name of the device the library runs on. Fails when the library
@@ -72,13 +125,19 @@ impl Gpu {
         let mut name = [0 as std::ffi::c_char; 256];
         let status = unsafe { f(name.as_mut_ptr(), name.len() as i32) };
         if status != 0 {
-            return Err(format!("no usable HIP device (HIP error {status})"));
+            return Err(format!("no usable HIP device ({})", status_message(status)));
         }
         Ok(unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned())
     }
 
     pub(crate) fn check(status: i32, what: &str) {
-        assert_eq!(status, 0, "GPU {what} failed with HIP error {status}");
+        assert_eq!(status, 0, "GPU {what} failed with {}", status_message(status));
+    }
+
+    /// Panics unless the library's device structs match the Rust mirrors.
+    /// Needs no GPU: the library only reports host-side sizes and offsets.
+    pub fn check_layout(&self) {
+        crate::gpu::simulation::check_layout(self);
     }
 
     /// Runs one math primitive. `input` and `output` hold `n` elements of the
@@ -108,6 +167,19 @@ impl Gpu {
     pub fn engine_scan(&self, first: u32, out: &mut [[u32; 2]]) {
         let f: unsafe extern "C" fn(u32, u32, *mut [u32; 2]) -> i32 = self.symbol("altd_gpu_engine_scan");
         Self::check(unsafe { f(first, out.len() as u32, out.as_mut_ptr()) }, "engine scan");
+    }
+}
+
+/// Opens `path`; on Unix with RTLD_NOW, so unresolved symbols fail at load time.
+unsafe fn load(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::{Library, RTLD_LOCAL, RTLD_NOW};
+        unsafe { Library::open(Some(path), RTLD_NOW | RTLD_LOCAL) }.map(Into::into)
+    }
+    #[cfg(not(unix))]
+    unsafe {
+        libloading::Library::new(path)
     }
 }
 
@@ -203,5 +275,37 @@ impl<'a> GpuWorld<'a> {
             "query",
         );
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_library_paths_are_the_only_candidate() {
+        let exe = Path::new("/opt/altd");
+        let explicit = library_candidates(Some(Path::new("a.so")), Some("b.so".into()), Some(exe));
+        assert_eq!(explicit, [PathBuf::from("a.so")]);
+        assert_eq!(
+            library_candidates(None, Some("b.so".into()), Some(exe)),
+            [PathBuf::from("b.so")]
+        );
+    }
+
+    #[test]
+    fn default_library_search_prefers_the_executable_directory() {
+        let name = library_name();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/gpu").join(&name);
+        let found = library_candidates(None, None, Some(Path::new("/opt/altd")));
+        assert_eq!(found, [Path::new("/opt/altd").join(&name), checkout.clone()]);
+        assert_eq!(library_candidates(None, None, None), [checkout]);
+    }
+
+    #[test]
+    fn missing_libraries_list_every_attempt() {
+        let error = Gpu::open(Some(Path::new("/nonexistent/libaltd_gpu.so"))).err().unwrap();
+        assert!(error.contains("/nonexistent/libaltd_gpu.so"), "{error}");
+        assert!(error.contains("gpu/build.sh"), "{error}");
     }
 }

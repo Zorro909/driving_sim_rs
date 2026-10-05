@@ -1,5 +1,11 @@
 //! Bit-exact driving physics, generated tracks, and neural-network training.
 
+/// Package version, or the CI build version of a nightly release.
+pub const VERSION: &str = match option_env!("ALTD_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// GPU state layouts and the native HIP loader.
 pub mod gpu;
 /// Runtime-compatible arithmetic and vector types.
