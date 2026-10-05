@@ -47,7 +47,7 @@ fn hello() -> Value {
     json!({
         "type": "hello",
         "protocol": PROTOCOL,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "threads": rayon::current_num_threads(),
         "carStateStride": crate::training::CAR_STATE_STRIDE,
         "carStateFields": crate::training::CAR_STATE_FIELDS,

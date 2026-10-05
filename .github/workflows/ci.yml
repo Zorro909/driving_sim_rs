@@ -69,6 +69,50 @@ jobs:
       - run: cargo test --locked --release
       - run: cargo test --locked
 
+  platforms:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rustflags: -C target-cpu=x86-64
+          - os: macos-latest
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      # Keep LF fixtures byte-identical on Windows.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: platform-${{ matrix.os }}
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --release
+
+  hip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Keep the ROCm version in step with release.yml.
+    container: rocm/dev-ubuntu-24.04:7.1.1
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hip-x86-64
+      - run: GPU_ARCH=gfx1100 gpu/build.sh
+      - name: Check the library against the Rust layouts
+        # No GPU is needed: gpu-info checks the device struct layouts on the host.
+        run: cargo run --locked --bin altd-sim -- gpu-info
+
   wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 15

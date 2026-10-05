@@ -1,6 +1,6 @@
 //! `altd-sim serve` over real sockets: handshake checks, the greeting, and
 //! a remote session that matches a direct `Session` bit for bit.
-#![cfg(feature = "server")]
+#![cfg(all(feature = "server", not(target_arch = "wasm32")))]
 
 use altd_sim::nn::network::Network;
 use altd_sim::server::protocol::{decode_binary, encode_binary};
@@ -183,7 +183,7 @@ fn hello_describes_the_server() {
     let hello = &client.hello;
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["protocol"], 1);
-    assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(hello["version"], altd_sim::VERSION);
     assert!(hello["threads"].as_u64().unwrap() >= 1);
     let stride = hello["carStateStride"].as_u64().unwrap() as usize;
     assert_eq!(hello["carStateFields"].as_array().unwrap().len(), stride);

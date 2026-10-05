@@ -1,0 +1,224 @@
+name: Release
+
+# A vX.Y.Z tag publishes a release; every push to main replaces the rolling
+# nightly pre-release. Pull requests touching the packaging build and smoke
+# test the archives without publishing them.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - gpu/**
+      - Cargo.toml
+      - Cargo.lock
+      - src/gpu/**
+      - src/bin/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A newer main push supersedes the running nightly; tagged releases always finish.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      label: ${{ steps.version.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "${GITHUB_REF_NAME#v}" != "$crate" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+              exit 1
+            fi
+            version=$crate
+            label=$crate
+          else
+            # Nightly archives keep fixed names so download links stay stable.
+            version="$crate-nightly.$(date -u +%Y%m%d)+${GITHUB_SHA::7}"
+            label=nightly
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+          echo "Building $version" >> "$GITHUB_STEP_SUMMARY"
+
+  gpu-library:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: rocm/dev-ubuntu-24.04:7.1.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for every consumer GPU target
+        run: GPU_ARCH="$(cat gpu/release-targets)" OUT=dist gpu/build.sh
+      - name: Check the embedded GPU targets
+        run: |
+          objcopy --dump-section .hip_fatbin=fatbin dist/libaltd_gpu.so
+          /opt/rocm/llvm/bin/clang-offload-bundler --list --type=o --input=fatbin \
+            | sed -n 's/^hipv4-amdgcn-amd-amdhsa--//p' | sort > embedded
+          sort gpu/release-targets | diff -u - embedded
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-library
+          path: dist/libaltd_gpu.so
+          if-no-files-found: error
+
+  package:
+    name: package (${{ matrix.target }})
+    needs: [version, gpu-library]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 keeps the glibc requirement low; the binary also runs in newer distributions.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rustflags: -C target-cpu=x86-64
+            gpu: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-cpu=x86-64
+            exe: .exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    env:
+      # Overrides target-cpu=native from .cargo/config.toml on x86 hosts.
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      ALTD_BUILD_VERSION: ${{ needs.version.outputs.version }}
+      PACKAGE: altd-sim-${{ needs.version.outputs.label }}-${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Keep LF text files on Windows.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - run: cargo build --locked --release --bin altd-sim --target ${{ matrix.target }}
+      - name: Assemble the package
+        run: |
+          mkdir -p "dist/$PACKAGE"
+          cp "target/${{ matrix.target }}/release/altd-sim${{ matrix.exe }}" README.md LICENSE GODOT_LICENSE "dist/$PACKAGE/"
+          cp -R assets docs "dist/$PACKAGE/"
+      - if: matrix.gpu
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-library
+          path: dist/${{ env.PACKAGE }}
+      - name: Archive
+        working-directory: dist
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$PACKAGE.zip" "$PACKAGE" > /dev/null
+          else
+            tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+          fi
+          rm -rf "$PACKAGE"
+      - name: Smoke test the unpacked archive
+        run: |
+          mkdir smoke
+          cd smoke
+          if [ "$RUNNER_OS" = Windows ]; then 7z x "../dist/$PACKAGE.zip" > /dev/null; else tar -xzf "../dist/$PACKAGE.tar.gz"; fi
+          cd "$PACKAGE"
+          ./altd-sim --version | tee version.txt
+          grep -qxF "altd-sim $ALTD_BUILD_VERSION" version.txt
+          ./altd-sim --threads 2 train-scratch \
+            --scene assets/scenes/rally_template.json --track-mode random \
+            --random-track-settings assets/random_track_settings.json \
+            --population 16 --generations 1 --ticks 60 --seed 1 --out-dir smoke-run
+          test -s smoke-run/run.json
+          if [ "${{ matrix.gpu }}" = true ]; then
+            # Hosted runners lack ROCm: the packaged library must be found and
+            # its missing HIP runtime reported. gpu-verify loads it with ROCm.
+            if ./altd-sim gpu-info 2> gpu-info.txt; then exit 1; fi
+            cat gpu-info.txt
+            grep -q "$PWD/libaltd_gpu.so" gpu-info.txt
+            grep -q "ROCm 7.x runtime" gpu-info.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/*
+          if-no-files-found: error
+
+  gpu-verify:
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: rocm/dev-ubuntu-24.04:7.1.1
+    env:
+      PACKAGE: altd-sim-${{ needs.version.outputs.label }}-x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+      - name: Load the packaged HIP library with the ROCm runtime
+        run: |
+          tar -xzf "$PACKAGE.tar.gz"
+          cd "$PACKAGE"
+          # No GPU is needed: gpu-info checks the device struct layouts on the host.
+          ./altd-sim gpu-info | tee gpu-info.json
+          grep -q '"layout": "ok"' gpu-info.json
+          grep -q "\"$PWD/libaltd_gpu.so\"" gpu-info.json
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [version, package, gpu-verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: altd-sim-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum altd-sim-* | tee SHA256SUMS
+      - name: Publish the tagged release
+        if: github.ref_type == 'tag'
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "altd-sim $VERSION"
+      - name: Replace the nightly pre-release
+        if: github.ref_type != 'tag'
+        run: |
+          # Move the nightly tag to this commit.
+          if gh api "repos/$GH_REPO/git/refs/tags/nightly" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" > /dev/null
+          fi
+          title="Nightly $VERSION"
+          notes="Automated build of $GITHUB_SHA from main. Nightly builds are not stable releases."
+          if gh release view nightly > /dev/null 2>&1; then
+            gh release edit nightly --prerelease --title "$title" --notes "$notes"
+          else
+            gh release create nightly --prerelease --latest=false --verify-tag --title "$title" --notes "$notes"
+          fi
+          gh release upload nightly dist/* --clobber

@@ -6,6 +6,20 @@
 
 The repository includes vehicle and sensor templates, tile resources, fixed generated tracks and self-contained tests. Campaign tracks are not distributed.
 
+## Download
+
+[Releases](https://github.com/Zorro909/driving_sim_rs/releases) provide prebuilt archives for Linux x86_64, Windows x86_64 and macOS on Apple silicon. Tagged versions are stable. The `nightly` pre-release is rebuilt from every push to `main`, and its file names stay fixed. Each archive contains `altd-sim`, the `assets/` templates, the docs and the licenses; `SHA256SUMS` lists the archive checksums.
+
+```sh
+tar -xzf altd-sim-nightly-x86_64-unknown-linux-gnu.tar.gz
+cd altd-sim-nightly-x86_64-unknown-linux-gnu
+./altd-sim train-scratch --scene assets/scenes/rally_template.json --track-mode random \
+  --random-track-settings assets/random_track_settings.json \
+  --population 256 --generations 3 --ticks 600 --out-dir runs/example
+```
+
+The Linux archive also contains `libaltd_gpu.so` for `--gpu` on consumer AMD GPUs. It needs a ROCm 7.x runtime; run `./altd-sim gpu-info` to check the setup. [GPU setup](gpu/README.md) lists the covered architectures. Windows and macOS archives are CPU-only. macOS binaries are unsigned, so remove the download quarantine with `xattr -d com.apple.quarantine altd-sim` before the first run. Apple silicon uses the portable trigonometry described in [fidelity](docs/fidelity.md).
+
 ## Quick start
 
 Rust 1.94 or newer is the tested native toolchain. Build from the repository root. `--offline` works when dependencies are already cached; omit it on the first build if needed.
@@ -42,7 +56,7 @@ gpu/build.sh
 # Add --gpu to the train-scratch command above.
 ```
 
-For another supported AMD GPU, set `GPU_ARCH` when building. Rust builds do not require ROCm. See [GPU setup](gpu/README.md) for validation and profiling.
+For other AMD GPUs, set `GPU_ARCH` to one or more architectures when building. Rust builds do not require ROCm. See [GPU setup](gpu/README.md) for validation and profiling.
 
 The default build also includes a local WebSocket server for native CPU or HIP sessions:
 
@@ -88,6 +102,6 @@ cargo build --offline --target wasm32-unknown-unknown --no-default-features --fe
 
 Tests retain self-contained native captures and label generated golden data as current-code regressions. Browser integration checks live in `wasm/test/`; HIP equivalence checks use `gpu_check`. The exhaustive trigonometry scan and hardware-dependent tests are opt-in. See [performance](docs/performance.md), [GPU internals](docs/gpu.md) and [WASM fidelity](docs/wasm.md).
 
-GitHub Actions checks formatting, native and WASM Clippy, native release and debug tests, rustdoc, Rust 1.93 compatibility, and WASM packages with CPU browser comparisons. Its native jobs override `target-cpu=native` with `x86-64` and include the flags in their cache keys, so cached builds can move between runner CPUs. Serial/threaded browser tests retain the documented expanded native differences. HIP and hardware WebGPU checks run separately because the hosted runners have no GPU.
+GitHub Actions checks formatting, native and WASM Clippy, native release and debug tests, Windows and macOS Clippy and release tests, the HIP library build and layout, rustdoc, Rust 1.93 compatibility, and WASM packages with CPU browser comparisons. The release workflow builds and smoke-tests the archives, then publishes tags and nightly builds. Its native jobs override `target-cpu=native` with `x86-64` and include the flags in their cache keys, so cached builds can move between runner CPUs. Serial/threaded browser tests retain the documented expanded native differences. HIP equivalence and hardware WebGPU checks run separately because the hosted runners have no GPU.
 
 The project uses the [MIT license](LICENSE). Godot-derived code retains the [Godot notice](GODOT_LICENSE), and numerical modules retain their source notices.
