@@ -89,7 +89,7 @@ The header has the same request or reply shape as a text frame. `carStates` payl
 
 ## HIP fallback and resume
 
-Only one session can hold the HIP device per process. Another HIP request runs on CPU with `backendNote: "another session is using the GPU"`. Library/device errors, native broadphase tracks and unsupported path sensors also cause CPU fallback with a reason.
+Only one session can hold the HIP device per process. Another HIP request runs on CPU with `backendNote: "another session is using the GPU"`. Library/device errors, native broadphase tracks and unsupported path sensors also cause CPU fallback with a reason. HIP requires physics shapes and at least two path points. Networks support up to 12 layers, 32 inputs and 16 neurons in each later layer; wider CPU networks fall back during verification.
 
 Before a HIP session's first driving window after a start or restore, it compares 12 ticks against CPU from the same state, then restores that state. A mismatch or verification error drops HIP and runs the requested window on CPU. Track replacement uploads the new world and repeats verification before driving. Read `state.backend` after advancing because it may change from the `create` result.
 

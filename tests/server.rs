@@ -484,3 +484,64 @@ fn hip_sessions_end_with_their_connection() {
     drop(third);
     drop(claim());
 }
+
+#[test]
+fn unsupported_hip_scenes_and_networks_fall_back_without_losing_the_connection() {
+    let _hip = HIP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let address = start();
+    let mut client = Client::connect(address);
+    if client.hello["hip"]["available"] != true {
+        eprintln!("skipping: {}", client.hello["hip"]["reason"]);
+        return;
+    }
+    let mut scene = generated::template("rally");
+    scene["reset_position"] = json!([0, 0]);
+    scene["reset_rotation"] = json!(0);
+    scene["track"] = json!({
+        "path": [[0, 0], [1000, 0], [1000, 1000]],
+        "walls": [
+            [[-200, -200], [1200, -200]], [[1200, -200], [1200, 1200]],
+            [[1200, 1200], [-200, 1200]], [[-200, 1200], [-200, -200]]
+        ],
+        "polygons": [{"points": [[-200, -200], [1200, -200], [1200, 1200], [-200, 1200]]}],
+        "physics_shapes": [], "tiles": []
+    });
+    let request = json!({
+        "scene": scene.to_string(),
+        "network": json!({"inputs": ["Speed"], "outputs": ["Acceleration"]}).to_string(),
+        "model": json!({"vision": [], "sensors": ["speed"], "outputs": ["acceleration"]}).to_string(),
+        "options": {"population": 2, "backend": "hip", "seed": 7}
+    });
+    let mut created = client.call("create", request.clone());
+    // Another test's abrupt socket drop may still be reaching its server thread.
+    for attempt in 0.. {
+        if created["backendNote"] != "another session is using the GPU" {
+            break;
+        }
+        assert!(attempt < 50, "the previous connection retained HIP: {created}");
+        drop(client);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        client = Client::connect(address);
+        created = client.call("create", request.clone());
+    }
+    assert_eq!(created["backend"], "cpu", "{created}");
+    assert!(created["backendNote"].as_str().unwrap().contains("physics shapes"));
+    client.call("startWithShape", json!({"shape": [1, 2, 1]}));
+    assert_eq!(
+        client.call("advance", json!({"ticks": 6, "stopWhenInactive": false})),
+        6
+    );
+    assert!(!client.call_raw("checkpointBytes", Value::Null, None).1.is_empty());
+
+    let mut wide = Client::connect(address);
+    assert_eq!(
+        wide.create(&json!({"population": 4, "backend": "hip", "seed": 3}))["backend"],
+        "hip"
+    );
+    wide.call("startWithShape", json!({"shape": [20, 32, 5]}));
+    let (reply, _) = wide.call_raw("advance", json!({"ticks": 30, "stopWhenInactive": false}), None);
+    assert_eq!(reply["ok"], 30, "{reply}");
+    assert_eq!(reply["state"]["backend"], "cpu", "{reply}");
+    assert!(reply["state"]["backendNote"].as_str().unwrap().contains("16"));
+    assert!(!wide.call_raw("checkpointBytes", Value::Null, None).1.is_empty());
+}

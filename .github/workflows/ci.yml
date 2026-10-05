@@ -109,6 +109,8 @@ jobs:
         with:
           key: hip-x86-64
       - run: GPU_ARCH=gfx1100 gpu/build.sh
+      - name: Check cleanup after HIP allocation and upload failures
+        run: python3 gpu/test_constructor_cleanup.py
       - name: Check the library against the Rust layouts
         # No GPU is needed: gpu-info checks the device struct layouts on the host.
         run: cargo run --locked --bin altd-sim -- gpu-info

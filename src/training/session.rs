@@ -1531,6 +1531,18 @@ mod tests {
         assert_eq!(state_bits(&first), state_bits(&second));
         drop(first);
         assert_eq!(session(&generated_scene()).backend(), Backend::Hip);
+
+        // The browser allows hidden layers wider than HIP's 16 lanes.
+        // Verification must preserve the initial state and fall back cleanly.
+        let mut wide = session(&generated_scene());
+        let mut cpu = generated_session(r#"{"population":4,"seed":3}"#);
+        for s in [&mut wide, &mut cpu] {
+            s.start_with_shape(&[20, 32, 5]).unwrap();
+            s.advance(30, false).unwrap();
+        }
+        assert_eq!(wide.backend(), Backend::Cpu);
+        assert!(wide.backend_note().unwrap().contains("16"), "{:?}", wide.backend_note());
+        assert_eq!(state_bits(&wide), state_bits(&cpu));
     }
 
     #[test]

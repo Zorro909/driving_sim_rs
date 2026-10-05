@@ -61,7 +61,10 @@ pub(super) struct HipState {
 }
 
 fn upload_world(gpu: &'static Gpu, world: &World) -> Result<GpuWorld<'static>, String> {
-    Ok(GpuWorld::from_prepared(gpu, PreparedGpuWorld::new(world)?))
+    if world.track.shapes.is_empty() || world.track.path.len() < 2 {
+        return Err("the HIP simulator needs physics shapes and a path with at least two points".into());
+    }
+    GpuWorld::try_from_prepared(gpu, PreparedGpuWorld::new(world)?)
 }
 
 impl HipState {
@@ -96,7 +99,7 @@ impl HipState {
     #[cfg(any(test, feature = "server"))]
     pub(super) fn replace_world(&mut self, runner: &TrainingRunner) -> Result<(), String> {
         let world = upload_world(self.world.gpu(), &runner.world)?;
-        self.sim.set_world(&world);
+        self.sim.try_set_world(&world)?;
         // The simulator uses the new world now; the old one can go.
         self.world = world;
         self.verified = false;
