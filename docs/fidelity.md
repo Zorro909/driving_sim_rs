@@ -18,7 +18,9 @@ A historical diagnostic comparison against a captured campaign run matched 1,393
 
 ## Platform limits
 
-On x86, native `engine_sin_cos` uses x87 `FSINCOS`. The portable fdlibm-based implementation is validated against it over float32 arguments with absolute value at most 16; the regular suite samples the domain and an ignored exhaustive test scans it. Larger arguments are not covered by that claim.
+On x86, native `engine_sin_cos` uses x87 `FSINCOS`. Its large-argument reduction preserves the extended pi constant across x87 precision modes. Tests cover 24, 53 and 64-bit precision and check that the caller's control word is unchanged. The portable fdlibm-based implementation is validated against x87 over float32 arguments with absolute value at most 16; the regular suite samples the domain and an ignored exhaustive test scans it. Larger arguments are not covered by that claim.
+
+Seeded Python Xavier tests keep the captured parameter checksum on Linux and Windows. On macOS, `cargo test --lib nn::network::tests::xavier_matches_python -- --exact` requires `python3` and compares every parameter bit, the MT state and the cached Gaussian draw with CPython on that host. This checks host parity without assuming libSystem and glibc round identically.
 
 Native and WASM use different host implementations for some float64 transcendental operations. The public generated Formula state scenario matched 2,773 native values, while expanded snapshots found 2,285 native differences per scheduling mode: 703 controls, 405 metrics and 1,177 checkpoint bytes. Serial and threaded WASM had the same native differences and matched each other in all 253,311 checked values per mode. A passing state-only comparison does not imply exact expanded native parity. Counts depend on the scenario and checkpoint layout.
 

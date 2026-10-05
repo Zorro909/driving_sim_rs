@@ -245,6 +245,7 @@ pub fn engine_sin_cos(x: f32) -> (f32, f32) {
     let mut cosine = 0.0f32;
     // The x87 stack is balanced on both paths. FSINCOS leaves its operand on
     // range failure; FPREM1 reduces against the same extended FLDPI constant.
+    // FSCALE doubles pi without rounding it to the caller's x87 precision.
     unsafe {
         core::arch::asm!(
             "fld dword ptr [{input}]",
@@ -253,7 +254,10 @@ pub fn engine_sin_cos(x: f32) -> (f32, f32) {
             "test ax, 0x400",
             "jz 3f",
             "fldpi",
-            "fadd st(0), st(0)",
+            "fld1",
+            "fxch st(1)",
+            "fscale",
+            "fstp st(1)",
             "fxch st(1)",
             "2:",
             "fprem1",
@@ -266,7 +270,7 @@ pub fn engine_sin_cos(x: f32) -> (f32, f32) {
             "fstp dword ptr [{cosine}]",
             "fstp dword ptr [{sine}]",
             input=in(reg) &x,sine=in(reg) &mut sine,cosine=in(reg) &mut cosine,
-            out("ax") _,out("st(0)") _,out("st(1)") _,options(nostack),
+            out("ax") _,out("st(0)") _,out("st(1)") _,out("st(2)") _,options(nostack),
         );
     }
     (sine, cosine)
@@ -347,6 +351,53 @@ pub fn engine_cos(x: f32) -> f32 {
 #[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 mod engine_tests {
     use super::*;
+
+    #[test]
+    fn large_engine_arguments_match_the_capture_at_every_x87_precision() {
+        fn control_word() -> u16 {
+            let mut word = 0u16;
+            unsafe {
+                core::arch::asm!("fnstcw word ptr [{word}]", word = in(reg) &mut word, options(nostack));
+            }
+            word
+        }
+        struct RestoreControlWord(u16);
+        impl Drop for RestoreControlWord {
+            fn drop(&mut self) {
+                unsafe {
+                    core::arch::asm!("fldcw word ptr [{word}]", word = in(reg) &self.0, options(nostack));
+                }
+            }
+        }
+
+        let original = control_word();
+        let _restore = RestoreControlWord(original);
+        // Captured results at the FSINCOS range boundary and the largest float.
+        let rows = [
+            (0x5eff_ffff, 0x3e54_4316, 0xbf7a_7091),
+            (0x5f00_0000, 0x3f7c_c47f, 0x3e22_3675),
+            (0x7f7f_ffff, 0x3f7a_128f, 0xbe5b_1472),
+        ];
+        for precision in [0x0000, 0x0200, 0x0300] {
+            let word = (original & !0x0300) | precision;
+            unsafe {
+                core::arch::asm!("fldcw word ptr [{word}]", word = in(reg) &word, options(nostack));
+            }
+            for (input, sine, cosine) in rows {
+                let actual = engine_sin_cos(f32::from_bits(input));
+                assert_eq!(
+                    (actual.0.to_bits(), actual.1.to_bits()),
+                    (sine, cosine),
+                    "input {input:08x}, x87 control word {word:04x}"
+                );
+                assert_eq!(
+                    control_word(),
+                    word,
+                    "engine math changed the caller's x87 control word"
+                );
+            }
+        }
+    }
 
     fn check(bits: u32) -> Option<(u32, u32, u32, u32, u32)> {
         let x = f32::from_bits(bits);
