@@ -136,7 +136,7 @@ impl PathSegments {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 
@@ -148,7 +148,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn avx2_scan_matches_scalar_scan() {
         if !std::is_x86_feature_detected!("avx2") {
             return;

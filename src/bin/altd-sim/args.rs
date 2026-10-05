@@ -9,7 +9,11 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "CPU game-fidelity simulator and trainer for AI Learns To Drive")]
+#[command(
+    name = "altd-sim",
+    about = "CPU game-fidelity simulator and trainer for AI Learns To Drive",
+    version = super::platform::VERSION
+)]
 pub(super) struct Cli {
     /// Worker threads (default: all logical CPUs in the affinity mask).
     #[arg(long, global = true)]
@@ -142,8 +146,9 @@ pub(super) enum Command {
         scene: PathBuf,
         #[arg(long)]
         network: PathBuf,
-        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/rally.json"))]
-        model: PathBuf,
+        /// Vehicle model JSON (default: the built-in copy of assets/models/rally.json).
+        #[arg(long)]
+        model: Option<PathBuf>,
         #[arg(long)]
         spawn_trace: PathBuf,
         #[arg(long, default_value_t = 1000)]
@@ -214,11 +219,13 @@ pub(super) enum Command {
         /// Trace whose first frame is the spawn pose.
         #[arg(long, required_if_eq("track_mode", "fixed"))]
         spawn_trace: Option<PathBuf>,
-        /// Network export supplying the input sensor and output control names; its weights are unused.
-        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/networks/rally.json"))]
-        network: PathBuf,
-        #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/rally.json"))]
-        model: PathBuf,
+        /// Network export supplying the input sensor and output control names; its weights are unused
+        /// (default: the built-in copy of assets/networks/rally.json).
+        #[arg(long)]
+        network: Option<PathBuf>,
+        /// Vehicle model JSON (default: the built-in copy of assets/models/rally.json).
+        #[arg(long)]
+        model: Option<PathBuf>,
         /// Run directory: log, best-lap networks, and checkpoints.
         #[arg(long, default_value = "runs/example")]
         out_dir: PathBuf,
@@ -293,8 +300,8 @@ pub(super) enum Command {
         /// Continue from the checkpoint in --out-dir, allowing new settings with the same network shape.
         #[arg(long)]
         resume: bool,
-        /// Simulate the generations on the GPU (gpu/sim, bit-exact with the CPU;
-        /// ALTD_GPU_LIB overrides the library path).
+        /// Simulate the generations on the GPU (gpu/sim, bit-exact with the CPU).
+        /// `gpu-info` shows which library this loads.
         #[arg(long)]
         gpu: bool,
     },
@@ -360,6 +367,13 @@ pub(super) enum Command {
         scene: PathBuf,
         trace: PathBuf,
         report: PathBuf,
+    },
+    /// Load the HIP simulator library used by --gpu and check that it matches this binary.
+    /// Needs a ROCm runtime but no GPU.
+    GpuInfo {
+        /// Library path (default: ALTD_GPU_LIB, then beside the executable, then target/gpu).
+        #[arg(long)]
+        library: Option<PathBuf>,
     },
 }
 

@@ -1029,7 +1029,12 @@ impl Drop for GpuSim<'_> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn check(status: i32, what: &str) {
-    assert_eq!(status, 0, "GPU {what} failed with status {status}");
+    assert_eq!(
+        status,
+        0,
+        "GPU {what} failed with {}",
+        crate::gpu::hip::status_message(status)
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
