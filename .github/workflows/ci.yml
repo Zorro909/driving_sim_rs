@@ -89,6 +89,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
+      - name: Install the same-host Python math oracle
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - uses: Swatinem/rust-cache@v2
         with:
           key: platform-${{ matrix.os }}
