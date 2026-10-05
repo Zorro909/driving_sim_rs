@@ -16,11 +16,27 @@ use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod hip;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hip::device as hip_device;
+
 /// The spawn pose of every car.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Spawn {
     pub position: [f64; 2],
     pub rotation: f64,
+}
+
+/// Where a session's driving windows run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// The CPU runner (rayon).
+    #[default]
+    Cpu,
+    /// The native HIP simulator (libaltd_gpu.so); reproduction stays on the CPU.
+    Hip,
 }
 
 /// Options of `Session::new`, as the JSON object hosts pass (camelCase keys,
@@ -46,6 +62,9 @@ pub struct SessionOptions {
     /// WebGPU only: every n-th ray query is also cast on the CPU and compared
     /// (0 disables the check).
     pub(crate) gpu_verify_every: u32,
+    /// `"cpu"` or `"hip"`. A native session falls back to the CPU when HIP
+    /// cannot run it (see `Session::backend_note`).
+    pub backend: Backend,
 }
 
 impl Default for SessionOptions {
@@ -61,6 +80,7 @@ impl Default for SessionOptions {
             mode: "independent".into(),
             settings: None,
             gpu_verify_every: 0,
+            backend: Backend::Cpu,
         }
     }
 }
@@ -79,6 +99,10 @@ pub struct Session {
     network: Value,
     output_names: Vec<String>,
     boundary: Option<Boundary>,
+    #[cfg(not(target_arch = "wasm32"))]
+    hip: Option<hip::HipState>,
+    /// Why the session runs on another backend than its options asked for.
+    backend_note: Option<String>,
 }
 
 /// The generation that just began, as a checkpoint saves it. Kept apart from
@@ -165,6 +189,10 @@ impl Session {
         if options.batch_count == 0 {
             return Err("batchCount must be positive".into());
         }
+        #[cfg(target_arch = "wasm32")]
+        if options.backend == Backend::Hip {
+            return Err("the HIP backend is only available in the native simulator".into());
+        }
         let output_names = strings(&network["outputs"], "network outputs")?;
         strings(&network["inputs"], "network inputs")?;
         let mut settings = options
@@ -193,6 +221,16 @@ impl Session {
             options.eliminate_when_idle,
         );
         runner.mode = mode;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (hip, backend_note) = match options.backend {
+            Backend::Cpu => (None, None),
+            Backend::Hip => match hip::HipState::new(&runner) {
+                Ok(state) => (Some(state), None),
+                Err(reason) => (None, Some(reason)),
+            },
+        };
+        #[cfg(target_arch = "wasm32")]
+        let backend_note = None;
         Ok(Session {
             runner,
             #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
@@ -201,6 +239,9 @@ impl Session {
             network: network.clone(),
             output_names,
             boundary: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hip,
+            backend_note,
         })
     }
 
@@ -225,6 +266,7 @@ impl Session {
             self.check_shape(&seed.shape)?;
             let lineage = self.runner.start_traced(&seed);
             self.record(lineage);
+            self.networks_changed();
             Ok(())
         } else {
             let shape = self
@@ -241,6 +283,7 @@ impl Session {
         let seed = self.runner.rng.xavier(shape);
         let lineage = self.runner.start_traced(&seed);
         self.record(lineage);
+        self.networks_changed();
         Ok(())
     }
 
@@ -248,6 +291,12 @@ impl Session {
         let inputs = self.runner.layout.sensors.len();
         if shape.len() < 2 || shape.contains(&0) {
             return Err(format!("invalid network shape {shape:?}"));
+        }
+        if checked_parameter_count(shape)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<f64>()))
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err("the network shape exceeds the parameter buffer size".into());
         }
         if shape[0] != inputs {
             return Err(format!(
@@ -284,8 +333,51 @@ impl Session {
             .ok_or_else(|| format!("car {index} is outside the population of {}", self.runner.agents.len()))
     }
 
+    /// The backend that runs the driving windows.
+    pub fn backend(&self) -> Backend {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.hip.is_some() {
+            return Backend::Hip;
+        }
+        Backend::Cpu
+    }
+
+    /// Why the session runs on the CPU although its options asked for HIP.
+    pub fn backend_note(&self) -> Option<&str> {
+        self.backend_note.as_deref()
+    }
+
+    /// The networks changed without a new generation number, so a GPU
+    /// simulator must upload them again.
+    fn networks_changed(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(hip) = &mut self.hip {
+            hip.invalidate_networks();
+        }
+    }
+
+    /// The HIP simulator, after its startup comparison with the CPU; `None`
+    /// on the CPU backend. A failed comparison moves the session to the CPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hip(&mut self) -> Option<&mut hip::HipState> {
+        let state = self.hip.as_mut()?;
+        if state.needs_verify() {
+            if let Err(reason) = state.verify(&mut self.runner) {
+                self.hip = None;
+                self.backend_note = Some(reason);
+                return None;
+            }
+        }
+        self.hip.as_mut()
+    }
+
     pub fn advance(&mut self, ticks: u64, stop_when_inactive: bool) -> Result<u64, String> {
         self.require_started()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.hip().is_some() {
+            let hip = self.hip.as_mut().unwrap();
+            return hip.advance(&mut self.runner, ticks, stop_when_inactive);
+        }
         Ok(self.runner.advance(ticks, stop_when_inactive))
     }
 
@@ -293,6 +385,11 @@ impl Session {
         self.require_started()?;
         if self.runner.stats_phase != 0 {
             return Err("advance_generation needs statistics phase 0".into());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.hip().is_some() {
+            let hip = self.hip.as_mut().unwrap();
+            return hip.advance_generation(&mut self.runner, time_limit_ticks);
         }
         Ok(self.runner.advance_generation(time_limit_ticks))
     }
@@ -309,8 +406,8 @@ impl Session {
     /// Change the settings used by the next reproduction without resetting
     /// cars, generation statistics or the training RNG. Population changes
     /// take effect when `next_generation` installs the new population.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
-    pub(crate) fn set_evolution_settings(&mut self, text: &str) -> Result<(), String> {
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
+    pub fn set_evolution_settings(&mut self, text: &str) -> Result<(), String> {
         let settings: EvolutionSettings =
             serde_json::from_str(text).map_err(|e| format!("invalid evolution settings: {e}"))?;
         if settings.population == 0 || settings.selection_size == 0 {
@@ -392,7 +489,7 @@ impl Session {
     }
 
     /// The network of car `index` as `{"shape", "weights", "biases"}`.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub(crate) fn network_json(&self, index: usize) -> Result<String, String> {
         Ok(self.agent(index)?.network.to_json().to_string())
     }
@@ -414,6 +511,7 @@ impl Session {
             ));
         }
         agent.network = network;
+        self.networks_changed();
         Ok(())
     }
 
@@ -445,7 +543,7 @@ impl Session {
 
     /// Installs the checkpoint's networks on reset cars as its generation
     /// (`TrainingRunner::resume`) and restores its RNG.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub(crate) fn restore_checkpoint(&mut self, value: &Value) -> Result<(), String> {
         let shape: Vec<usize> = value["shape"]
             .as_array()
@@ -505,6 +603,7 @@ impl Session {
         }
         self.runner.resume(&networks, generation);
         self.snapshot_population();
+        self.networks_changed();
         Ok(())
     }
 
@@ -545,11 +644,12 @@ impl Session {
         self.runner.rng = rng;
         self.runner.resume_owned(networks, generation);
         self.record(lineage);
+        self.networks_changed();
         Ok(())
     }
 
     /// The generation boundary `checkpoint_bytes` saves: `(generation, tick)`.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub(crate) fn boundary(&self) -> Option<(u64, u64)> {
         self.boundary.as_ref().map(|b| (b.generation, b.tick))
     }
@@ -649,8 +749,8 @@ impl Session {
     /// Selects the track the next installed generation drives, spawning at
     /// the scene's reset pose. Call it at a generation boundary, before
     /// `next_generation`; the vehicle must not change.
-    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-    pub(crate) fn replace_track(&mut self, scene: &Value) -> Result<(), String> {
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
+    pub fn replace_track(&mut self, scene: &Value) -> Result<(), String> {
         let position = scene
             .get("reset_position")
             .map(crate::track::world::vector)
@@ -665,6 +765,13 @@ impl Session {
         }
         self.runner
             .replace_track(world, V2::new(position.x, position.y), rotation);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(hip) = &mut self.hip {
+            if let Err(reason) = hip.replace_world(&self.runner) {
+                self.hip = None;
+                self.backend_note = Some(reason);
+            }
+        }
         Ok(())
     }
 }
@@ -964,6 +1071,15 @@ mod tests {
     }
 
     #[test]
+    fn oversized_shapes_fail_before_allocating_parameters() {
+        let mut session = generated_session(r#"{"population":2}"#);
+        assert!(session.start_with_shape(&[20, usize::MAX, 5]).is_err());
+        assert!(!session.started());
+        session.start_with_shape(&[20, 8, 5]).unwrap();
+        assert!(session.started());
+    }
+
+    #[test]
     fn evolution_updates_preserve_statistics_and_rng_until_turnover() {
         let mut s = generated_session(r#"{"population":6,"seed":5,"eliminateOnWall":true}"#);
         s.start_with_shape(&[20, 8, 5]).unwrap();
@@ -1245,6 +1361,176 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    /// HIP tests share the process's one device claim, so they run one at a time.
+    #[cfg(not(target_arch = "wasm32"))]
+    static HIP_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The HIP test lock, or `None` (the test is skipped) without a device.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hip_or_skip() -> Option<std::sync::MutexGuard<'static, ()>> {
+        let guard = HIP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        match hip_device() {
+            Ok(_) => Some(guard),
+            Err(e) => {
+                eprintln!("skipping the HIP test: {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_backend(options: &str, backend: &str) -> String {
+        let mut value: Value = serde_json::from_str(options).unwrap();
+        value["backend"] = Value::from(backend);
+        value.to_string()
+    }
+
+    #[test]
+    fn backend_option_parses_and_defaults_to_cpu() {
+        assert_eq!(SessionOptions::from_json("{}").unwrap().backend, Backend::Cpu);
+        assert_eq!(
+            SessionOptions::from_json(r#"{"backend":"hip"}"#).unwrap().backend,
+            Backend::Hip
+        );
+        assert!(SessionOptions::from_json(r#"{"backend":"webgpu"}"#).is_err());
+        let s = generated_session(r#"{"population": 2}"#);
+        assert_eq!((s.backend(), s.backend_note()), (Backend::Cpu, None));
+    }
+
+    /// A HIP session drives exactly like a CPU session through windows,
+    /// whole generations and turnovers, and their checkpoints are
+    /// interchangeable.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hip_sessions_match_cpu_sessions() {
+        let Some(_hip) = hip_or_skip() else { return };
+        let options = PARENT_OPTIONS[0];
+        let mut cpu = generated_session(options);
+        let mut gpu = generated_session(&with_backend(options, "hip"));
+        assert_eq!((gpu.backend(), gpu.backend_note()), (Backend::Hip, None));
+        cpu.start_with_shape(&[20, 8, 5]).unwrap();
+        gpu.start_with_shape(&[20, 8, 5]).unwrap();
+        for (ticks, stop) in [(1, false), (37, false), (90, true)] {
+            assert_eq!(cpu.advance(ticks, stop).unwrap(), gpu.advance(ticks, stop).unwrap());
+            assert_eq!(state_bits(&gpu), state_bits(&cpu), "window of {ticks}");
+        }
+        assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
+        assert_eq!(
+            cpu.advance_generation(600).unwrap(),
+            gpu.advance_generation(600).unwrap()
+        );
+        assert_eq!(state_bits(&gpu), state_bits(&cpu));
+        for generation in 1..=2 {
+            assert_eq!(gpu.next_generation().unwrap(), cpu.next_generation().unwrap());
+            assert_eq!(gpu.checkpoint_bytes().unwrap(), cpu.checkpoint_bytes().unwrap());
+            assert_eq!(
+                cpu.advance_generation(600).unwrap(),
+                gpu.advance_generation(600).unwrap()
+            );
+            assert_eq!(state_bits(&gpu), state_bits(&cpu), "generation {generation}");
+            assert_eq!(gpu.generation_summary(), cpu.generation_summary());
+        }
+        // Checkpoints move between the backends.
+        let saved = gpu.checkpoint_bytes().unwrap();
+        drop(gpu);
+        let mut gpu = generated_session(&with_backend(options, "hip"));
+        let mut from_gpu = generated_session(options);
+        gpu.restore_checkpoint_bytes(&cpu.checkpoint_bytes().unwrap()).unwrap();
+        from_gpu.restore_checkpoint_bytes(&saved).unwrap();
+        for s in [&mut gpu, &mut from_gpu] {
+            assert_eq!(s.advance_generation(600).unwrap(), cpu.runner.tick);
+            assert_eq!(state_bits(s), state_bits(&cpu));
+        }
+        assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
+        // A stage change to another generated track.
+        let settings = serde_json::from_value(load("assets/random_track_settings.json")).unwrap();
+        let (_, next) = crate::track::training_tracks::training_scene_at(
+            &load("assets/scenes/formula_template.json"),
+            &settings,
+            None,
+            4242,
+            0,
+            0,
+        )
+        .unwrap();
+        for s in [&mut cpu, &mut gpu] {
+            s.replace_track(&next).unwrap();
+            s.next_generation().unwrap();
+            s.advance_generation(600).unwrap();
+        }
+        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the replaced track");
+        assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
+
+        // An already verified session can restart with a different network
+        // shape and restore an earlier generation without stale GPU networks.
+        for s in [&mut cpu, &mut gpu] {
+            s.start_with_shape(&[20, 16, 5]).unwrap();
+        }
+        assert!(gpu.hip.as_ref().unwrap().needs_verify());
+        for s in [&mut cpu, &mut gpu] {
+            s.advance(30, false).unwrap();
+        }
+        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the restarted session");
+        assert!(!gpu.hip.as_ref().unwrap().needs_verify());
+        let checkpoint = cpu.checkpoint_bytes().unwrap();
+        for s in [&mut cpu, &mut gpu] {
+            s.restore_checkpoint_bytes(&checkpoint).unwrap();
+        }
+        assert!(gpu.hip.as_ref().unwrap().needs_verify());
+        for s in [&mut cpu, &mut gpu] {
+            s.advance(30, false).unwrap();
+            s.set_evolution_settings(r#"{"population":24,"selection_size":3}"#)
+                .unwrap();
+            s.next_generation().unwrap();
+            s.advance_generation(120).unwrap();
+        }
+        assert_eq!(state_bits(&gpu), state_bits(&cpu), "the larger population");
+        assert_eq!(gpu.checkpoint_bytes().unwrap(), cpu.checkpoint_bytes().unwrap());
+        assert_eq!(gpu.backend(), Backend::Hip, "{:?}", gpu.backend_note());
+    }
+
+    /// Scenes HIP cannot run, and a second concurrent HIP session, fall back
+    /// to the CPU with a reason; the device is free again once a HIP session drops.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hip_falls_back_to_the_cpu_with_a_reason() {
+        let Some(_hip) = hip_or_skip() else { return };
+        let options = with_backend(r#"{"population": 4, "seed": 3}"#, "hip");
+        let session = |scene: &Value| {
+            Session::new(
+                scene,
+                &load("assets/networks/formula.json"),
+                &load("assets/models/formula.json"),
+                SessionOptions::from_json(&options).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut broadphase = generated_scene();
+        broadphase["track"]["native_broadphase"] = Value::Bool(true);
+        let mut no_curve = generated_scene();
+        no_curve["track"].as_object_mut().unwrap().remove("curve");
+        for (scene, reason) in [(&broadphase, "native broadphase"), (&no_curve, "track.curve")] {
+            let s = session(scene);
+            assert_eq!(s.backend(), Backend::Cpu);
+            assert!(s.backend_note().unwrap().contains(reason), "{:?}", s.backend_note());
+        }
+        let mut first = session(&generated_scene());
+        assert_eq!(first.backend(), Backend::Hip);
+        let mut second = session(&generated_scene());
+        assert_eq!(
+            (second.backend(), second.backend_note()),
+            (Backend::Cpu, Some("another session is using the GPU"))
+        );
+        // The fallback still trains.
+        first.start_with_shape(&[20, 8, 5]).unwrap();
+        second.start_with_shape(&[20, 8, 5]).unwrap();
+        first.advance(30, false).unwrap();
+        second.advance(30, false).unwrap();
+        assert_eq!(state_bits(&first), state_bits(&second));
+        drop(first);
+        assert_eq!(session(&generated_scene()).backend(), Backend::Hip);
     }
 
     #[test]

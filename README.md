@@ -44,6 +44,14 @@ gpu/build.sh
 
 For another supported AMD GPU, set `GPU_ARCH` when building. Rust builds do not require ROCm. See [GPU setup](gpu/README.md) for validation and profiling.
 
+The default build also includes a local WebSocket server for native CPU or HIP sessions:
+
+```sh
+target/release/altd-sim --threads 8 serve
+```
+
+It listens on `127.0.0.1:47800/v1` and accepts the `https://drivinglab.jectrum.de` origin by default. `--allow-origin` replaces that list for other clients or local development. [Server documentation](docs/server.md) covers the protocol, security checks and checkpoint resume. Drive Lab's client integration is a separate change.
+
 WebAssembly builds need the wasm32 target and the matching `wasm-bindgen` CLI:
 
 ```sh
@@ -56,7 +64,7 @@ The JavaScript library includes CPU simulation, a threaded CPU package and optio
 
 ## CLI and output
 
-`target/release/altd-sim --help` and `target/release/altd-sim COMMAND --help` show arguments. `bench` measures a fixed population; `train` evolves an exported network; `train-scratch` starts Xavier networks and supports checkpoints, generated-track batches and stop conditions; `evaluate` runs a frozen candidate against a hash-validated suite. The `compare-*` commands compare user-supplied captures with the simulator. Scenes and recorded traces are explicit inputs. [CLI reference](docs/cli.md) covers defaults, resume behavior and report formats.
+`target/release/altd-sim --help` and `target/release/altd-sim COMMAND --help` show arguments. `bench` measures a fixed population; `train` evolves an exported network; `train-scratch` starts Xavier networks and supports checkpoints, generated-track batches and stop conditions; `evaluate` runs a frozen candidate against a hash-validated suite; `serve` exposes sessions over a loopback WebSocket. The `compare-*` commands compare user-supplied captures with the simulator. Scenes and recorded traces are explicit inputs. [CLI reference](docs/cli.md) covers defaults, resume behavior and report formats.
 
 A `train-scratch` run writes:
 

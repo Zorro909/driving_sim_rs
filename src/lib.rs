@@ -8,6 +8,9 @@ pub mod math;
 pub mod nn;
 /// Vehicle dynamics, contacts, and recorded-state reconstruction.
 pub mod physics;
+/// `altd-sim serve`: the WebSocket server Drive Lab trains on.
+#[cfg(all(feature = "server", not(target_arch = "wasm32")))]
+pub mod server;
 /// Scene geometry, spatial queries, and generated tracks.
 pub mod track;
 /// Population execution, evolution, evaluation, and embedding sessions.
