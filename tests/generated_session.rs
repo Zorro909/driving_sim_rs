@@ -22,10 +22,19 @@ fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
     let network = generated::network("rally");
     let model = generated::model("rally");
     let golden: Value = serde_json::from_str(include_str!("fixtures/generated/sessions.json")).unwrap();
+    // These snapshots and bytes were captured on Linux x86_64 GNU. Other
+    // hosts can round Gaussian/transcendental operations differently, so all
+    // targets also compare Session against the legacy runner on the same host.
+    let captured_platform = cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"));
     for mode in ["independent", "lockstep"] {
         let case = &golden[mode];
         let options = case["options"].to_string();
         let mut session = Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
+        // Use Session only to expose the runner's state through the same views.
+        // Its runner follows the public, untraced pre-Session lifecycle below.
+        let mut reference =
+            Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
+        let mut replay: Option<Session> = None;
         let shape: Vec<_> = case["shape"]
             .as_array()
             .unwrap()
@@ -34,36 +43,72 @@ fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
             .collect();
         for (index, row) in case["rows"].as_array().unwrap().iter().enumerate() {
             match row["operation"].as_str().unwrap() {
-                "start" => session.start_with_shape(&shape).unwrap(),
+                "start" => {
+                    session.start_with_shape(&shape).unwrap();
+                    let seed = reference.runner.rng.xavier(&shape);
+                    reference.runner.start(&seed);
+                }
                 "advance" => {
-                    assert_eq!(
-                        json!(session.advance(row["ticks"].as_u64().unwrap(), false).unwrap()),
-                        row["executed"]
-                    );
+                    let ticks = row["ticks"].as_u64().unwrap();
+                    let executed = session.advance(ticks, false).unwrap();
+                    assert_eq!(executed, reference.runner.advance(ticks, false));
+                    assert_eq!(json!(executed), row["executed"]);
+                    if let Some(replay) = &mut replay {
+                        assert_eq!(replay.advance(ticks, false).unwrap(), executed);
+                    }
                 }
                 "next_generation" => {
                     let (preserved, rewards) = session.next_generation().unwrap();
-                    assert_eq!(json!(preserved), row["preserved"]);
-                    assert_eq!(json!(regression::bits(rewards)), row["rewards"]);
+                    let reward_bits = regression::bits(rewards);
+                    let expected = reference.runner.next_generation();
+                    assert_eq!(preserved, expected.preserved_count);
+                    assert_eq!(reward_bits, regression::bits(expected.rewards));
+                    if captured_platform {
+                        assert_eq!(json!(preserved), row["preserved"]);
+                        assert_eq!(json!(&reward_bits), row["rewards"]);
+                    }
                     let bytes = session.checkpoint_bytes().unwrap();
-                    assert_eq!(bytes, checkpoint(mode, session.runner.generation), "{mode} checkpoint");
+                    if captured_platform {
+                        assert_eq!(bytes, checkpoint(mode, session.runner.generation), "{mode} checkpoint");
+                    }
+                    if let Some(replay) = &mut replay {
+                        let (replay_preserved, replay_rewards) = replay.next_generation().unwrap();
+                        assert_eq!(replay_preserved, preserved);
+                        assert_eq!(regression::bits(replay_rewards), reward_bits);
+                        assert_eq!(replay.checkpoint_bytes().unwrap(), bytes, "{mode} replay checkpoint");
+                    }
                     let mut restored =
                         Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
                     restored.restore_checkpoint_bytes(&bytes).unwrap();
                     assert_eq!(
                         regression::session_snapshot(&restored),
-                        row["expected"],
+                        regression::session_snapshot(&reference),
                         "{mode} restored checkpoint"
                     );
                     assert_eq!(restored.checkpoint_bytes().unwrap(), bytes);
+                    replay = Some(restored);
                 }
                 operation => panic!("unexpected generated fixture operation {operation}"),
             }
             assert_eq!(
                 regression::session_snapshot(&session),
-                row["expected"],
-                "{mode} operation {index}"
+                regression::session_snapshot(&reference),
+                "{mode} legacy runner operation {index}"
             );
+            if captured_platform {
+                assert_eq!(
+                    regression::session_snapshot(&session),
+                    row["expected"],
+                    "{mode} captured operation {index}"
+                );
+            }
+            if let Some(replay) = &replay {
+                assert_eq!(
+                    regression::session_snapshot(replay),
+                    regression::session_snapshot(&reference),
+                    "{mode} checkpoint replay operation {index}"
+                );
+            }
         }
     }
 }

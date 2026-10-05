@@ -74,6 +74,14 @@ in both execution modes. Four binary files check exact generation-boundary
 checkpoint bytes. Floating-point state is stored as hexadecimal f64 bits, with
 f32 state widened to f64 first. These eight golden outputs total about 2.9 MB.
 
+The Session snapshots and checkpoint bytes were captured on Linux x86_64 with
+GNU libm. Their exact golden comparisons run on that platform. On every
+platform, the Session test also compares both execution modes with the legacy
+`TrainingRunner` on the same host, including every parameter and RNG bit, and
+checks that restoring a checkpoint reproduces the next generation's state and
+checkpoint bytes exactly. Gaussian initialization uses host float64 math, so
+equal RNG draws need not yield equal parameters across native hosts.
+
 `generated_saved_track.json` is a compact saved-track input made from the same
 seed and track slot one. The saved-track import test regenerates its encoding and
 checks scene conversion and curve baking. It is current-code generated input.
