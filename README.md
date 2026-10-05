@@ -6,21 +6,92 @@
 
 The repository includes vehicle and sensor templates, tile resources, fixed generated tracks and self-contained tests. Campaign tracks are not distributed.
 
-## Download
+## Getting started
 
-[Releases](https://github.com/Zorro909/driving_sim_rs/releases) provide prebuilt archives for Linux x86_64, Windows x86_64 and macOS on Apple silicon. Tagged versions are stable. The `nightly` pre-release is rebuilt from every push to `main`, and its file names stay fixed. Each archive contains `altd-sim`, the `assets/` templates, the docs and the licenses; `SHA256SUMS` lists the archive checksums.
+This guide sets up `altd-sim serve`, the local simulator for [Drive Lab](https://drivinglab.jectrum.de). Drive Lab keeps your tracks, runs and downloads in the browser; the server drives the cars on your CPU threads or an AMD GPU. That removes the browser's limits on cars and network size and its eight-thread cap.
+
+### 1. Download
+
+Download the archive for your system from [Releases](https://github.com/Zorro909/driving_sim_rs/releases). Tagged versions are stable; the `nightly` pre-release is rebuilt from every push to `main` and keeps the same file names. `SHA256SUMS` lists the archive checksums.
+
+| System | Archive | Training on |
+| --- | --- | --- |
+| Linux x86_64 | `altd-sim-<version>-x86_64-unknown-linux-gnu.tar.gz` | CPU, or AMD GPU through HIP |
+| Windows x86_64 | `altd-sim-<version>-x86_64-pc-windows-msvc.zip` | CPU |
+| macOS, Apple silicon | `altd-sim-<version>-aarch64-apple-darwin.tar.gz` | CPU |
+
+Unpack it and open a terminal in the unpacked folder:
 
 ```sh
 tar -xzf altd-sim-nightly-x86_64-unknown-linux-gnu.tar.gz
 cd altd-sim-nightly-x86_64-unknown-linux-gnu
+./altd-sim --version
+```
+
+On Windows, extract the `.zip`, then open PowerShell in the folder and use `.\altd-sim.exe` wherever this guide says `./altd-sim`. macOS binaries are unsigned, so first remove the download quarantine with `xattr -d com.apple.quarantine altd-sim`. Apple silicon uses the portable trigonometry described in [fidelity](docs/fidelity.md).
+
+### 2. Start the server
+
+```sh
+./altd-sim serve
+```
+
+```text
+altd-sim serve: listening on ws://127.0.0.1:47800/v1
+  allowed origins: https://drivinglab.jectrum.de
+  CPU threads: 16
+  HIP: available (AMD Radeon RX 7900 XTX)
+```
+
+Keep the terminal open while you train; <kbd>Ctrl</kbd>+<kbd>C</kbd> stops the server. It listens only on `127.0.0.1`, so the browser must run on the same computer.
+
+### 3. Connect Drive Lab
+
+1. In Drive Lab, open **New run**. Under **Compute**, enable **Use a local altd-sim**. The port field defaults to 47800.
+2. If the browser asks to allow access to devices on your local network, allow it.
+3. The status shows the connection, the CPU thread count and the GPU, if HIP is available. Choose **Native CPU** or **Native GPU (HIP)** and start the run.
+
+Each browser connection gets its own session. Only one session at a time can use the GPU; another one asking for HIP trains on CPU and says why. If the server stops during training, the run stops and keeps its last saved generation. Start the server again and resume the run.
+
+### Options
+
+| Option | Use it to |
+| --- | --- |
+| `--threads N` | Limit the CPU threads, for example to keep the computer responsive. The default is every logical CPU the process may use. |
+| `--port N` | Listen on another port when 47800 is taken. Set the same port in Drive Lab. |
+| `--allow-origin ORIGIN` | Allow another Drive Lab address, such as a development copy: `--allow-origin http://127.0.0.1:5173`. It replaces the default; repeat the option to allow several. |
+
+```sh
+./altd-sim serve --threads 8 --port 47801
+```
+
+### Training on an AMD GPU
+
+The Linux archive contains `libaltd_gpu.so` next to `altd-sim`. It needs a ROCm 7.x runtime and one of the [covered GPU architectures](gpu/README.md). `./altd-sim gpu-info` checks that the library loads and prints `"layout": "ok"`; the server's `HIP:` line shows the device or why HIP is unavailable.
+
+A HIP session drives its first 12 ticks on both the GPU and the CPU and compares them. If they differ, or the network or track needs something HIP does not support, the session trains on CPU and Drive Lab shows the reason. Native CPU and HIP produce the same results. Browser training can differ from both in the last digits of a few values ([issue #3](https://github.com/Zorro909/driving_sim_rs/issues/3)), so a run moved between the browser and the server can develop differently from then on.
+
+### Troubleshooting
+
+- **`cannot listen on 127.0.0.1:47800: Address already in use`**: another server is already running, or another program uses the port. Stop it or choose another `--port`.
+- **Drive Lab cannot connect**: check that the server is running and that both use the same port. A Drive Lab address other than `https://drivinglab.jectrum.de` must be allowed with `--allow-origin`, including its scheme and port. If you denied local network access, allow it again in the browser's site settings.
+- **`HIP: unavailable`**: the line gives the reason. `./altd-sim gpu-info` reports library problems, and [GPU setup](gpu/README.md) covers ROCm and other GPU architectures.
+
+[Server documentation](docs/server.md) describes the protocol and its security checks for other clients.
+
+### Training without Drive Lab
+
+The CLI can also train on its own. This example trains Rally networks on generated tracks and writes them to `runs/example`:
+
+```sh
 ./altd-sim train-scratch --scene assets/scenes/rally_template.json --track-mode random \
   --random-track-settings assets/random_track_settings.json \
   --population 256 --generations 3 --ticks 600 --out-dir runs/example
 ```
 
-The Linux archive also contains `libaltd_gpu.so` for `--gpu` on consumer AMD GPUs. It needs a ROCm 7.x runtime; run `./altd-sim gpu-info` to check the setup. [GPU setup](gpu/README.md) lists the covered architectures. Windows and macOS archives are CPU-only. macOS binaries are unsigned, so remove the download quarantine with `xattr -d com.apple.quarantine altd-sim` before the first run. Apple silicon uses the portable trigonometry described in [fidelity](docs/fidelity.md).
+Add `--gpu` to train on an AMD GPU. `./altd-sim --help` lists every command, and the [CLI reference](docs/cli.md) describes their inputs and outputs.
 
-## Quick start
+## Build from source
 
 Rust 1.94 or newer is the tested native toolchain. Build from the repository root. `--offline` works when dependencies are already cached; omit it on the first build if needed.
 
@@ -64,7 +135,7 @@ The default build also includes a local WebSocket server for native CPU or HIP s
 target/release/altd-sim --threads 8 serve
 ```
 
-It listens on `127.0.0.1:47800/v1` and accepts the `https://drivinglab.jectrum.de` origin by default. `--allow-origin` replaces that list for other clients or local development. [Server documentation](docs/server.md) covers the protocol, security checks and checkpoint resume. Drive Lab's client integration is a separate change.
+[Getting started](#getting-started) explains its options and how to connect Drive Lab; [server documentation](docs/server.md) covers the protocol, security checks and checkpoint resume.
 
 WebAssembly builds need the wasm32 target and the matching `wasm-bindgen` CLI:
 
