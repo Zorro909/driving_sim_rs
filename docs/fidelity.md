@@ -22,6 +22,8 @@ On x86, native `engine_sin_cos` uses x87 `FSINCOS`. Its large-argument reduction
 
 Nonfinite float32 trig outputs retain the captured NaN signs and payloads on every target. Scalar and engine routines quiet NaNs. Managed `SinCos` preserves the sine input bits and clears the sign while quieting cosine. Both infinities produce the captured x86 indefinite NaN, `0xffc00000`.
 
+The distance-from-wall sensor also returns the x86 indefinite for zero divided by zero and infinity divided by infinity, including float32 conversion boundaries. Quotients from NaN operands retain their payloads.
+
 Seeded Python Xavier tests keep the captured parameter checksum on Linux and Windows. On macOS, `cargo test --lib nn::network::tests::xavier_matches_python -- --exact` requires `python3` and compares every parameter bit, the MT state and the cached Gaussian draw with CPython on that host. This checks host parity without assuming libSystem and glibc round identically.
 
 Seeded initialization uses host float64 transcendental functions. Equal RNG draws can therefore produce different parameter bits across native hosts. Session regressions compare both execution modes with the legacy `TrainingRunner` on each host and require exact checkpoint replay. Stored Session snapshot and checkpoint goldens remain exact comparisons on their capture platform, Linux x86_64 GNU.

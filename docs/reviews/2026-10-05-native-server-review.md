@@ -24,7 +24,7 @@ The worker now ignores queued pause and resume commands after a run fails or fin
 
 The final review confirms the constructor cleanup and fault-injection coverage, with no remaining high-confidence spec findings.
 
-## Validation
+## Initial validation
 
 - Rust debug and release suites: 173 passed and five existing tests ignored in each.
 - Real-socket server suite: ten passed, including CPU parity, binary/JSON checkpoints, invalid requests, Origin/Host checks, HIP claim release and unsupported HIP fallback.
@@ -37,3 +37,15 @@ The final review confirms the constructor cleanup and fault-injection coverage, 
 - Hardware WebGPU training, partial-window CPU fallback and contact/reproduction parity checks passed.
 
 Remaining findings: Standards 0; Spec 0. Native/WASM last-bit differences remain tracked in [issue #3](https://github.com/Zorro909/driving_sim_rs/issues/3).
+
+## Size limits and platform follow-up
+
+The user requested removal of all size constraints for local simulator connections. The server now has no configured WebSocket frame or message ceiling. The companion frontend change is commit `432e7da` on `t3code/native-simulator-client`. Native settings bypass browser network, population, stage, file and checkpoint limits while retaining valid values and shared checkpoint field widths. Unsupported HIP shapes continue on native CPU.
+
+Large checkpoints, run metadata and imported tracks use 32 MiB IndexedDB chunks, with replacement and deletion in one transaction. Database version 4 closes older connections before writing the new format. Review found and fixed the unchunked track path, oversized plan edits after browser fallback, and incompatible readers in old tabs. Startup failures with no training history can restart when the local simulator returns.
+
+Both reviewers rereviewed these fixes with no remaining findings. The frontend build, TypeScript, formatting, 35 unit tests and immutable asset checks passed. The full browser suite passed 52 tests with five expected skips, including all 13 native cases and four storage cases. Storage regressions round-trip checkpoints, metadata and tracks above 127 MiB and check rollback, replacement, deletion and schema migration.
+
+Platform CI exposed x87 precision-dependent large-angle reduction on Windows, a host-specific Xavier checksum on macOS, and ARM default NaN signs. The fixes preserve captured bits rather than relax comparisons. The macOS Xavier oracle compares every parameter and RNG bit with same-host CPython. Session tests retain exact Linux GNU goldens and compare both execution modes with the legacy Runner on every host, including exact checkpoint replay.
+
+The final native release suite passed 176 tests with five existing tests ignored. All 35 vehicle tests passed under AArch64 QEMU after reproducing the macOS distance-sensor failure. Debug/release sensor checks and Darwin Clippy passed. Fresh serial/threaded WASM builds passed, with 2,773 CPU reference values and zero mismatches. The rebuilt frontend passed asset checks and all 13 native integration cases again.
