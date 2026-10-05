@@ -288,11 +288,32 @@ pub(crate) struct WorldDesc {
     pub(crate) path_xy: *const f64,
 }
 
+/// The little-endian words of `values`. The GPU mirrors hold only numbers
+/// and explicit, initialized padding, so every byte is defined.
+pub(crate) fn words<T: Copy>(values: &[T]) -> Vec<u32> {
+    assert_eq!(std::mem::size_of::<T>() % 4, 0);
+    let bytes = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values)) };
+    bytes
+        .chunks_exact(4)
+        .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+        .collect()
+}
+
 /// Checks the Rust mirrors against the library's struct layout.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn check_layout(gpu: &Gpu) {
+    if let Err(e) = layout_matches(gpu) {
+        panic!("{e}");
+    }
+}
+
+/// `check_layout` as an error instead of a panic.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
     use std::mem::{offset_of, size_of};
-    let f: unsafe extern "C" fn(*mut u64, i32) -> i32 = gpu.symbol("altd_gpu_layout");
+    let f: unsafe extern "C" fn(*mut u64, i32) -> i32 = gpu
+        .try_symbol("altd_gpu_layout")
+        .ok_or("libaltd_gpu.so lacks altd_gpu_layout; rebuild it with gpu/build.sh")?;
     let mut got = [0u64; 32];
     let count = unsafe { f(got.as_mut_ptr(), got.len() as i32) } as usize;
     let want = [
@@ -317,17 +338,15 @@ pub(crate) fn check_layout(gpu: &Gpu) {
         offset_of!(VehicleDesc, steering_speed),
         offset_of!(VehicleDesc, gravity),
     ];
-    assert_eq!(
-        count,
-        want.len(),
-        "libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh"
-    );
-    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
-        assert_eq!(
-            g, w as u64,
-            "GPU struct layout entry {i} differs (library {g}, Rust {w})"
-        );
+    if count != want.len() {
+        return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh".into());
     }
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        if g != w as u64 {
+            return Err(format!("GPU struct layout entry {i} differs (library {g}, Rust {w})"));
+        }
+    }
+    Ok(())
 }
 
 // ---- exactness helpers ----

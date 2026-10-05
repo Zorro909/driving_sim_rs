@@ -23,7 +23,7 @@ mod stats;
 pub use agent::TrainingAgent;
 pub(crate) use lineage::Lineage;
 pub use lineage::TrainingRandom;
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(any(feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
 pub(crate) use runner::CAR_STATE_FIELDS;
 pub(crate) use runner::CAR_STATE_STRIDE;
 pub use runner::{export_state_into, Mode, TrainingRunner};

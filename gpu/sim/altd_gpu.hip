@@ -1198,6 +1198,20 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
 
 int altd_gpu_version() { return 8; }
 
+// Writes the current device's name, NUL-terminated and truncated to `len`
+// bytes; returns the HIP error, so it also tells whether a device is usable.
+int altd_gpu_device_name(char* out, int len) {
+    if (len <= 0) return (int)hipErrorInvalidValue;
+    int device = 0;
+    hipError_t e = hipGetDevice(&device);
+    if (e != hipSuccess) return (int)e;
+    hipDeviceProp_t prop;
+    e = hipGetDeviceProperties(&prop, device);
+    if (e != hipSuccess) return (int)e;
+    snprintf(out, (size_t)len, "%s", prop.name);
+    return 0;
+}
+
 // Runs one math primitive over `n` host inputs; `err` gets the per-element error bits.
 int altd_gpu_math(int op, int n, const void* in, void* out, uint32_t* err) {
     void *d_in, *d_out;

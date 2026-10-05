@@ -10,6 +10,7 @@ Run commands from the repository root. `--threads N` sets the Rayon pool; the de
 | `train` | `--scene`, weighted `--network`, `--model`, `--output`; evolution of an existing network |
 | `train-scratch` | `--scene`; Xavier initialization, checkpoints, generated batches and candidate export |
 | `evaluate` | `--network`, `--model`, `--suite`, `--report`; evaluate a frozen candidate without evolution |
+| `serve` | No input files; expose CPU or HIP sessions over a loopback WebSocket |
 | `compare-trace` | Positional scene, trace and report; replay controls from a recorded trace |
 | `compare-one-step` | Positional scene, trace and report; restore each recorded frame before stepping |
 | `compare-closed-loop` | Positional scene, trace, network, model and report; network-driven trajectory comparison |
@@ -34,6 +35,15 @@ cargo run --release --offline --example extract_saved_track -- \
 ```
 
 The importer takes a saved-track export, a track name, a scene template and an output scene. Its bundled input is generated regression data. `tools/benchmark.py` runs the public generated-track bench repeatedly and keeps every report.
+
+## Local server
+
+```sh
+target/release/altd-sim --threads 8 serve --port 47800
+target/release/altd-sim serve --allow-origin http://127.0.0.1:5173
+```
+
+`serve` binds `127.0.0.1` only and defaults to port 47800. Repeat `--allow-origin` to replace the default `https://drivinglab.jectrum.de` allowlist. The shared Rayon pool uses the global `--threads` flag. The server prints its address, allowed origins, thread count and HIP availability. It is included by the default `server` feature. See [the server protocol](server.md) for handshake checks, session operations, binary frames and resume behavior. Drive Lab client integration is a separate change.
 
 ## Scratch training
 

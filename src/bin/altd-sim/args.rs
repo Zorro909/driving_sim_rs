@@ -361,6 +361,18 @@ pub(super) enum Command {
         trace: PathBuf,
         report: PathBuf,
     },
+    /// Serve simulations to Drive Lab over a WebSocket on 127.0.0.1
+    /// (docs/server.md).
+    #[cfg(feature = "server")]
+    Serve {
+        /// TCP port on 127.0.0.1.
+        #[arg(long, default_value_t = altd_sim::server::DEFAULT_PORT)]
+        port: u16,
+        /// A web origin (scheme://host[:port]) allowed to connect; repeat for
+        /// several. Replaces the default https://drivinglab.jectrum.de.
+        #[arg(long = "allow-origin", value_name = "ORIGIN", value_parser = altd_sim::server::protocol::normalize_origin)]
+        allow_origin: Vec<String>,
+    },
 }
 
 pub(super) fn flag(yes: bool, no: bool) -> Option<bool> {

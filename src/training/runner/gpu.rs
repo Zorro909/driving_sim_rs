@@ -35,6 +35,17 @@ pub fn export_state_into(
 }
 
 impl TrainingRunner {
+    /// Every car's and agent's GPU state as words, for exact comparisons of
+    /// the CPU and GPU simulators.
+    pub(crate) fn canonical_state(&self, surfaces: &crate::gpu::simulation::SurfaceTable) -> Result<Vec<u32>, String> {
+        let mut cars = Vec::new();
+        let mut agents = Vec::new();
+        export_state_into(&self.agents, &self.world.vehicle, surfaces, &mut cars, &mut agents)?;
+        let mut out = crate::gpu::simulation::words(&cars);
+        out.extend(crate::gpu::simulation::words(&agents));
+        Ok(out)
+    }
+
     /// A GPU simulator for this runner's world, vehicle and sensors, with
     /// room for `capacity` agents.
     #[cfg(not(target_arch = "wasm32"))]

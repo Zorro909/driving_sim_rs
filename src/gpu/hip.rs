@@ -51,14 +51,30 @@ impl Gpu {
 
     /// Function pointer `name` of type `F` (an `unsafe extern "C" fn`).
     pub(crate) fn symbol<F: Copy>(&self, name: &str) -> F {
+        self.try_symbol(name)
+            .unwrap_or_else(|| panic!("libaltd_gpu.so lacks {name}; rebuild it with gpu/build.sh"))
+    }
+
+    /// `symbol`, or `None` when the library lacks `name`.
+    pub(crate) fn try_symbol<F: Copy>(&self, name: &str) -> Option<F> {
         assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
         let c_name = CString::new(name).unwrap();
         let pointer = unsafe { libc::dlsym(self.handle, c_name.as_ptr()) };
-        assert!(
-            !pointer.is_null(),
-            "libaltd_gpu.so lacks {name}; rebuild it with gpu/build.sh"
-        );
-        unsafe { std::mem::transmute_copy(&pointer) }
+        (!pointer.is_null()).then(|| unsafe { std::mem::transmute_copy(&pointer) })
+    }
+
+    /// The name of the device the library runs on. Fails when the library
+    /// predates `altd_gpu_device_name` or no HIP device is usable.
+    pub fn device_name(&self) -> Result<String, String> {
+        let f: unsafe extern "C" fn(*mut std::ffi::c_char, i32) -> i32 = self
+            .try_symbol("altd_gpu_device_name")
+            .ok_or("libaltd_gpu.so lacks altd_gpu_device_name; rebuild it with gpu/build.sh")?;
+        let mut name = [0 as std::ffi::c_char; 256];
+        let status = unsafe { f(name.as_mut_ptr(), name.len() as i32) };
+        if status != 0 {
+            return Err(format!("no usable HIP device (HIP error {status})"));
+        }
+        Ok(unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned())
     }
 
     pub(crate) fn check(status: i32, what: &str) {

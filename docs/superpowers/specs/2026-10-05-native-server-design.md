@@ -1,7 +1,7 @@
 # Native simulator server for Drive Lab
 
 Date: 2026-10-05
-Status: approved design, awaiting written-spec review
+Status: approved, implementation in progress
 
 ## Goal
 
