@@ -31,7 +31,7 @@ Connect to `ws://127.0.0.1:47800/v1`, substituting the configured port. The hand
 - `Origin` is present and exactly matches an allowed origin. Different schemes or ports do not match; `null` is rejected.
 - `Host` names `127.0.0.1` or `localhost` with the listening port. Other hostnames are rejected to prevent DNS rebinding.
 
-There is no LAN binding, TLS or authentication token. These checks restrict browser callers; a local program can supply its own headers. Requests run in order on a dedicated connection thread, with no per-request timeout. A generation may take minutes.
+There is no LAN binding, TLS or authentication token. These checks restrict browser callers; a local program can supply its own headers. Requests run in order on a dedicated connection thread, with no per-request timeout or configured WebSocket frame/message size ceiling. A generation may take minutes.
 
 ## Protocol 1
 
