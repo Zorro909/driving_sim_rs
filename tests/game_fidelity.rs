@@ -269,6 +269,36 @@ fn packed_math_full_float_range_matches_original_runtime() {
     }
 }
 
+#[test]
+fn nonfinite_trig_matches_original_runtime_bits() {
+    let rows: Vec<[u32; 5]> = serde_json::from_str(include_str!("fixtures/windows_full_math_bits.json")).unwrap();
+    let mut mismatches = Vec::new();
+    for [input, sine, cosine, packed_sine, packed_cosine] in rows {
+        if input & 0x7f80_0000 != 0x7f80_0000 {
+            continue;
+        }
+        let value = f32::from_bits(input);
+        let packed = altd_sim::math::godot_math::managed_sin_cos(value);
+        let engine = altd_sim::math::native_math::engine_sin_cos(value);
+        for (operation, actual, expected) in [
+            ("scalar sin", altd_sim::math::native_math::sin(value), sine),
+            ("scalar cos", altd_sim::math::native_math::cos(value), cosine),
+            ("packed sin", packed.0, packed_sine),
+            ("packed cos", packed.1, packed_cosine),
+            ("engine sin", engine.0, sine),
+            ("engine cos", engine.1, cosine),
+        ] {
+            if actual.to_bits() != expected {
+                mismatches.push(format!(
+                    "{operation}({input:08x}): {:08x}, expected {expected:08x}",
+                    actual.to_bits()
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 // The captures include arguments beyond the domain where the portable
 // non-x86 fallback has been shown to equal x87 `FSINCOS`.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
