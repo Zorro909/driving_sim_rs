@@ -156,14 +156,20 @@ impl Connection {
                 self.session()?.replace_track(&scene)?;
                 ok(Value::Null)
             }
-            "generationSummary" => ok(serde_json::to_value(self.session()?.generation_summary()).unwrap()),
+            "generationSummary" => {
+                let session = self.session()?;
+                session.sync()?;
+                ok(serde_json::to_value(session.generation_summary()).unwrap())
+            }
             "networkJson" => {
                 let index = u64_arg(args, "index")?;
                 let index = usize::try_from(index).map_err(|_| format!("car {index} is outside the population"))?;
                 ok(Value::String(self.session()?.network_json(index)?))
             }
             "carStates" => {
-                let states = self.session()?.car_states();
+                let session = self.session()?;
+                session.sync()?;
+                let states = session.car_states();
                 let bytes = states.iter().flat_map(|v| v.to_le_bytes()).collect();
                 Ok(Reply::Binary(json!(states.len()), bytes))
             }

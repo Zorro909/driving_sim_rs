@@ -1,6 +1,7 @@
 //! The HIP backend of `Session`: driving windows run on libaltd_gpu.so while
-//! reproduction, checkpoints and every reader stay on the CPU runner, which
-//! each window reads back into.
+//! reproduction, checkpoints and every reader stay on the CPU runner. The
+//! cars and agents stay on the device between windows; `HipState::sync`
+//! reads them back when the runner's copy is needed.
 
 use crate::gpu::hip::{Gpu, GpuWorld, PreparedGpuWorld};
 use crate::gpu::simulation::GpuSim;
@@ -51,12 +52,26 @@ impl Drop for Claim {
     }
 }
 
+/// Which copies of the population's cars and agents are current.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Residency {
+    /// Only the runner's: the next window uploads them.
+    Host,
+    /// The runner's and the device's are the same.
+    Both,
+    /// Only the device's: a window ran since the last `sync`.
+    Device,
+}
+
 pub(super) struct HipState {
     // Declared before `world`, so it drops first: it refers to the world.
     sim: GpuSim<'static>,
     world: GpuWorld<'static>,
     capacity: usize,
     verified: bool,
+    residency: Residency,
+    /// The device's active car count while `residency` is `Device`.
+    active: usize,
     _claim: Claim,
 }
 
@@ -83,6 +98,8 @@ impl HipState {
             world,
             capacity,
             verified: false,
+            residency: Residency::Host,
+            active: 0,
             _claim: claim,
         })
     }
@@ -107,13 +124,42 @@ impl HipState {
     }
 
     /// Rebuilds the simulator when the population outgrew it.
-    fn fit(&mut self, runner: &TrainingRunner) -> Result<(), String> {
+    fn fit(&mut self, runner: &mut TrainingRunner) -> Result<(), String> {
         let population = runner.agents.len();
         if population > self.capacity {
+            self.sync(runner)?;
             self.sim = runner.gpu_sim(&self.world, population)?;
             self.capacity = population;
+            self.residency = Residency::Host;
         }
         Ok(())
+    }
+
+    /// Whether the runner's cars and agents are older than the device's.
+    pub(super) fn stale(&self) -> bool {
+        self.residency == Residency::Device
+    }
+
+    /// The active car count, while the runner's cars are stale.
+    pub(super) fn active_count(&self) -> Option<usize> {
+        self.stale().then_some(self.active)
+    }
+
+    /// Reads the device's cars and agents back into the runner if they are
+    /// newer.
+    pub(super) fn sync(&mut self, runner: &mut TrainingRunner) -> Result<(), String> {
+        if self.residency == Residency::Device {
+            runner.download_state_gpu(&mut self.sim, &self.world)?;
+            self.residency = Residency::Both;
+        }
+        Ok(())
+    }
+
+    /// The runner's cars or agents are about to change (after a `sync`):
+    /// the next window uploads them.
+    pub(super) fn host_changed(&mut self) {
+        debug_assert!(!self.stale());
+        self.residency = Residency::Host;
     }
 
     /// Whether the startup comparison still has to run.
@@ -125,6 +171,9 @@ impl HipState {
     /// compares every car and agent exactly; the runner ends as it started.
     pub(super) fn verify(&mut self, runner: &mut TrainingRunner) -> Result<(), String> {
         self.fit(runner)?;
+        self.sync(runner)?;
+        // The device ends with the comparison's state, the runner as it started.
+        self.residency = Residency::Host;
         let surfaces = &self.world.arrays.surfaces;
         let (backup, tick, batch) = (runner.agents.clone(), runner.tick, runner.batch_index);
         runner.advance(VERIFY_TICKS, false);
@@ -149,12 +198,51 @@ impl HipState {
     }
 
     pub(super) fn advance(&mut self, runner: &mut TrainingRunner, ticks: u64, stop: bool) -> Result<u64, String> {
-        self.fit(runner)?;
-        runner.advance_window_gpu(&mut self.sim, &self.world, ticks, stop, None)
+        self.window(runner, ticks, stop, None)
     }
 
     pub(super) fn advance_generation(&mut self, runner: &mut TrainingRunner, limit: u64) -> Result<u64, String> {
+        let (ticks, time_limit) = runner.gpu_generation_window(limit)?;
+        self.window(runner, ticks, true, Some(time_limit))
+    }
+
+    /// `advance_window_gpu` without the readback: the cars and agents stay on
+    /// the device, and only their active count is read.
+    fn window(
+        &mut self,
+        runner: &mut TrainingRunner,
+        ticks: u64,
+        stop: bool,
+        time_limit: Option<f64>,
+    ) -> Result<u64, String> {
         self.fit(runner)?;
-        runner.advance_generation_gpu(&mut self.sim, &self.world, limit)
+        if ticks == 0 {
+            return Ok(0);
+        }
+        runner.check_gpu_window()?;
+        if self.residency == Residency::Host {
+            runner.upload_state_gpu(&mut self.sim, &self.world)?;
+            self.residency = Residency::Both;
+        }
+        let before = self.residency;
+        match runner.window_gpu(&mut self.sim, ticks, stop, time_limit) {
+            Ok(executed) => {
+                self.residency = Residency::Device;
+                match self.sim.try_active_count()? {
+                    Some(active) => self.active = active,
+                    // An older library: read everything back, as before.
+                    None => self.sync(runner)?,
+                }
+                Ok(executed)
+            }
+            Err(e) => {
+                // The device state may be partly advanced; the runner's is
+                // still whole if it was current.
+                if before == Residency::Both {
+                    self.residency = Residency::Host;
+                }
+                Err(e)
+            }
+        }
     }
 }
