@@ -142,10 +142,8 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16) {
             }
         }
     };
-    // Scenes and large populations' checkpoints exceed the default limits.
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(1 << 30))
-        .max_frame_size(Some(1 << 30));
+    // Local native sessions are bounded by available memory, not message size.
+    let config = WebSocketConfig::default().max_message_size(None).max_frame_size(None);
     let mut socket = match tungstenite::accept_hdr_with_config(stream, callback, Some(config)) {
         Ok(s) => s,
         Err(_) => return,
