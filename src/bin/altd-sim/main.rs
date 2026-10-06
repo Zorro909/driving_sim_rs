@@ -302,8 +302,31 @@ fn main() {
                 std::process::exit(1);
             });
             gpu.check_layout();
-            let info = json!({"version": platform::VERSION, "library": gpu.path(), "layout": "ok"});
+            let mut info = json!({
+                "version": platform::VERSION,
+                "library": gpu.path(),
+                "platform": gpu.platform(),
+                "layout": "ok",
+            });
+            // Without a device only the layout is checked. With one, a library
+            // that has no kernels for it fails here.
+            let mut usable = true;
+            match gpu.device_name() {
+                Ok(name) => {
+                    info["device"] = json!(name);
+                    let kernels = gpu.probe_kernels();
+                    usable = kernels.is_ok();
+                    info["kernels"] = json!(kernels.err().unwrap_or_else(|| "ok".to_string()));
+                }
+                Err(reason) => {
+                    info["device"] = Value::Null;
+                    info["reason"] = json!(reason);
+                }
+            }
             println!("{}", serde_json::to_string_pretty(&info).unwrap());
+            if !usable {
+                std::process::exit(1);
+            }
         }
     }
 }

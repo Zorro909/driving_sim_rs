@@ -352,8 +352,33 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
             return Err(format!("GPU struct layout entry {i} differs (library {g}, Rust {w})"));
         }
     }
+    // A compiler can drop exports without failing the build, so check them up front.
+    for name in SIMULATOR_EXPORTS {
+        gpu.required_symbol::<unsafe extern "C" fn()>(name)?;
+    }
     Ok(())
 }
+
+/// The entry points `GpuWorld` and `GpuSim` call.
+#[cfg(not(target_arch = "wasm32"))]
+const SIMULATOR_EXPORTS: [&str; 16] = [
+    "altd_gpu_world_create",
+    "altd_gpu_world_free",
+    "altd_gpu_sim_create",
+    "altd_gpu_sim_set_world",
+    "altd_gpu_sim_free",
+    "altd_gpu_sim_upload",
+    "altd_gpu_sim_upload_agents",
+    "altd_gpu_sim_active_count",
+    "altd_gpu_sim_download",
+    "altd_gpu_sim_sensors",
+    "altd_gpu_sim_networks",
+    "altd_gpu_sim_novelty",
+    "altd_gpu_sim_infer",
+    "altd_gpu_sim_step",
+    "altd_gpu_sim_stats",
+    "altd_gpu_sim_window",
+];
 
 // ---- exactness helpers ----
 

@@ -38,7 +38,7 @@ pub struct Server {
 /// HIP availability as `hello` reports it.
 fn hip_status() -> Value {
     match crate::training::session::hip_device() {
-        Ok((_, device)) => json!({"available": true, "device": device}),
+        Ok((gpu, device)) => json!({"available": true, "device": device, "platform": gpu.platform()}),
         Err(reason) => json!({"available": false, "reason": reason}),
     }
 }

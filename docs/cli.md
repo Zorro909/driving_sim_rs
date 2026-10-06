@@ -17,7 +17,7 @@ Run commands from the repository root or an unpacked release archive; both conta
 | `compare-network` | Positional network, trace and report; compare inference with recorded controls |
 | `compare-sensors` | Positional scene, trace, model, trajectory and report; compare sensor observations |
 | `compare-score` | Positional scene, trace and report; compare lap/score statistics |
-| `gpu-info` | Optional `--library`; load the HIP library used by `--gpu` and check its struct layouts |
+| `gpu-info` | Optional `--library`; load the GPU library used by `--gpu`, check its struct layouts and exports and, when a GPU is present, run one kernel on it |
 
 Scene and capture paths have no campaign defaults. `bench` and `train-scratch` default their sensor model to `assets/models/rally.json`. Scratch training defaults its sensor/control names to `assets/networks/rally.json`; these templates have no trained weights. The defaults are compiled into the binary, and `run.json` records them as `builtin:<path>`. Formula runs should explicitly use the Formula network/model assets and scene template.
 

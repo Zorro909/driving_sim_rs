@@ -2,7 +2,7 @@
 
 The HIP library runs statistics, sensing, network inference and vehicle physics for independent cars. It also supports GPU turnover through the runner API. Population mean and novelty run on the GPU with reductions in the original order; that turnover path keeps offspring weights uploaded for the next generation. Rust owns resets and checkpoints.
 
-The same sources build for NVIDIA GPUs with `nvcc` (`gpu/build-cuda.*`, `gpu/sim/compat.h`); this page applies to both. NVIDIA warps are 32 lanes and use the `*_sync` warp operations with a full mask, so every lane of a wave must reach `reserve`, `append` and the active-count ballot, as on AMD. NVIDIA arithmetic returns its canonical NaN where the CPU returns a NaN operand, so those results are built explicitly (`altd_nan_operand`, `altd_invalid`).
+The same sources build for NVIDIA GPUs with `nvcc` (`gpu/build-cuda.*`, `gpu/sim/compat.h`); this page applies to both. NVIDIA warps are 32 lanes and use the `*_sync` warp operations with a full mask, so every lane of a wave must reach `reserve`, `append` and the active-count ballot, as on AMD. NVIDIA arithmetic returns its canonical NaN where the CPU returns a NaN operand, so those results are built explicitly on both vendors (`altd_nan_operand`, `altd_invalid`).
 
 ## HIP sessions
 

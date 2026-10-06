@@ -117,7 +117,28 @@ jobs:
       - name: Check cleanup after HIP allocation and upload failures
         run: python3 gpu/test_constructor_cleanup.py
       - name: Check the library against the Rust layouts
-        # No GPU is needed: gpu-info checks the device struct layouts on the host.
+        # No GPU is needed: gpu-info checks the device struct layouts and the exports on the host.
+        run: cargo run --locked --bin altd-sim -- gpu-info
+
+  cuda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: nvidia/cuda:13.4.2-devel-ubuntu24.04
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - name: Install the tools the CUDA image lacks
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cuda-x86-64
+      # The runner has no GPU, so CUDA_ARCH must list targets instead of the default native.
+      # Turing, Ampere, Ada and Blackwell consumer GPUs.
+      - run: CUDA_ARCH=sm_75,sm_86,sm_89,sm_120 gpu/build-cuda.sh
+      - name: Check the library against the Rust layouts
+        # No GPU is needed: gpu-info checks the device struct layouts and the exports on the host.
         run: cargo run --locked --bin altd-sim -- gpu-info
 
   wasm:
