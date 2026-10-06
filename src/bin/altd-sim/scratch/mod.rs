@@ -8,6 +8,7 @@ pub(super) use runner::train_scratch;
 pub(super) use stop::StopRules;
 
 use super::args::{Schedule, ScratchReward, TrackOptions};
+use altd_sim::math::profile::MathProfile;
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -41,6 +42,8 @@ pub(super) struct ScratchConfig {
     pub(super) idle_eliminate: Option<bool>,
     pub(super) resume: bool,
     pub(super) gpu: bool,
+    /// `--math-profile`; a resumed run keeps its own.
+    pub(super) math_profile: Option<MathProfile>,
 }
 
 /// Mutation rate used to create generation `generation`. The final checkpoint's

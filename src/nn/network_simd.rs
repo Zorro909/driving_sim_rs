@@ -4,16 +4,23 @@
 //! input order, starting from +0.0, with separate multiplies and adds (no
 //! fused multiply-add), as the scalar loop does. `tanh4` evaluates every
 //! `game_tanh`/`game_expm1` branch lane-wise with the scalar operations and
-//! keeps the result of the branch the scalar code takes.
+//! keeps the result of the branch the scalar code takes. It is musl's tanh,
+//! so the Windows math profiles apply their scalar tanh to the sums instead.
 // SIMD coefficients must retain the scalar runtime approximation bits.
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
-use crate::nn::network::game_tanh;
+use crate::math::profile::MathProfile;
 use std::arch::x86_64::*;
 
 /// Runs all layers. `values` holds the inputs on entry and the outputs on return.
 #[target_feature(enable = "avx2")]
-pub(crate) unsafe fn forward(shape: &[usize], params: &[f64], values: &mut Vec<f64>, next: &mut Vec<f64>) {
+pub(crate) unsafe fn forward(
+    shape: &[usize],
+    params: &[f64],
+    values: &mut Vec<f64>,
+    next: &mut Vec<f64>,
+    math: MathProfile,
+) {
     let mut position = 0;
     for w in shape.windows(2) {
         let (n_in, n_out) = (w[0], w[1]);
@@ -25,10 +32,10 @@ pub(crate) unsafe fn forward(shape: &[usize], params: &[f64], values: &mut Vec<f
         while j + 4 <= n_out {
             // Up to four registers per pass over the inputs.
             j += match (n_out - j) / 4 {
-                1 => block::<1>(values, matrix, bias, n_out, j, next),
-                2 => block::<2>(values, matrix, bias, n_out, j, next),
-                3 => block::<3>(values, matrix, bias, n_out, j, next),
-                _ => block::<4>(values, matrix, bias, n_out, j, next),
+                1 => block::<1>(values, matrix, bias, n_out, j, next, math),
+                2 => block::<2>(values, matrix, bias, n_out, j, next, math),
+                3 => block::<3>(values, matrix, bias, n_out, j, next, math),
+                _ => block::<4>(values, matrix, bias, n_out, j, next, math),
             };
         }
         for j in j..n_out {
@@ -36,7 +43,7 @@ pub(crate) unsafe fn forward(shape: &[usize], params: &[f64], values: &mut Vec<f
             for (i, &value) in values.iter().enumerate() {
                 sum += value * matrix[i * n_out + j];
             }
-            next[j] = game_tanh(sum + bias[j]);
+            next[j] = math.tanh(sum + bias[j]);
         }
         std::mem::swap(values, next);
         position += (n_in + 1) * n_out;
@@ -53,6 +60,7 @@ unsafe fn block<const N: usize>(
     n_out: usize,
     j: usize,
     next: &mut [f64],
+    math: MathProfile,
 ) -> usize {
     assert!(j + 4 * N <= n_out && matrix.len() == values.len() * n_out && bias.len() == n_out && next.len() == n_out);
     let mut acc = [_mm256_setzero_pd(); N];
@@ -65,7 +73,15 @@ unsafe fn block<const N: usize>(
     }
     for (b, a) in acc.iter().enumerate() {
         let sum = _mm256_add_pd(*a, _mm256_loadu_pd(bias.as_ptr().add(j + 4 * b)));
-        _mm256_storeu_pd(next.as_mut_ptr().add(j + 4 * b), tanh4(sum));
+        let out = next.as_mut_ptr().add(j + 4 * b);
+        if math == MathProfile::Proton {
+            _mm256_storeu_pd(out, tanh4(sum));
+        } else {
+            _mm256_storeu_pd(out, sum);
+            for lane in &mut next[j + 4 * b..j + 4 * b + 4] {
+                *lane = math.tanh(*lane);
+            }
+        }
     }
     4 * N
 }
@@ -207,6 +223,7 @@ unsafe fn expm1_tanh(x: __m256d) -> __m256d {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::network::game_tanh;
 
     /// xorshift64*: deterministic cases without an RNG dependency.
     struct Rng(u64);
@@ -259,7 +276,8 @@ mod tests {
                 let count = crate::nn::network::parameter_count(shape);
                 let network =
                     Network::from_vector(shape, (0..count).map(|_| (rng.unit() * 2.0 - 1.0) * scale).collect());
-                for _ in 0..20_000 {
+                for step in 0..20_000 {
+                    let math = MathProfile::ALL[step % 3];
                     let inputs: Vec<f64> = (0..shape[0])
                         .map(|_| {
                             let u = rng.unit();
@@ -274,12 +292,12 @@ mod tests {
                             }
                         })
                         .collect();
-                    let simd = network.forward_into(&inputs, &mut a);
-                    let scalar = network.forward_into_scalar(&inputs, &mut b);
+                    let simd = network.forward_into(&inputs, &mut a, math);
+                    let scalar = network.forward_into_scalar(&inputs, &mut b, math);
                     assert_eq!(
                         simd.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         scalar.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                        "{shape:?} {inputs:?}"
+                        "{math} {shape:?} {inputs:?}"
                     );
                 }
             }

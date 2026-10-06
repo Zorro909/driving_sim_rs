@@ -1,5 +1,6 @@
 //! Runtime loader for the HIP simulator parts in gpu/ (libaltd_gpu.so).
 //! Loaded at runtime so the crate builds and runs without ROCm.
+use crate::math::profile::MathProfile;
 use std::ffi::{c_void, CStr};
 use std::path::{Path, PathBuf};
 
@@ -204,6 +205,18 @@ impl Gpu {
     /// Runs one math primitive. `input` and `output` hold `n` elements of the
     /// op's input and output layout (see gpu/sim/altd_gpu.hip); returns the error bits.
     pub fn math<I: Copy, O: Copy>(&self, op: MathOp, input: &[I], output: &mut [O]) -> Vec<u32> {
+        self.profile_math(MathProfile::Proton, op, input, output)
+    }
+
+    /// [`Gpu::math`] in `profile`'s variant of the sin, cos, atan2, exp, pow
+    /// and tanh ops.
+    pub fn profile_math<I: Copy, O: Copy>(
+        &self,
+        profile: MathProfile,
+        op: MathOp,
+        input: &[I],
+        output: &mut [O],
+    ) -> Vec<u32> {
         assert_eq!(input.len(), output.len());
         let f: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 =
             self.symbol("altd_gpu_math");
@@ -212,7 +225,7 @@ impl Gpu {
         Self::check(
             unsafe {
                 f(
-                    op as i32,
+                    op as i32 | (profile.index() as i32) << 8,
                     n,
                     input.as_ptr().cast(),
                     output.as_mut_ptr().cast(),

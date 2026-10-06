@@ -58,12 +58,15 @@ Each browser connection gets its own session. Only one session at a time can use
 | Option | Use it to |
 | --- | --- |
 | `--threads N` | Limit the CPU threads, for example to keep the computer responsive. The default is every logical CPU the process may use. |
+| `--math-profile PROFILE` | Reproduce `proton`, `win10-fma3` or `win11-fma3` arithmetic. The default follows the server's operating system; clients can select a profile for each session. |
 | `--port N` | Listen on another port when 47800 is taken. Set the same port in Drive Lab. |
 | `--allow-origin ORIGIN` | Allow another Drive Lab address, such as a development copy: `--allow-origin http://127.0.0.1:5173`. It replaces the default; repeat the option to allow several. |
 
 ```sh
 ./altd-sim serve --threads 8 --port 47801
 ```
+
+All builds include all three math profiles. Windows 11 24H2 and newer default to `win11-fma3`; earlier Windows releases use `win10-fma3`; Linux and macOS use `proton`. To train on Linux for a game running on current Windows, for example, pass `--math-profile win11-fma3`. Checkpoints retain their profile. [Math profiles](math/README.md) describes the kernels and captured reference data.
 
 ### Training on an AMD GPU
 

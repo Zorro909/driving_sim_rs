@@ -35,7 +35,7 @@ pub(crate) fn transform_angle(world: &World, state: &Value, previous: Option<&Va
         return recorded;
     }
     let angle = f(&previous["rotation"]) as f32 + f(&state["angular_velocity"]) as f32 * DT as f32;
-    let extracted = crate::math::native_math::atan2(
+    let extracted = world.math.atan2(
         crate::math::native_math::engine_sin(angle),
         crate::math::native_math::engine_cos(angle),
     );

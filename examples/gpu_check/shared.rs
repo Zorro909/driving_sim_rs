@@ -39,7 +39,7 @@ impl Tally {
     }
     pub(super) fn report(&self, name: &str) -> bool {
         println!(
-            "  {name:<16} {:>9} checked  {:>7} flagged  {:>6} mismatches  {}",
+            "  {name:<20} {:>9} checked  {:>7} flagged  {:>6} mismatches  {}",
             self.checked,
             self.flagged,
             self.mismatches,

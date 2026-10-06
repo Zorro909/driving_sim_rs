@@ -1,5 +1,6 @@
 //! Checkpoint RNG streams and reproducible parent lineage.
 
+use crate::math::profile::MathProfile;
 use crate::nn::network::Network;
 use crate::training::evolution::{reproduce, AgentResult, Breeding, Choice, EvolutionSettings, Generation, CROSSOVERS};
 use crate::training::pyrandom::PyRandom;
@@ -38,10 +39,12 @@ impl TrainingRandom {
             Self::Python(PyRandom::from_json(v))
         }
     }
-    pub fn reproduce(&mut self, agents: &[AgentResult], settings: &EvolutionSettings) -> Generation {
+    /// The game's streams use `math` (.NET Math.Log); the Python backend
+    /// reproduces the historical trainer, which ran on musl's.
+    pub fn reproduce(&mut self, agents: &[AgentResult], settings: &EvolutionSettings, math: MathProfile) -> Generation {
         match self {
             Self::Python(r) => reproduce(agents, settings, r),
-            Self::Game(r) => crate::training::evolution::reproduce_game(agents, settings, r),
+            Self::Game(r) => crate::training::evolution::reproduce_game(agents, settings, r, math),
         }
     }
     pub(super) fn reproduce_scored(
@@ -50,12 +53,13 @@ impl TrainingRandom {
         scores: Vec<f64>,
         settings: &EvolutionSettings,
         scratch: &mut Vec<f64>,
+        math: MathProfile,
     ) -> Generation {
         match self {
             Self::Python(r) => {
                 crate::training::evolution::reproduce_scored_with_scratch(agents, scores, settings, r, scratch)
             }
-            Self::Game(r) => crate::training::evolution::reproduce_game_scored(agents, scores, settings, r),
+            Self::Game(r) => crate::training::evolution::reproduce_game_scored(agents, scores, settings, r, math),
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -64,16 +68,17 @@ impl TrainingRandom {
         agents: &[AgentResult],
         settings: &EvolutionSettings,
         scratch: &mut Vec<f64>,
+        math: MathProfile,
     ) -> Generation {
         match self {
             Self::Python(r) => crate::training::evolution::reproduce_with_scratch(agents, settings, r, scratch),
-            Self::Game(r) => crate::training::evolution::reproduce_game(agents, settings, r),
+            Self::Game(r) => crate::training::evolution::reproduce_game(agents, settings, r, math),
         }
     }
-    pub fn xavier(&mut self, shape: &[usize]) -> Network {
+    pub fn xavier(&mut self, shape: &[usize], math: MathProfile) -> Network {
         match self {
             Self::Python(r) => Network::xavier(shape, r),
-            Self::Game(r) => Network::xavier_game(shape, r),
+            Self::Game(r) => Network::xavier_game(shape, r, math),
         }
     }
     pub(crate) fn choose(&mut self, scores: &[f64], settings: &EvolutionSettings) -> Choice {
@@ -87,13 +92,14 @@ impl TrainingRandom {
         selected: &[&Network],
         preserved: Vec<Network>,
         settings: &EvolutionSettings,
+        math: MathProfile,
         profile: &mut crate::training::training_profile::Profile,
     ) -> Vec<Network> {
         match self {
             Self::Python(r) => {
                 crate::training::evolution::breed(selected, preserved, settings, r, &mut Vec::new(), profile)
             }
-            Self::Game(r) => crate::training::evolution::breed_game(selected, preserved, settings, r, profile),
+            Self::Game(r) => crate::training::evolution::breed_game(selected, preserved, settings, r, math, profile),
         }
     }
 }
@@ -113,10 +119,18 @@ pub(crate) struct Lineage {
     pub(crate) breeding: Breeding,
     /// The generator state after selection, before crossover.
     pub(crate) rng: TrainingRandom,
+    /// The math the game's streams draw with.
+    pub(crate) math: MathProfile,
 }
 
 impl Lineage {
-    fn new(agents: &[AgentResult], choice: &Choice, breeding: Breeding, rng: TrainingRandom) -> Lineage {
+    fn new(
+        agents: &[AgentResult],
+        choice: &Choice,
+        breeding: Breeding,
+        rng: TrainingRandom,
+        math: MathProfile,
+    ) -> Lineage {
         let mut slots = std::collections::HashMap::new();
         let mut parents = Vec::new();
         let mut slot = |car: usize| -> u32 {
@@ -134,6 +148,7 @@ impl Lineage {
             preserved,
             breeding,
             rng,
+            math,
         }
     }
 
@@ -192,7 +207,7 @@ impl Lineage {
             .map(|&i| self.parents[i as usize].clone())
             .collect();
         let mut profile = crate::training::training_profile::Profile::new("rebuild");
-        let networks = rng.breed(&selected, preserved, &self.breeding.settings(), &mut profile);
+        let networks = rng.breed(&selected, preserved, &self.breeding.settings(), self.math, &mut profile);
         (networks, rng)
     }
 }
@@ -204,17 +219,18 @@ pub(super) fn reproduce_traced(
     agents: &[AgentResult],
     scores: Vec<f64>,
     settings: &EvolutionSettings,
+    math: MathProfile,
 ) -> (Generation, Lineage) {
     crate::training::evolution::validate_scores(agents, &scores);
     assert!(!agents.is_empty(), "a training generation needs at least one network");
     let mut profile = crate::training::training_profile::Profile::new("reproduce_traced");
     let choice = rng.choose(&scores, settings);
-    let lineage = Lineage::new(agents, &choice, Breeding::of(settings), rng.clone());
+    let lineage = Lineage::new(agents, &choice, Breeding::of(settings), rng.clone(), math);
     let selected: Vec<&Network> = choice.selected.iter().map(|&i| agents[i].network).collect();
     let preserved: Vec<Network> = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
     let preserved_count = preserved.len();
     profile.mark("selection");
-    let networks = rng.breed(&selected, preserved, settings, &mut profile);
+    let networks = rng.breed(&selected, preserved, settings, math, &mut profile);
     (
         Generation {
             networks,

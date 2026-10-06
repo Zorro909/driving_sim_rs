@@ -11,6 +11,13 @@ TileMapOracle, GeneratedTrackOracle, BroadPhaseOracle and PopulationOracle.
 The capture harnesses and their raw logs are not distributed. Fixture provenance
 describes the setup, without linking to unavailable files.
 
+The separate [`math/fixtures`](../../math/README.md) binary corpus captures
+Wine's builtin math and two genuine Microsoft UCRT FMA3 variants. It tests
+`proton`, `win10-fma3` and `win11-fma3` explicitly. The historical `windows_*`
+filename prefix identifies a Windows game build; it does not establish which
+C runtime DLL supplied the math during a capture. Use the recorded runtime
+provenance when choosing the fixture's profile.
+
 The `recorded_rally_*` files retain short vehicle-state captures for diagnostics,
 free-motion transitions and velocity-sensor tests. Their original collider
 exports have been removed. Recorded positions, contact points and scalar sensor

@@ -44,14 +44,20 @@ fn saved_track_import_matches_generated_scene_for_four_generations() {
     let template = generated::template("rally");
     let network = generated::network("rally");
     let model = generated::model("rally");
-    let mut direct = track.to_scene(&template);
+    let mut direct = track.to_scene(&template, altd_sim::math::profile::MathProfile::Proton);
     // A saved track places collision geometry at the game's TileMap origin.
     // The expected scene uses the same documented placement explicitly.
     place_tile_map(&mut direct, [3, 0]);
     direct["track"]["native_broadphase"] = json!(false);
     let saved_fixture: Value = serde_json::from_str(include_str!("fixtures/generated_saved_track.json")).unwrap();
     assert_eq!(saved_fixture, saved(&track), "fixed generated saved-track fixture");
-    let converted = saved_track_scene(&saved_fixture, &track.name, &template).unwrap();
+    let converted = saved_track_scene(
+        &saved_fixture,
+        &track.name,
+        &template,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     assert_eq!(direct, converted, "saved import reconstructs every scene field");
     let pose = generated::spawn(&direct);
     let spawn = Spawn {
@@ -95,12 +101,19 @@ fn saved_track_import_rejects_open_paths_and_unknown_tiles() {
         track.tiles[3].position[0], track.tiles[3].position[1]
     );
     file["Tiles"].as_object_mut().unwrap().shift_remove(&key);
-    assert!(saved_track_scene(&file, "open", &template)
-        .unwrap_err()
-        .contains("leaves the track"));
+    assert!(
+        saved_track_scene(&file, "open", &template, altd_sim::math::profile::MathProfile::Proton)
+            .unwrap_err()
+            .contains("leaves the track")
+    );
     let mut file = saved(&track);
     file["Tiles"][&key]["Block"]["TileSetId"]["AtlasId"] = json!(999);
-    assert!(saved_track_scene(&file, "unknown", &template)
-        .unwrap_err()
-        .contains("unknown block"));
+    assert!(saved_track_scene(
+        &file,
+        "unknown",
+        &template,
+        altd_sim::math::profile::MathProfile::Proton
+    )
+    .unwrap_err()
+    .contains("unknown block"));
 }

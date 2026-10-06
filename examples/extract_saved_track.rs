@@ -14,6 +14,12 @@ fn main() {
     }
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
     let template: Value = serde_json::from_str(&std::fs::read_to_string(&args[3]).unwrap()).unwrap();
-    let scene = saved_track_scene(&saved, &args[2], &template).unwrap();
+    let scene = saved_track_scene(
+        &saved,
+        &args[2],
+        &template,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     std::fs::write(&args[4], serde_json::to_string_pretty(&scene).unwrap() + "\n").unwrap();
 }

@@ -12,6 +12,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - gpu/**
+      - math/kernels/**
       - Cargo.toml
       - Cargo.lock
       - src/gpu/**
@@ -138,6 +139,8 @@ jobs:
           mkdir -p "dist/$PACKAGE"
           cp "target/${{ matrix.target }}/release/altd-sim${{ matrix.exe }}" README.md LICENSE GODOT_LICENSE "dist/$PACKAGE/"
           cp -R assets docs "dist/$PACKAGE/"
+          mkdir -p "dist/$PACKAGE/math"
+          cp math/README.md "dist/$PACKAGE/math/"
       - if: matrix.gpu
         uses: actions/download-artifact@v4
         with:

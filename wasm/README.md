@@ -42,7 +42,7 @@ console.log(sim.carStates(), sim.generationSummary());
 sim.nextGeneration();
 ```
 
-Options accept an object or JSON string. Keys include `population`, `seed`, `batchCount`, `statsPhase`, `mode`, `spawn`, `settings`, `eliminateOnWall`, `eliminateWhenIdle` and `gpuVerifyEvery`. Omitted spawn uses the scene's reset pose. `start()` uses exported weights; `startWithShape()` creates Xavier networks. `advance()` runs a bounded tick window, `advanceGeneration()` completes the remaining generation and `nextGeneration()` breeds/reset cars. `sensors(i)`, `controls(i)`, `metrics(i)`, `carStates()` and `generationSummary()` export observations. Binary `checkpointBytes()` and `restoreCheckpointBytes()` preserve generation-boundary bits and RNG state.
+Options accept an object or JSON string. Keys include `population`, `seed`, `batchCount`, `statsPhase`, `mode`, `spawn`, `settings`, `mathProfile`, `eliminateOnWall`, `eliminateWhenIdle` and `gpuVerifyEvery`. Omitted spawn uses the scene's reset pose. `start()` uses exported weights; `startWithShape()` creates Xavier networks. `advance()` runs a bounded tick window, `advanceGeneration()` completes the remaining generation and `nextGeneration()` breeds/reset cars. `sensors(i)`, `controls(i)`, `metrics(i)`, `carStates()` and `generationSummary()` export observations. Binary `checkpointBytes()` and `restoreCheckpointBytes()` preserve generation-boundary bits and RNG state.
 
 Run simulation in a coordinator worker to keep the page responsive. Shared-memory packages additionally require HTTPS or localhost with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. CSP must allow `worker-src 'self' blob:` and `script-src 'self' 'wasm-unsafe-eval'`. Keep every generated `snippets/` helper alongside the module.
 
@@ -56,11 +56,27 @@ console.log(lib.cpuThreadCount());
 
 The pool lasts for the coordinator's lifetime. Terminate the coordinator and children to stop it. Discard failed pool initialization before retrying a serial package in a fresh worker.
 
+## Math profiles
+
+`mathProfiles()` returns `["proton", "win10-fma3", "win11-fma3"]`. Every serial/threaded package contains all three profiles, so a browser on Linux can run Windows arithmetic. Set `options.mathProfile` to choose explicitly:
+
+```js
+const sim = new Simulation(scene, network, model, {
+  ...scenario.options, mathProfile: "win11-fma3",
+});
+```
+
+With no explicit profile, the web package's `await init()` waits for detection and caches the default for later worlds/sessions in that worker or page. It uses `proton` outside Windows. On Windows, Chromium's high-entropy `platformVersion` hint distinguishes Windows 11 24H2 and newer (`win11-fma3`) from earlier Windows (`win10-fma3`). Windows browsers without that hint, such as Firefox/Safari, fall back to `win11-fma3`. `await detectMathProfile()` waits for the cached detection and returns the profile name; after `initSync()` or initialization through another binding target, await it before relying on the default because synchronous initialization cannot wait for a browser hint. An explicit profile overrides detection. Existing simulations retain the profile they were created with.
+
+`trackScene(trackJson, name, templateJson, mathProfile?)` and `randomTrackScene(templateJson, settingsJson, seed, generation, mathProfile?)` accept the same optional profile name. Use the session's profile when preparing track geometry for it. Checkpoint restore requires the destination session to have the saved profile; earlier checkpoints without profile metadata use `proton`. [Kernel and fixture notes](../math/README.md) describe the source shared by the Windows backends.
+
 ## WebGPU
 
 `GpuRaycaster` uploads the BSP tree, casts rays and nearest-wall queries, and leaves inference/physics on the CPU. `advanceGenerationWithGpuRays()` uses that raycaster for a complete generation. One readback per tick can make it slower for small populations.
 
 `GpuSimulation` runs sensors, inference, statistics and physics in WGSL, retaining geometry and network buffers between windows. It uses software binary64 and ordered network accumulation. Rust still owns evolution and checkpoints.
+
+All profiles are available in the same package. Pipeline creation specializes the generated shader for the session's profile and removes unreachable functions and tables for each entry point. Explicit fused multiply-add in Windows kernels uses software binary64 `f64_fma`; ordinary products and sums retain separate rounding. Profiled sine/cosine sensor offsets are prepared by the WASM CPU before upload.
 
 ```js
 import { requestGpuDevice, GpuSimulation } from "./wasm/pkg/altd_sim.js";
@@ -81,7 +97,11 @@ Install Playwright with Chromium, locally or globally. The runner serves this re
 
 ```sh
 NO_GPU=1 node wasm/test/run.mjs
+NO_GPU=1 PAGE=math-profile-init.html node wasm/test/run.mjs
 GPU=hardware node wasm/test/run.mjs
+PAGE=f64.html node wasm/test/run.mjs
+PAGE=math-profiles.html GPU=software node wasm/test/run.mjs
+PAGE=math-profiles.html GPU=hardware node wasm/test/run.mjs
 for track in rally_asphalt rally_mixed rally_ice; do
   NO_GPU=1 SCENARIO="wasm/test/scenarios/$track.json" \
     REFERENCE="wasm/test/scenarios/$track-reference.json" node wasm/test/run.mjs
@@ -89,6 +109,8 @@ done
 ```
 
 `GPU=software` is the default and selects SwiftShader. `GPU=hardware` requires a physical Vulkan adapter and reports its identity. `NO_GPU=1` explicitly skips device checks. `CHROMIUM` selects an executable; `VERIFY_RAYS`, `VERIFY_POINTS`, `VERIFY_SEED` and `TICK_CHECK` expand ray/tick coverage. `PAGE=full-sim.html VERIFY_SIM=1 GPU=hardware` checks full GPU simulation. Shader validation can run without a GPU using Naga 30.0.1 and `node wasm/test/validate-shader.mjs`; `NAGA` selects its executable.
+
+The shader validator checks the complete modules and every simulation entry point under all three profiles. `PAGE=math-profile-init.html` tests default detection with delayed, rejected and unavailable browser hints; `PACKAGE_BASE` selects a threaded package for the same cases. `PAGE=f64.html` tests the software binary64 operations, including fused multiply-add, against exact references. `PAGE=math-profiles.html` compares device `atan2f`, `exp`, `pow` and `tanh` directly with the captured fixture bits for every profile. Full simulation on SwiftShader can stall during compilation of the network forward pipeline; the same limitation was reproduced on the PR#11 baseline with Chromium 151 and 153. Use a physical adapter for full simulation parity. This does not affect the CPU-only, raycaster or binary64 primitive checks.
 
 ```sh
 cargo run --release --offline --example wasm_reference -- wasm/test/scenario.json target/native-reference.json

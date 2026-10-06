@@ -477,7 +477,10 @@ fn raw_replay(fixtures: &[&str]) {
 #[test]
 fn network_uses_game_order_and_windows_activation() {
     let n = altd_sim::nn::network::Network::from_vector(&[3, 1], vec![1e16, 1.0, -1e16, 0.0]);
-    assert_eq!(n.forward(&[1.0, 1.0, 1.0]), vec![0.0]);
+    assert_eq!(
+        n.forward(&[1.0, 1.0, 1.0], altd_sim::math::profile::MathProfile::Proton),
+        vec![0.0]
+    );
     let pairs: Vec<[f64; 2]> = serde_json::from_str(include_str!("fixtures/windows_tanh.json")).unwrap();
     for [x, y] in pairs {
         assert_eq!(altd_sim::nn::network::game_tanh(x).to_bits(), y.to_bits(), "tanh({x})");
@@ -487,7 +490,7 @@ fn network_uses_game_order_and_windows_activation() {
 #[test]
 fn native_curve_baking_and_samples_match_shipped_engine() {
     let data: Value = serde_json::from_str(include_str!("fixtures/native_generated_curve_mixed.json")).unwrap();
-    let curve = altd_sim::track::curve::Curve::from_json(&data["curve"]);
+    let curve = altd_sim::track::curve::Curve::from_json(&data["curve"], altd_sim::math::profile::MathProfile::Proton);
     let baked = data["curve"]["baked"].as_array().unwrap();
     assert_eq!(curve.points.len(), baked.len());
     assert_eq!(curve.length() as f64, data["curve"]["length"].as_f64().unwrap());

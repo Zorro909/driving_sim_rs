@@ -1,6 +1,7 @@
 //! Rewards, selection, crossover, and
 //! mutation with CPython-compatible random draws.
 
+use crate::math::profile::MathProfile;
 use crate::nn::network::Network;
 use crate::training::pyrandom::PyRandom;
 use rayon::prelude::*;
@@ -258,10 +259,11 @@ pub fn reward_values(agents: &[AgentResult], specs: &[RewardSpec]) -> Vec<f64> {
     result
 }
 
-pub fn mutation_factor(network: &Network, algorithm: &str) -> f64 {
+/// The adaptive mutation scale; its log is the C runtime's (.NET Math.Log).
+pub fn mutation_factor(network: &Network, algorithm: &str, math: MathProfile) -> f64 {
     let total = network.params.len() as f64;
     let layers = network.shape.len() as f64;
-    let log = crate::math::double_math::log(total + 1.0);
+    let log = math.log(total + 1.0);
     let factor = match algorithm {
         "xavier" => 0.516777 / (0.262982 + 0.050982 * log - 0.000139 * layers - 0.000278 * layers * layers),
         "gaussian" => 1.646116 / (0.088941 + 0.350773 * log - 0.03423 * layers + 0.001063 * layers * layers),
@@ -296,7 +298,7 @@ pub(crate) fn mutate_xavier(network: &Network, rate: f64, rng: &mut PyRandom, no
 fn mutate_xavier_with(mut network: Network, rate: f64, normalize: bool, normals: &[f64]) -> Network {
     let scale = rate
         * if normalize {
-            mutation_factor(&network, "xavier")
+            mutation_factor(&network, "xavier", MathProfile::Proton)
         } else {
             1.0
         };
@@ -327,7 +329,7 @@ fn mutate_xavier_with(mut network: Network, rate: f64, normalize: bool, normals:
 fn mutated_copy(source: &Network, rate: f64, normalize: bool, normals: &[f64], decay: f64) -> Network {
     let scale = rate
         * if normalize {
-            mutation_factor(source, "xavier")
+            mutation_factor(source, "xavier", MathProfile::Proton)
         } else {
             1.0
         };
@@ -681,8 +683,9 @@ pub fn reproduce_game(
     agents: &[AgentResult],
     settings: &EvolutionSettings,
     rng: &mut crate::training::game_random::GameRandom,
+    math: MathProfile,
 ) -> Generation {
-    reproduce_game_scored(agents, reward_values(agents, &settings.rewards), settings, rng)
+    reproduce_game_scored(agents, reward_values(agents, &settings.rewards), settings, rng, math)
 }
 
 pub(crate) fn validate_scores(agents: &[AgentResult], scores: &[f64]) {
@@ -695,6 +698,7 @@ pub(crate) fn reproduce_game_scored(
     scores: Vec<f64>,
     settings: &EvolutionSettings,
     rng: &mut crate::training::game_random::GameRandom,
+    math: MathProfile,
 ) -> Generation {
     validate_scores(agents, &scores);
     let mut profile = crate::training::training_profile::Profile::new("reproduce_game");
@@ -711,7 +715,7 @@ pub(crate) fn reproduce_game_scored(
     let preserved: Vec<Network> = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
     let preserved_count = preserved.len();
     profile.mark("selection");
-    let networks = breed_game(&selected, preserved, settings, rng, &mut profile);
+    let networks = breed_game(&selected, preserved, settings, rng, math, &mut profile);
     Generation {
         networks,
         preserved_count,
@@ -725,6 +729,7 @@ pub(crate) fn breed_game(
     mut networks: Vec<Network>,
     settings: &EvolutionSettings,
     rng: &mut crate::training::game_random::GameRandom,
+    math: MathProfile,
     profile: &mut crate::training::training_profile::Profile,
 ) -> Vec<Network> {
     let children = cross(
@@ -737,11 +742,11 @@ pub(crate) fn breed_game(
     for child in children {
         let rate = settings.mutation_rate
             * if settings.adaptive_mutation {
-                mutation_factor(&child, "xavier")
+                mutation_factor(&child, "xavier", math)
             } else {
                 1.0
             };
-        let mut child = child.mutate_xavier_game(rate, rng);
+        let mut child = child.mutate_xavier_game(rate, rng, math);
         if settings.weight_decay == 1.0 {
             child.params.fill(0.0);
         } else {
@@ -952,7 +957,8 @@ mod tests {
 
             let mut game = crate::training::game_random::GameRandom::new([1, 2, 3, 4 + v as u64], 7 + v as i32);
             let mut game_chooser = game.clone();
-            let expected = reproduce_game(&agents, settings, &mut game);
+            let math = MathProfile::ALL[v % 3];
+            let expected = reproduce_game(&agents, settings, &mut game, math);
             let choice = choose(&scores, settings, &mut game_chooser);
             let selected: Vec<&Network> = choice.selected.iter().map(|&i| agents[i].network).collect();
             let preserved = choice.preserved.iter().map(|&i| agents[i].network.clone()).collect();
@@ -961,6 +967,7 @@ mod tests {
                 preserved,
                 &Breeding::of(settings).settings(),
                 &mut game_chooser,
+                math,
                 &mut profile,
             );
             assert_eq!(bits(&actual), bits(&expected.networks), "game variant {v}");

@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Math profiles: supporting Windows UCRT variants on every backend</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --mute: #98a2b3; --line: #2a313b;
+    --musl: #3b82f6; --ucrt: #f59e0b; --ucrt2: #ef4444; --ok: #22c55e; --gen: #a855f7; --hand: #f97316;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1240px; margin: 0 auto; padding: 32px 28px 64px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  h2 { font-size: 21px; margin: 44px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 22px 0 8px; }
+  p, li { color: #cfd5de; }
+  .sub { color: var(--mute); margin: 0 0 22px; }
+  code { font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: #1f252d; padding: 1px 5px; border-radius: 4px; color: #e2e8f0; }
+  .tldr { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; padding: 14px 18px; }
+  .tldr ul { margin: 6px 0 0; padding-left: 20px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #1b2027; color: #dbe1ea; font-weight: 600; }
+  td { background: var(--panel); }
+  .matrix td { text-align: center; font: 13px ui-monospace, Menlo, monospace; }
+  .matrix td:first-child, .matrix th:first-child { text-align: left; font-family: system-ui, sans-serif; }
+  .v0 { background: #14243f !important; color: #93c5fd; }
+  .v1 { background: #3a2a0c !important; color: #fcd34d; }
+  .v2 { background: #3f1a12 !important; color: #fdba74; }
+  .v3 { background: #3b1220 !important; color: #fda4af; }
+  .v4 { background: #2a1840 !important; color: #d8b4fe; }
+  .na { color: #5b6574 !important; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  .card h3 { margin-top: 0; }
+  .figure { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin: 10px 0 6px; overflow-x: auto; }
+  .caption { color: var(--mute); font-size: 13px; margin: 4px 2px 0; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--mute); margin: 6px 2px; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+  .bad { color: #fca5a5; } .good { color: #86efac; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--mute); margin-left: 6px; }
+  ol.phases > li { margin-bottom: 10px; }
+  svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Math profiles</h1>
+<p class="sub">Historical design draft for issue #7, based on code at <code>e96a2e8</code> and the 56-build UCRT survey. The original proposal and diagrams below are retained as design history.</p>
+
+<div class="tldr">
+<strong>Implemented profiles</strong>
+<p>The implementation supports <code>proton</code>, <code>win10-fma3</code> and <code>win11-fma3</code>. Every native/WASM/GPU build includes all three. Defaults detect the host's operating system and version; resumed runs retain their saved profile. SSE2 variants are outside the supported scope.</p>
+<p>The new Windows kernels share restricted C source in <code>math/kernels/ucrt.h</code>, translated to Rust/WASM and WGSL and included by HIP/CUDA. The established musl and AVX2 ports remain. WebGPU pipeline creation specializes the generated module for the session's profile. <a href="../math/README.md">Current kernel, fixture and verification documentation</a> describes the implemented architecture.</p>
+</div>
+
+<h2>Original proposal</h2>
+
+<div class="tldr">
+<strong>TL;DR</strong>
+<ul>
+  <li>Make the platform's C runtime a <b>runtime parameter</b> (<code>MathProfile</code>) instead of a fact baked into every backend. Five profiles cover everything we measured: Proton and four Windows ones.</li>
+  <li>Write each math variant <b>once</b>, in the restricted C subset that <code>gpu/sim/*.h</code> already uses, and <b>generate</b> the Rust, AVX2, HIP and WGSL versions from it. This extends the existing <code>gen-sim.py</code> / <code>gen_tables.py</code> pipeline instead of adding a new one.</li>
+  <li>Use <b>exception tables</b> where exhaustive proof is possible (<code>sinf</code>/<code>cosf</code>: every float32 can be checked, as <code>engine_exceptions.h</code> already does for x87). Use <b>algorithm ports</b> for the rest (<code>atan2f</code>, <code>exp</code>, <code>log</code>, <code>pow</code>, <code>tanh</code>).</li>
+  <li>Verify each (profile × backend) pair against golden vectors captured from genuine DLLs under Wine. Only the output bits are stored; the DLLs are not.</li>
+  <li>The default stays <code>proton</code>, so existing goldens, checkpoints and behaviour don't change until a user chooses another profile.</li>
+</ul>
+</div>
+
+<h2>1. What has to be supported (measured)</h2>
+<p>Results of the 56-build survey: genuine x64 <code>ucrtbase.dll</code> builds signed 2020–2026, each tested with FMA3 on and off. Each cell shows which implementation a profile needs. A different colour means a different implementation, i.e. not bit-identical.</p>
+
+<table class="matrix">
+  <tr><th>Function (who uses it)</th><th>proton</th><th>win10-fma3<br><span class="tag">Win10, Win11 ≤23H2</span></th><th>win10-sse2</th><th>win11-fma3<br><span class="tag">Win11 24H2+</span></th><th>win11-sse2</th><th>impls</th></tr>
+  <tr><td><code>sinf</code> (ray directions, vision)</td><td class="v0">musl</td><td class="v1">ucrt·F</td><td class="v2">ucrt·S</td><td class="v1">ucrt·F</td><td class="v2">ucrt·S</td><td>3</td></tr>
+  <tr><td><code>cosf</code> (ray directions, vision)</td><td class="v0">musl</td><td class="v1">ucrt·F</td><td class="v2">ucrt·S</td><td class="v1">ucrt·F</td><td class="v2">ucrt·S</td><td>3</td></tr>
+  <tr><td><code>atan2f</code> (rotation, sensors, slip, tracks)</td><td class="v0">musl</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td>2</td></tr>
+  <tr><td><code>exp</code> (tyre grip)</td><td class="v0">musl</td><td class="v1">A·F</td><td class="v2">S</td><td class="v3">B·F</td><td class="v2">S</td><td>4</td></tr>
+  <tr><td><code>log</code> (Box-Muller, evolution; CPU only)</td><td class="v0">musl</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td class="v1">ucrt</td><td>2</td></tr>
+  <tr><td><code>pow</code> (input easing, novelty)</td><td class="v0">musl</td><td class="v1">A·F</td><td class="v2">A·S</td><td class="v3">B·F</td><td class="v4">B·S<sup>†</sup></td><td>5</td></tr>
+  <tr><td><code>tanh</code> (network activation)</td><td class="v0">musl</td><td class="v1">A</td><td class="v1">A</td><td class="v3">B·F</td><td class="v1">A</td><td>3</td></tr>
+  <tr><th>Total implementations</th><th colspan="5" style="text-align:left">today: 7 (one per function) · needed: <b>22</b></th><th>22</th></tr>
+</table>
+<p class="caption">A = Windows 10 / Win11 ≤23H2 behaviour, B = Win11 24H2+ behaviour, F = FMA3 path, S = SSE2 path. Profile-independent and unchanged: x87 <code>engine_sin_cos</code>, .NET <code>MathF.SinCos</code> (<code>managed_sin_cos</code>). <sup>†</sup>B·F and B·S <code>pow</code> agree on all game-range inputs and differ on 10 of 4M wide inputs.</p>
+
+<div class="grid2">
+  <div class="card">
+    <h3>Where each function runs today</h3>
+    <table>
+      <tr><th></th><th>CPU scalar</th><th>AVX2</th><th>HIP</th><th>WebGPU</th></tr>
+      <tr><td>sinf / cosf</td><td>✓</td><td class="na">–</td><td>✓</td><td>✓</td></tr>
+      <tr><td>atan2f</td><td>✓</td><td class="na">–</td><td>✓</td><td>✓</td></tr>
+      <tr><td>exp, pow</td><td>✓</td><td class="na">–</td><td>✓</td><td>✓</td></tr>
+      <tr><td>log</td><td>✓</td><td class="na">–</td><td class="na">–</td><td class="na">–</td></tr>
+      <tr><td>tanh</td><td>✓</td><td>✓ <code>tanh4</code></td><td>✓</td><td>✓</td></tr>
+    </table>
+    <p class="caption">WASM CPU compiles the same Rust as native scalar. <code>log</code> only runs in reproduction, which stays on the CPU in HIP and WebGPU sessions.</p>
+  </div>
+  <div class="card">
+    <h3>Why a naive port doesn't scale</h3>
+    <p>Hand-porting 22 implementations to every backend would mean 22 Rust + 20 HIP + 3 AVX2 bit-exact ports, each needing review, plus 22 generated WGSL functions to validate. Today 7 Rust + 6 HIP + 1 AVX2 are maintained by hand.</p>
+    <p>The FMA3 variants also need <b>explicit fused multiply-adds</b>. HIP builds deliberately use <code>-ffp-contract=off</code>, and WGSL has no <code>f64</code> at all (<code>f64.wgsl</code> is software binary64). So "just enable FMA" isn't an option anywhere.</p>
+  </div>
+</div>
+
+<h2>2. Current state</h2>
+<div class="figure">
+<svg viewBox="0 0 1200 470" width="100%" role="img" aria-label="Current architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/></marker>
+    <marker id="ahh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f97316"/></marker>
+    <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a855f7"/></marker>
+  </defs>
+  <!-- column labels -->
+  <text x="20" y="28" fill="#98a2b3" font-size="13">SPECIFICATION (one fixed platform: Proton / musl)</text>
+  <text x="470" y="28" fill="#98a2b3" font-size="13">BACKEND IMPLEMENTATIONS</text>
+  <text x="900" y="28" fill="#98a2b3" font-size="13">CALLERS (hard-wired)</text>
+
+  <!-- Rust spec -->
+  <rect x="20" y="45" width="370" height="170" rx="8" fill="#14243f" stroke="#3b82f6"/>
+  <text x="36" y="70" fill="#e6e9ee" font-size="15" font-weight="600">Rust scalar = the reference</text>
+  <text x="36" y="94" fill="#cfd5de" font-size="13">src/math/native_math.rs  — sinf, cosf, atan2f</text>
+  <text x="36" y="114" fill="#cfd5de" font-size="13">src/math/double_math.rs — exp, log, pow</text>
+  <text x="36" y="134" fill="#cfd5de" font-size="13">src/nn/network.rs — game_tanh / game_expm1</text>
+  <text x="36" y="154" fill="#cfd5de" font-size="13">src/math/double_math_tables.rs</text>
+  <text x="36" y="182" fill="#93c5fd" font-size="12.5">Free functions; no notion of "which platform".</text>
+  <text x="36" y="200" fill="#93c5fd" font-size="12.5">Also compiled for WASM CPU.</text>
+
+  <!-- AVX2 -->
+  <rect x="470" y="45" width="360" height="62" rx="8" fill="#2a1d10" stroke="#f97316"/>
+  <text x="486" y="70" fill="#e6e9ee" font-size="14" font-weight="600">AVX2  src/nn/network_simd.rs</text>
+  <text x="486" y="92" fill="#fdba74" font-size="12.5">tanh4 / expm1_tanh — hand port of game_tanh</text>
+
+  <!-- HIP -->
+  <rect x="470" y="127" width="360" height="88" rx="8" fill="#2a1d10" stroke="#f97316"/>
+  <text x="486" y="152" fill="#e6e9ee" font-size="14" font-weight="600">HIP  gpu/sim/math.h</text>
+  <text x="486" y="174" fill="#fdba74" font-size="12.5">native_sin/cos/atan2, dexp, dpow, game_tanh</text>
+  <text x="486" y="194" fill="#fdba74" font-size="12.5">hand port; -ffp-contract=off</text>
+
+  <!-- tables gen -->
+  <rect x="470" y="235" width="360" height="50" rx="8" fill="#1f1530" stroke="#a855f7"/>
+  <text x="486" y="258" fill="#e6e9ee" font-size="14" font-weight="600">gpu/gen_tables.py → double_tables.h</text>
+  <text x="486" y="276" fill="#d8b4fe" font-size="12.5">bit-copied from Rust tables</text>
+
+  <!-- WGSL -->
+  <rect x="470" y="305" width="360" height="88" rx="8" fill="#1f1530" stroke="#a855f7"/>
+  <text x="486" y="330" fill="#e6e9ee" font-size="14" font-weight="600">WebGPU  src/wasm/sim/generated.wgsl</text>
+  <text x="486" y="352" fill="#d8b4fe" font-size="12.5">wasm/gen-sim.py transpiles gpu/sim/*.h (pycparser)</text>
+  <text x="486" y="372" fill="#d8b4fe" font-size="12.5">doubles via f64.wgsl (software binary64)</text>
+
+  <!-- arrows spec -> backends -->
+  <path d="M390,90 C430,90 430,76 466,76" stroke="#f97316" stroke-width="2" fill="none" marker-end="url(#ahh)"/>
+  <path d="M390,150 C430,150 430,170 466,170" stroke="#f97316" stroke-width="2" fill="none" marker-end="url(#ahh)"/>
+  <path d="M390,165 C430,190 430,255 466,258" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#ahg)"/>
+  <path d="M650,215 L650,232" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#ahg)"/>
+  <path d="M845,170 C880,170 880,250 845,335" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#ahg)" />
+  <text x="862" y="260" fill="#d8b4fe" font-size="11.5">gen</text>
+
+  <!-- callers -->
+  <rect x="900" y="45" width="280" height="170" rx="8" fill="#171b21" stroke="#2a313b"/>
+  <text x="916" y="70" fill="#e6e9ee" font-size="14" font-weight="600">21 Rust call sites</text>
+  <text x="916" y="92" fill="#cfd5de" font-size="12.5">physics/car.rs, training/*.rs,</text>
+  <text x="916" y="110" fill="#cfd5de" font-size="12.5">track/curve.rs, random_track.rs …</text>
+  <text x="916" y="134" fill="#cfd5de" font-size="12.5">call native_math::atan2(...) etc.</text>
+  <text x="916" y="158" fill="#cfd5de" font-size="12.5">gpu/sim step/sensors/stats/track.h</text>
+  <text x="916" y="176" fill="#cfd5de" font-size="12.5">call native_* / dexp / dpow</text>
+  <text x="916" y="200" fill="#fca5a5" font-size="12.5">→ no way to choose a platform</text>
+
+  <!-- problems box -->
+  <rect x="20" y="240" width="420" height="215" rx="8" fill="#2a1416" stroke="#ef4444"/>
+  <text x="36" y="266" fill="#fecaca" font-size="15" font-weight="600">Limits for issue #7</text>
+  <text x="36" y="292" fill="#fca5a5" font-size="13">• One implementation per function, compiled in.</text>
+  <text x="36" y="314" fill="#fca5a5" font-size="13">• Rust and HIP are two hand-maintained sources;</text>
+  <text x="48" y="332" fill="#fca5a5" font-size="13">AVX2 is a third for tanh.</text>
+  <text x="36" y="354" fill="#fca5a5" font-size="13">• FMA is forbidden everywhere (contract=off);</text>
+  <text x="48" y="372" fill="#fca5a5" font-size="13">no explicit fma primitive in Rust/HIP/WGSL code.</text>
+  <text x="36" y="394" fill="#fca5a5" font-size="13">• Golden fixtures describe Proton only.</text>
+  <text x="36" y="416" fill="#fca5a5" font-size="13">• Adding Windows naïvely = 22 × (Rust + HIP)</text>
+  <text x="48" y="434" fill="#fca5a5" font-size="13">+ 3 AVX2 bit-exact hand ports.</text>
+
+  <!-- legend -->
+  <rect x="470" y="410" width="12" height="12" fill="#f97316"/><text x="488" y="421" fill="#98a2b3" font-size="12.5">hand-written port</text>
+  <rect x="610" y="410" width="12" height="12" fill="#a855f7"/><text x="628" y="421" fill="#98a2b3" font-size="12.5">generated</text>
+  <rect x="720" y="410" width="12" height="12" fill="#3b82f6"/><text x="738" y="421" fill="#98a2b3" font-size="12.5">source of truth</text>
+</svg>
+</div>
+<p class="caption">Rust is the reference; HIP is a second hand-written copy; WGSL is generated from HIP; AVX2 has a third copy of tanh. Each backend's math is fixed when it is compiled.</p>
+
+<h2>3. Proposed architecture</h2>
+<div class="figure">
+<svg viewBox="0 0 1200 760" width="100%" role="img" aria-label="Proposed architecture">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a855f7"/></marker>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#22c55e"/></marker>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/></marker>
+  </defs>
+
+  <!-- Layer labels -->
+  <text x="20" y="26" fill="#98a2b3" font-size="13">① EVIDENCE (dev-only, Wine)</text>
+  <text x="330" y="26" fill="#98a2b3" font-size="13">② SINGLE SOURCE</text>
+  <text x="690" y="26" fill="#98a2b3" font-size="13">③ GENERATED BACKENDS</text>
+  <text x="990" y="26" fill="#98a2b3" font-size="13">④ RUNTIME SELECTION</text>
+
+  <!-- Evidence -->
+  <rect x="20" y="40" width="280" height="250" rx="8" fill="#171b21" stroke="#2a313b"/>
+  <text x="36" y="64" fill="#e6e9ee" font-size="14" font-weight="600">UCRT reference harness</text>
+  <text x="36" y="86" fill="#cfd5de" font-size="12.5">tools/ucrt-ref (from ucrt_harness.c)</text>
+  <text x="36" y="104" fill="#cfd5de" font-size="12.5">genuine DLL × FMA3 on/off, under Wine</text>
+  <text x="36" y="130" fill="#e6e9ee" font-size="13" font-weight="600">Outputs (committed):</text>
+  <text x="36" y="150" fill="#cfd5de" font-size="12.5">• golden vectors per profile</text>
+  <text x="48" y="168" fill="#cfd5de" font-size="12.5">tests/fixtures/math_profiles/*.bin</text>
+  <text x="36" y="188" fill="#cfd5de" font-size="12.5">• exhaustive sinf/cosf scans</text>
+  <text x="48" y="206" fill="#cfd5de" font-size="12.5">→ exception tables</text>
+  <text x="36" y="226" fill="#cfd5de" font-size="12.5">• build → profile map (profiles.toml)</text>
+  <text x="36" y="252" fill="#fcd34d" font-size="12.5">DLLs are never committed;</text>
+  <text x="36" y="270" fill="#fcd34d" font-size="12.5">only versions, hashes and output bits.</text>
+
+  <!-- Single source -->
+  <rect x="330" y="40" width="330" height="330" rx="8" fill="#14243f" stroke="#3b82f6"/>
+  <text x="346" y="64" fill="#e6e9ee" font-size="14" font-weight="600">math/kernels/  (restricted C subset)</text>
+  <text x="346" y="86" fill="#93c5fd" font-size="12.5">the subset gen-sim.py already parses</text>
+  <rect x="346" y="98" width="298" height="122" rx="6" fill="#0f1a2e" stroke="#2b4a7a"/>
+  <text x="358" y="118" fill="#cfd5de" font-size="12.5">musl/   sinf cosf atan2f exp log pow tanh</text>
+  <text x="358" y="138" fill="#cfd5de" font-size="12.5">ucrt/   atan2f log</text>
+  <text x="358" y="158" fill="#cfd5de" font-size="12.5">ucrt/   exp_{a_fma,b_fma,sse2}</text>
+  <text x="358" y="178" fill="#cfd5de" font-size="12.5">ucrt/   pow_{a_fma,a_sse2,b_fma,b_sse2}</text>
+  <text x="358" y="198" fill="#cfd5de" font-size="12.5">ucrt/   tanh_{a,b_fma}   sincos = musl + table</text>
+  <text x="346" y="244" fill="#e6e9ee" font-size="13" font-weight="600">Primitives every backend must provide</text>
+  <text x="346" y="264" fill="#cfd5de" font-size="12.5">add/sub/mul/div (correctly rounded),</text>
+  <text x="346" y="282" fill="#cfd5de" font-size="12.5">fma() explicit and exact, bits casts, select()</text>
+  <text x="346" y="306" fill="#e6e9ee" font-size="13" font-weight="600">profiles.toml</text>
+  <text x="346" y="326" fill="#cfd5de" font-size="12.5">profile → variant per function (the matrix in §1)</text>
+  <text x="346" y="346" fill="#cfd5de" font-size="12.5">+ the UCRT builds each profile stands for</text>
+
+  <!-- Generator -->
+  <rect x="330" y="400" width="330" height="80" rx="8" fill="#1f1530" stroke="#a855f7"/>
+  <text x="346" y="424" fill="#e6e9ee" font-size="14" font-weight="600">wasm/gen-math.py</text>
+  <text x="346" y="446" fill="#d8b4fe" font-size="12.5">reuses gen-sim.py's pycparser front end;</text>
+  <text x="346" y="464" fill="#d8b4fe" font-size="12.5">4 emitters; CI runs it with --check</text>
+  <path d="M495,370 L495,396" stroke="#a855f7" stroke-width="2" marker-end="url(#a2)"/>
+
+  <!-- evidence -> source -->
+  <path d="M300,190 L326,190" stroke="#98a2b3" stroke-width="2" marker-end="url(#a4)"/>
+
+  <!-- Backends -->
+  <g>
+    <rect x="690" y="40" width="270" height="78" rx="8" fill="#1f1530" stroke="#a855f7"/>
+    <text x="706" y="64" fill="#e6e9ee" font-size="14" font-weight="600">Rust scalar (+ WASM CPU)</text>
+    <text x="706" y="84" fill="#d8b4fe" font-size="12.5">src/math/platform/generated.rs</text>
+    <text x="706" y="102" fill="#d8b4fe" font-size="12.5">fma → f64::mul_add (always exact)</text>
+
+    <rect x="690" y="132" width="270" height="78" rx="8" fill="#1f1530" stroke="#a855f7"/>
+    <text x="706" y="156" fill="#e6e9ee" font-size="14" font-weight="600">AVX2 (tanh variants only)</text>
+    <text x="706" y="176" fill="#d8b4fe" font-size="12.5">emitted from branch-free kernels</text>
+    <text x="706" y="194" fill="#d8b4fe" font-size="12.5">fma → _mm256_fmadd_pd / scalar fallback</text>
+
+    <rect x="690" y="224" width="270" height="78" rx="8" fill="#1f1530" stroke="#a855f7"/>
+    <text x="706" y="248" fill="#e6e9ee" font-size="14" font-weight="600">HIP</text>
+    <text x="706" y="268" fill="#d8b4fe" font-size="12.5">gpu/sim/platform_math.h (#include)</text>
+    <text x="706" y="286" fill="#d8b4fe" font-size="12.5">fma → __fma_rn; contract stays off</text>
+
+    <rect x="690" y="316" width="270" height="96" rx="8" fill="#1f1530" stroke="#a855f7"/>
+    <text x="706" y="340" fill="#e6e9ee" font-size="14" font-weight="600">WGSL, one module per profile</text>
+    <text x="706" y="360" fill="#d8b4fe" font-size="12.5">src/wasm/sim/math_&lt;profile&gt;.wgsl</text>
+    <text x="706" y="378" fill="#d8b4fe" font-size="12.5">fma → new f64_fma in f64.wgsl,</text>
+    <text x="706" y="396" fill="#d8b4fe" font-size="12.5">f32 fma via exact f64 product</text>
+  </g>
+  <path d="M660,440 C690,440 670,80 686,80" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+  <path d="M660,440 C690,440 672,172 686,172" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+  <path d="M660,440 C690,440 674,264 686,264" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+  <path d="M660,440 C690,440 676,364 686,364" stroke="#a855f7" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+
+  <!-- Runtime selection -->
+  <rect x="990" y="40" width="190" height="372" rx="8" fill="#12261a" stroke="#22c55e"/>
+  <text x="1004" y="64" fill="#e6e9ee" font-size="14" font-weight="600">MathProfile</text>
+  <text x="1004" y="86" fill="#bbf7d0" font-size="12.5">proton | win10-fma3 |</text>
+  <text x="1004" y="104" fill="#bbf7d0" font-size="12.5">win10-sse2 | win11-fma3 |</text>
+  <text x="1004" y="122" fill="#bbf7d0" font-size="12.5">win11-sse2</text>
+  <text x="1004" y="150" fill="#e6e9ee" font-size="12.5" font-weight="600">SessionOptions</text>
+  <text x="1004" y="168" fill="#bbf7d0" font-size="12.5">mathProfile (default proton)</text>
+  <text x="1004" y="192" fill="#e6e9ee" font-size="12.5" font-weight="600">Checkpoint header</text>
+  <text x="1004" y="210" fill="#bbf7d0" font-size="12.5">records profile; resume</text>
+  <text x="1004" y="228" fill="#bbf7d0" font-size="12.5">rejects a mismatch</text>
+  <text x="1004" y="252" fill="#e6e9ee" font-size="12.5" font-weight="600">Rust</text>
+  <text x="1004" y="270" fill="#bbf7d0" font-size="12.5">Math{profile} passed to</text>
+  <text x="1004" y="288" fill="#bbf7d0" font-size="12.5">world/runner; 21 sites call</text>
+  <text x="1004" y="306" fill="#bbf7d0" font-size="12.5">m.atan2(), m.exp() …</text>
+  <text x="1004" y="330" fill="#e6e9ee" font-size="12.5" font-weight="600">HIP</text>
+  <text x="1004" y="348" fill="#bbf7d0" font-size="12.5">wave-uniform profile arg</text>
+  <text x="1004" y="372" fill="#e6e9ee" font-size="12.5" font-weight="600">WebGPU</text>
+  <text x="1004" y="390" fill="#bbf7d0" font-size="12.5">concat chosen module only</text>
+  <path d="M960,80 L986,80" stroke="#22c55e" stroke-width="2" marker-end="url(#a3)"/>
+  <path d="M960,172 L986,172" stroke="#22c55e" stroke-width="2" marker-end="url(#a3)"/>
+  <path d="M960,264 L986,264" stroke="#22c55e" stroke-width="2" marker-end="url(#a3)"/>
+  <path d="M960,364 L986,364" stroke="#22c55e" stroke-width="2" marker-end="url(#a3)"/>
+
+  <!-- Verification band -->
+  <rect x="20" y="510" width="1160" height="230" rx="8" fill="#171b21" stroke="#22c55e" stroke-dasharray="5 4"/>
+  <text x="36" y="536" fill="#e6e9ee" font-size="15" font-weight="600">⑤ Verification matrix (every profile × every backend, bit-exact)</text>
+  <g font-size="12.5">
+    <rect x="36" y="552" width="260" height="170" rx="6" fill="#0f1a14" stroke="#1f5133"/>
+    <text x="50" y="574" fill="#e6e9ee" font-weight="600">Math level</text>
+    <text x="50" y="596" fill="#bbf7d0">Golden vectors vs. Rust scalar</text>
+    <text x="50" y="616" fill="#bbf7d0">and AVX2 (cargo test).</text>
+    <text x="50" y="640" fill="#bbf7d0">HIP math_kernel op tests</text>
+    <text x="50" y="660" fill="#bbf7d0">gain a profile argument.</text>
+    <text x="50" y="684" fill="#bbf7d0">WGSL: wasm/test/exact.js</text>
+    <text x="50" y="704" fill="#bbf7d0">over the same vectors.</text>
+
+    <rect x="316" y="552" width="260" height="170" rx="6" fill="#0f1a14" stroke="#1f5133"/>
+    <text x="330" y="574" fill="#e6e9ee" font-weight="600">Exhaustive (f32 unary)</text>
+    <text x="330" y="596" fill="#bbf7d0">All 2³² inputs for sinf/cosf</text>
+    <text x="330" y="616" fill="#bbf7d0">per variant: musl + table</text>
+    <text x="330" y="636" fill="#bbf7d0">== genuine DLL. Ignored test,</text>
+    <text x="330" y="656" fill="#bbf7d0">runs under Wine (~45 s/pair),</text>
+    <text x="330" y="676" fill="#bbf7d0">like examples/</text>
+    <text x="330" y="694" fill="#bbf7d0">gpu_engine_scan.rs.</text>
+
+    <rect x="596" y="552" width="260" height="170" rx="6" fill="#0f1a14" stroke="#1f5133"/>
+    <text x="610" y="574" fill="#e6e9ee" font-weight="600">Simulation level</text>
+    <text x="610" y="596" fill="#bbf7d0">Existing CPU↔HIP↔WebGPU</text>
+    <text x="610" y="616" fill="#bbf7d0">parity tests, parameterised</text>
+    <text x="610" y="636" fill="#bbf7d0">by profile. proton goldens</text>
+    <text x="610" y="656" fill="#bbf7d0">must stay byte-identical</text>
+    <text x="610" y="676" fill="#bbf7d0">(refactor guard).</text>
+
+    <rect x="876" y="552" width="290" height="170" rx="6" fill="#0f1a14" stroke="#1f5133"/>
+    <text x="890" y="574" fill="#e6e9ee" font-weight="600">Game level (optional)</text>
+    <text x="890" y="596" fill="#bbf7d0">Windows player records a trace</text>
+    <text x="890" y="616" fill="#bbf7d0">via the game's MCP server; the</text>
+    <text x="890" y="636" fill="#bbf7d0">sim replays it under each profile.</text>
+    <text x="890" y="656" fill="#bbf7d0">The matching profile confirms the</text>
+    <text x="890" y="676" fill="#bbf7d0">setup end to end and can</text>
+    <text x="890" y="696" fill="#bbf7d0">auto-detect a user's profile.</text>
+  </g>
+  <path d="M600,412 L600,505" stroke="#22c55e" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#a3)"/>
+</svg>
+</div>
+<p class="caption">One source per variant, four generated backends, and the profile chosen at run time. The Wine harness that produced the survey becomes the permanent oracle.</p>
+
+<h2>4. Current vs proposed</h2>
+<table>
+  <tr><th style="width:18%">Concern</th><th style="width:41%">Current</th><th>Proposed</th></tr>
+  <tr><td>Platform choice</td><td class="bad">Fixed at compile time: Proton/musl only</td><td class="good"><code>MathProfile</code> chosen per session and recorded in checkpoints; default <code>proton</code></td></tr>
+  <tr><td>Sources of truth</td><td>Rust (reference) + HIP (hand copy) + AVX2 tanh (hand copy)</td><td>One C-subset kernel per variant; Rust, AVX2, HIP and WGSL are generated</td></tr>
+  <tr><td>Cost of one new variant</td><td class="bad">Up to 3 bit-exact hand ports + regenerate WGSL + new fixtures</td><td class="good">1 kernel + 1 line in <code>profiles.toml</code> + regenerated golden vectors</td></tr>
+  <tr><td>FMA</td><td>Forbidden everywhere (<code>-ffp-contract=off</code>); no fma primitive</td><td>Still no implicit contraction; an explicit <code>fma()</code> primitive with an exact implementation on each backend</td></tr>
+  <tr><td>sinf / cosf</td><td>musl port</td><td>musl port + per-variant exception table (6–51k entries), proven over every float32</td></tr>
+  <tr><td>atan2f, exp, log, pow, tanh</td><td>musl ports</td><td>musl + UCRT algorithm ports (can't be proven exhaustively; validated with golden vectors)</td></tr>
+  <tr><td>HIP selection</td><td>n/a</td><td>Profile kernel argument (uniform per launch, so no divergence); template instantiation only if profiling shows register pressure</td></tr>
+  <tr><td>WebGPU selection</td><td>n/a</td><td>Assemble the shader with only the chosen <code>math_&lt;profile&gt;.wgsl</code>, keeping compile cost flat</td></tr>
+  <tr><td>Track generation</td><td>Uses <code>atan2f</code> (random_track.rs, curve.rs)</td><td>Uses the profile too, so generated geometry matches the player's platform</td></tr>
+  <tr><td>Fixtures</td><td>Proton captures only</td><td>Proton captures unchanged + per-profile golden vectors from genuine DLLs (outputs only)</td></tr>
+  <tr><td>Unaffected</td><td colspan="2">x87 <code>engine_sin_cos</code>, .NET <code>managed_sin_cos</code>, all ordinary arithmetic, RNG streams, and <code>pyrandom</code>'s host libm (separate CPython-compat concern)</td></tr>
+</table>
+
+<h2>5. Implementation strategy per function</h2>
+<table>
+  <tr><th>Function</th><th>Approach</th><th>Why</th><th>Proof level</th></tr>
+  <tr><td>sinf, cosf</td><td>musl kernel + sorted exception table + branch-free binary search (existing <code>engine_sin_cos</code> pattern)</td><td>Only 6,254–50,872 of 2³² inputs differ, all 1 ULP; the table is generated from the scan</td><td class="good">Exhaustive</td></tr>
+  <tr><td>atan2f</td><td>Port the UCRT algorithm</td><td>16% of inputs differ, too many for a table, and there are 2 arguments</td><td>Golden vectors</td></tr>
+  <tr><td>tanh</td><td>Port both UCRT variants in branch-free form (also feeds AVX2)</td><td>About 10% of inputs differ; it's the hottest path (inference)</td><td>Golden vectors</td></tr>
+  <tr><td>exp, pow, log</td><td>Port UCRT algorithms; FMA and SSE2 variants differ only where <code>fma()</code> is used</td><td>Double-precision inputs can't be enumerated</td><td>Golden vectors</td></tr>
+</table>
+
+<h2>6. Phased rollout</h2>
+<ol class="phases">
+  <li><b>Phase 0: spike (decides feasibility).</b> Recover the algorithms behind UCRT <code>atan2f</code> and <code>tanh</code>, the two highest-impact functions, and reproduce the golden vectors bit-exactly in a throwaway Rust prototype. Turn <code>ucrt_harness.c</code> and the 56-build survey into <code>tools/ucrt-ref</code>. <i>Exit criterion:</i> 0 differences on golden vectors for both functions on both paths.</li>
+  <li><b>Phase 1: plumbing, no behaviour change.</b> Add <code>MathProfile</code>, <code>SessionOptions.mathProfile</code> and the checkpoint field; route the 21 Rust call sites and the HIP/WGSL call sites through a profile-aware layer that still only knows <code>proton</code>. All existing goldens stay byte-identical.</li>
+  <li><b>Phase 2: single source, no behaviour change.</b> Move the musl kernels into <code>math/kernels/</code>, write <code>gen-math.py</code> with Rust/AVX2/HIP/WGSL emitters, and replace the hand ports with generated code. Guard: exhaustive f32 checks and fixture checks against the old code.</li>
+  <li><b>Phase 3: Windows variants.</b> Add them in order of impact: atan2f, tanh, exp, pow, log, then the sin/cos tables. Add <code>f64_fma</code> to <code>f64.wgsl</code> and the scalar fma fallback for CPUs without FMA.</li>
+  <li><b>Phase 4: parity matrix.</b> Parameterise CPU↔HIP↔WebGPU parity and session regressions by profile; run the full set for <code>proton</code> and one Windows profile in CI, all profiles nightly.</li>
+  <li><b>Phase 5: user-facing.</b> Profile picker in Drive Lab and the CLI (<code>--math-profile</code>), with a short "which one am I?" helper (Windows version, FMA3 support); optional detection from a recorded game trace.</li>
+</ol>
+
+<h2>7. Risks and open questions</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>Deriving the UCRT algorithms <span class="tag">largest risk</span></h3>
+    <p>For atan2f, exp, log, pow and tanh we need Microsoft's actual algorithm, not just its outputs. Studying the binary may conflict with Microsoft's licence terms, and interoperability exceptions vary by jurisdiction, so <b>this needs a decision before Phase 0</b>. Black-box fitting against golden vectors is a fallback, but it may not converge to bit-exactness. One unverified hypothesis: the x64 CRT's transcendentals may share ancestry with AMD's open-source libm. If so, that would be a clean starting point to test against the vectors.</p>
+  </div>
+  <div class="card">
+    <h3>Coverage the survey didn't test</h3>
+    <ul>
+      <li>All results came from one CPU (Zen 4 with AVX-512). It's unknown whether newer builds use AVX-512 paths that CPUs without AVX-512 wouldn't take.</li>
+      <li>FMA3 vs SSE2 was forced with <code>_set_FMA3_enable</code>, not observed on a CPU without FMA3.</li>
+      <li>Windows on ARM (x64 emulation) wasn't tested.</li>
+      <li>Profiles may need splitting if any of these show differences; <code>profiles.toml</code> makes that a data change.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Performance</h3>
+    <ul>
+      <li>FMA3 profiles on targets without hardware FMA: <code>f64::mul_add</code> on WASM and pre-Haswell CPUs, and <code>f64_fma</code> in WGSL soft-float, are much slower than a multiply plus an add. This mainly affects tanh in inference.</li>
+      <li>The per-call profile <code>match</code> in Rust should be close to free (well predicted); switch to monomorphisation only if benchmarks show otherwise.</li>
+      <li>HIP code size grows with the number of inlined variants. Watch register pressure and occupancy.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Scope and maintenance</h3>
+    <ul>
+      <li>About 3× more kernels (22 vs 7), but each is written once.</li>
+      <li>Golden vectors grow per profile: keep about 64k inputs per function per profile, so a few MB total.</li>
+      <li>A future UCRT update can add a behaviour group. The survey script reruns in about 2 minutes against Winbindex, so it can become a periodic check.</li>
+      <li>An end-to-end game confirmation still needs a Windows player's trace (Steam blocks running outside Steam).</li>
+    </ul>
+  </div>
+</div>
+
+<p class="caption" style="margin-top:28px">Sources: code at <code>e96a2e8</code> (src/math, src/nn, gpu/sim, wasm/gen-sim.py, src/wasm/sim); UCRT survey data in <code>~/altd-wine/versions/</code> (sweep.json, groupcmp_*.txt, exhaustive_*.txt).</p>
+</main>
+</body>
+</html>

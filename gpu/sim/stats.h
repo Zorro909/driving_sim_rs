@@ -98,7 +98,7 @@ __device__ inline void stats_update(const World& w, const Car& car, Agent& a, ui
     Vec2 right = normalized(car.basis_x);
     float front = dot(car.velocity, rotated(right, -1.57079632679489661923f, err));
     float side = dot(car.velocity, right);
-    a.current_slip_angle_degrees = (double)(native_atan2(side, front) * 57.29578f);
+    a.current_slip_angle_degrees = (double)(profile_atan2(w.math_profile, side, front) * 57.29578f);
     double slip = fabs(a.current_slip_angle_degrees);
     a.drift_ticks = (speed > 50.0 && slip >= 15.0 && slip <= 60.0) ? a.drift_ticks + 1 : 0;
     if (a.drift_ticks >= 3) {

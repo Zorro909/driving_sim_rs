@@ -65,7 +65,7 @@ __device__ inline Vec2 curve_direction(const World& w, float offset, uint32_t& e
     if (a2 == 0.0f || b2 == 0.0f) return normalized(a + (b - a) * t);
     float len = sqrtf(a2);
     float result_length = len + (sqrtf(b2) - len) * t;
-    float angle = native_atan2(cross(a, b), dot(a, b)) * t;
+    float angle = profile_atan2(w.math_profile, cross(a, b), dot(a, b)) * t;
     float s, c;
     engine_sin_cos(angle, s, c, err);
     return normalized(Vec2{a.x * c - a.y * s, a.x * s + a.y * c} * (result_length / len));

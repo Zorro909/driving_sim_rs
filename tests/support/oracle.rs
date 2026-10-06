@@ -30,6 +30,7 @@ pub(crate) fn scene(data: &Value) -> Value {
         recipe["seed"].as_i64().unwrap(),
         recipe["generation"].as_u64().unwrap(),
         recipe["slot"].as_u64().unwrap() as usize,
+        altd_sim::math::profile::MathProfile::Proton,
     )
     .unwrap();
     if let Some(overrides) = data.get("scene_overrides") {

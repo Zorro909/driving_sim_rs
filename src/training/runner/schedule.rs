@@ -51,7 +51,9 @@ impl Schedule<'_> {
     /// The network forward of the read inputs into the agent's controls.
     pub(super) fn set_controls(&self, agent: &mut TrainingAgent) {
         let scratch = &mut agent.scratch;
-        let outputs = agent.network.forward_into(&scratch.inputs, &mut scratch.forward);
+        let outputs = agent
+            .network
+            .forward_into(&scratch.inputs, &mut scratch.forward, self.world.math);
         let mut controls = Controls::default();
         for (slot, &value) in self.outputs.iter().zip(outputs) {
             match slot {

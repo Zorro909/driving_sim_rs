@@ -3,6 +3,7 @@
 //! same code as the native reference. It wraps `TrainingRunner` with JSON
 //! options, seeding, flat state export and generation-boundary checkpoints.
 
+use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::nn::network::{parameter_count, Network};
 use crate::track::world::World;
@@ -65,6 +66,10 @@ pub struct SessionOptions {
     /// `"cpu"` or `"hip"`. A native session falls back to the CPU when HIP
     /// cannot run it (see `Session::backend_note`).
     pub backend: Backend,
+    /// The C runtime math to reproduce (`"proton"`, `"win10-fma3"`,
+    /// `"win11-fma3"`); without it, the math of this machine
+    /// (`MathProfile::detect`).
+    pub math_profile: Option<MathProfile>,
 }
 
 impl Default for SessionOptions {
@@ -81,6 +86,7 @@ impl Default for SessionOptions {
             settings: None,
             gpu_verify_every: 0,
             backend: Backend::Cpu,
+            math_profile: None,
         }
     }
 }
@@ -211,8 +217,9 @@ impl Session {
         if settings.population == 0 {
             return Err("population must be positive".into());
         }
-        let world = Arc::new(World::from_scene(scene));
-        let layout = SensorLayout::from_exports(network, model);
+        let math = options.math_profile.unwrap_or_else(MathProfile::detect);
+        let world = Arc::new(World::from_scene_with(scene, math));
+        let layout = SensorLayout::from_exports(network, model, math);
         let mut runner = TrainingRunner::new(
             world,
             V2::new(spawn.position[0], spawn.position[1]),
@@ -287,7 +294,7 @@ impl Session {
     pub fn start_with_shape(&mut self, shape: &[usize]) -> Result<(), String> {
         self.check_shape(shape)?;
         let runner = self.runner_mut()?;
-        let seed = runner.rng.xavier(shape);
+        let seed = runner.rng.xavier(shape, runner.world.math);
         let lineage = runner.start_traced(&seed);
         self.record(lineage);
         self.networks_changed();
@@ -319,6 +326,11 @@ impl Session {
             ));
         }
         Ok(())
+    }
+
+    /// The C runtime math the session reproduces.
+    pub fn math_profile(&self) -> MathProfile {
+        self.runner.world.math
     }
 
     pub(crate) fn started(&self) -> bool {
@@ -585,7 +597,7 @@ impl Session {
             "generation": self.runner.generation,
             "tick": self.runner.tick,
             "shape": shape,
-            "rng": self.runner.rng.to_json(),
+            "rng": rng_json(&self.runner.rng, self.math_profile()),
             "networks": self.runner.agents.iter().map(|a| Value::from(a.network.params.clone())).collect::<Vec<_>>(),
         }))
     }
@@ -621,7 +633,12 @@ impl Session {
                 params.push(v.as_f64().ok_or("invalid parameter")?);
             }
         }
-        let rng = (!value["rng"].is_null()).then(|| TrainingRandom::from_json(&value["rng"]));
+        self.check_math(rng_math(&value["rng"])?)?;
+        let rng = if value["rng"].is_null() {
+            None
+        } else {
+            Some(TrainingRandom::from_json(&value["rng"]))
+        };
         self.restore(&shape, generation, params, rng)
     }
 
@@ -687,8 +704,22 @@ impl Session {
         });
     }
 
+    /// Refuses a checkpoint trained under other math: its cars would drive
+    /// and breed differently here.
+    fn check_math(&self, math: MathProfile) -> Result<(), String> {
+        if math == self.math_profile() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the checkpoint uses math profile {math}, this session {}",
+                self.math_profile()
+            ))
+        }
+    }
+
     fn restore_lineage(&mut self, generation: u64, lineage: Lineage) -> Result<(), String> {
         lineage.validate()?;
+        self.check_math(lineage.math)?;
         self.check_shape(&lineage.parents[0].shape)?;
         let (networks, rng) = lineage.rebuild();
         let runner = self.runner_mut()?;
@@ -711,7 +742,9 @@ impl Session {
     pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, String> {
         let b = self.boundary.as_ref().ok_or("the session has not started")?;
         match &b.saved {
-            Saved::Population { shape, rng, params } => population_bytes(b.generation, b.tick, shape, rng, params),
+            Saved::Population { shape, rng, params } => {
+                population_bytes(b.generation, b.tick, shape, rng, self.math_profile(), params)
+            }
             Saved::Lineage(lineage) => parent_bytes(b.generation, b.tick, lineage),
         }
     }
@@ -721,7 +754,8 @@ impl Session {
         match bytes.get(..8) {
             Some(m) if m == CHECKPOINT_MAGIC => {
                 let (shape, generation, params, rng) = read_population(bytes)?;
-                self.restore(&shape, generation, params, rng)
+                self.check_math(rng.as_ref().map_or(MathProfile::Proton, |(_, math)| *math))?;
+                self.restore(&shape, generation, params, rng.map(|(rng, _)| rng))
             }
             Some(m) if m == PARENTS_MAGIC => {
                 let (generation, lineage) = read_parents(bytes)?;
@@ -826,7 +860,7 @@ impl Session {
             .get("reset_rotation")
             .and_then(Value::as_f64)
             .ok_or("the scene has no reset_rotation")?;
-        let world = Arc::new(World::from_scene(scene));
+        let world = Arc::new(World::from_scene_with(scene, self.math_profile()));
         if world.track.native_broadphase != self.runner.world.track.native_broadphase {
             return Err("a replacement track must keep the broadphase mode".into());
         }
@@ -840,6 +874,28 @@ impl Session {
             }
         }
         Ok(())
+    }
+}
+
+/// A checkpoint's RNG JSON: the generator state and the math profile it
+/// draws with, which checkpoints of every format carry this way. Proton
+/// checkpoints leave the profile out and keep their earlier bytes.
+fn rng_json(rng: &TrainingRandom, math: MathProfile) -> Value {
+    let mut value = rng.to_json();
+    if math != MathProfile::Proton {
+        value["mathProfile"] = serde_json::json!(math);
+    }
+    value
+}
+
+/// The math profile of `rng_json`. Checkpoints from before profiles were Proton's.
+fn rng_math(rng: &Value) -> Result<MathProfile, String> {
+    match rng.get("mathProfile") {
+        None => Ok(MathProfile::Proton),
+        Some(name) => name
+            .as_str()
+            .ok_or_else(|| "invalid checkpoint math profile".to_string())?
+            .parse(),
     }
 }
 
@@ -859,9 +915,10 @@ fn population_bytes(
     tick: u64,
     shape: &[usize],
     rng: &TrainingRandom,
+    math: MathProfile,
     params: &[f64],
 ) -> Result<Vec<u8>, String> {
-    let rng = rng.to_json().to_string();
+    let rng = rng_json(rng, math).to_string();
     let size = parameter_count(shape);
     let header = [
         generation,
@@ -887,9 +944,9 @@ fn population_bytes(
     Ok(out)
 }
 
-type PopulationCheckpoint = (Vec<usize>, u64, Vec<f64>, Option<TrainingRandom>);
+type PopulationCheckpoint = (Vec<usize>, u64, Vec<f64>, Option<(TrainingRandom, MathProfile)>);
 
-/// Reads format 1: `(shape, generation, params, rng)`.
+/// Reads format 1: `(shape, generation, params, rng and math profile)`.
 fn read_population(bytes: &[u8]) -> Result<PopulationCheckpoint, String> {
     let invalid = || "invalid binary checkpoint".to_string();
     if bytes.len() < 28 || &bytes[..8] != CHECKPOINT_MAGIC {
@@ -931,12 +988,12 @@ fn read_population(bytes: &[u8]) -> Result<PopulationCheckpoint, String> {
         .chunks_exact(8)
         .map(|p| f64::from_le_bytes(p.try_into().unwrap()))
         .collect();
-    Ok((
-        shape,
-        generation,
-        params,
-        (!rng.is_null()).then(|| TrainingRandom::from_json(&rng)),
-    ))
+    let rng = if rng.is_null() {
+        None
+    } else {
+        Some((TrainingRandom::from_json(&rng), rng_math(&rng)?))
+    };
+    Ok((shape, generation, params, rng))
 }
 
 /// Format 2, `ALTDCKP2`, little-endian: u32 words generation, tick,
@@ -947,7 +1004,7 @@ fn read_population(bytes: &[u8]) -> Result<PopulationCheckpoint, String> {
 /// mutation rate and weight decay; then the P parents' f64 parameters.
 /// Words 0 to 4 sit where format 1 has them.
 fn parent_bytes(generation: u64, tick: u64, l: &Lineage) -> Result<Vec<u8>, String> {
-    let rng = l.rng.to_json().to_string();
+    let rng = rng_json(&l.rng, l.math).to_string();
     let shape = &l.parents[0].shape;
     let b = &l.breeding;
     let crossover = CROSSOVERS
@@ -1079,6 +1136,7 @@ fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
             weight_decay,
         },
         rng: TrainingRandom::from_json(&rng),
+        math: rng_math(&rng)?,
     };
     lineage.validate()?;
     Ok((generation, lineage))
@@ -1102,6 +1160,7 @@ mod tests {
             1729,
             0,
             0,
+            crate::math::profile::MathProfile::Proton,
         )
         .unwrap()
         .1
@@ -1453,6 +1512,114 @@ mod tests {
         );
     }
 
+    /// Both RNG backends replay every profile through JSON, population and
+    /// parent checkpoints, and a mismatched restore leaves the session alone.
+    #[test]
+    fn checkpoints_preserve_profiles_and_reject_mismatches() {
+        for math in MathProfile::ALL {
+            for game_rng in [false, true] {
+                let options = serde_json::json!({
+                    "population": 6, "seed": 5, "mathProfile": math,
+                    "settings": {
+                        "selection_size": 3, "mutation_rate": 0.3,
+                        "adaptive_mutation": true, "weight_decay": 0.001,
+                    },
+                })
+                .to_string();
+                let mut source = generated_session(&options);
+                if game_rng {
+                    source.runner.rng = crate::training::game_random::GameRandom::new([1, 2, 3, 4], 12345).into();
+                }
+                source.start_with_shape(&[20, 8, 5]).unwrap();
+                source.advance_generation(90).unwrap();
+                source.next_generation().unwrap();
+                let json = source.checkpoint().unwrap();
+                assert_eq!(rng_math(&json["rng"]).unwrap(), math);
+                let parents = source.checkpoint_bytes().unwrap();
+                let mut from_json = generated_session(&options);
+                from_json.restore_checkpoint(&json).unwrap();
+                let population = from_json.checkpoint_bytes().unwrap();
+                assert_eq!(&parents[..8], PARENTS_MAGIC);
+                assert_eq!(&population[..8], CHECKPOINT_MAGIC);
+                let mut from_population = generated_session(&options);
+                from_population.restore_checkpoint_bytes(&population).unwrap();
+                let mut from_parents = generated_session(&options);
+                from_parents.restore_checkpoint_bytes(&parents).unwrap();
+                assert_eq!(from_population.checkpoint_bytes().unwrap(), population);
+                assert_eq!(from_parents.checkpoint_bytes().unwrap(), parents);
+                for session in [&from_json, &from_population, &from_parents] {
+                    assert_eq!(session.math_profile(), math);
+                    assert_eq!(session.checkpoint().unwrap(), json);
+                }
+                for other in MathProfile::ALL.into_iter().filter(|&p| p != math) {
+                    let mut wrong_options: Value = serde_json::from_str(&options).unwrap();
+                    wrong_options["mathProfile"] = serde_json::json!(other);
+                    let mut wrong = generated_session(&wrong_options.to_string());
+                    wrong.start_with_shape(&[20, 8, 5]).unwrap();
+                    let before = wrong.checkpoint_bytes().unwrap();
+                    let before_states = state_bits(&mut wrong);
+                    for bytes in [&parents, &population] {
+                        assert!(wrong
+                            .restore_checkpoint_bytes(bytes)
+                            .unwrap_err()
+                            .contains("math profile"));
+                    }
+                    assert!(wrong.restore_checkpoint(&json).unwrap_err().contains("math profile"));
+                    assert_eq!(wrong.checkpoint_bytes().unwrap(), before);
+                    assert_eq!(state_bits(&mut wrong), before_states);
+                }
+                for _ in 0..2 {
+                    source.advance_generation(90).unwrap();
+                    let states = state_bits(&mut source);
+                    source.next_generation().unwrap();
+                    let checkpoint = source.checkpoint_bytes().unwrap();
+                    for session in [&mut from_json, &mut from_population, &mut from_parents] {
+                        session.advance_generation(90).unwrap();
+                        assert_eq!(state_bits(session), states, "{math}, game RNG {game_rng}");
+                        session.next_generation().unwrap();
+                        assert_eq!(session.checkpoint_bytes().unwrap(), checkpoint);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Before profiles, a checkpoint could omit its RNG. That still means
+    /// Proton math, whether it is saved as JSON or in the population format.
+    #[test]
+    fn legacy_checkpoints_without_rng_keep_proton_math() {
+        let options = r#"{"population": 2, "mathProfile": "proton"}"#;
+        let mut source = generated_session(options);
+        source.start_with_shape(&[20, 8, 5]).unwrap();
+        let mut json = source.checkpoint().unwrap();
+        let mut full = generated_session(options);
+        full.restore_checkpoint(&json).unwrap();
+        let bytes = full.checkpoint_bytes().unwrap();
+        let rng_at = 28 + 4 * json["shape"].as_array().unwrap().len();
+        let rng_len = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
+        let data_at = (rng_at + rng_len).next_multiple_of(8);
+        let mut legacy = bytes[..rng_at].to_vec();
+        legacy[24..28].copy_from_slice(&4u32.to_le_bytes());
+        legacy.extend_from_slice(b"null");
+        legacy.resize(legacy.len().next_multiple_of(8), 0);
+        legacy.extend_from_slice(&bytes[data_at..]);
+        json["rng"] = Value::Null;
+        for math in MathProfile::ALL {
+            let mut target = generated_session(&serde_json::json!({"mathProfile": math}).to_string());
+            let json_result = target.restore_checkpoint(&json);
+            let bytes_result = target.restore_checkpoint_bytes(&legacy);
+            if math == MathProfile::Proton {
+                json_result.unwrap();
+                bytes_result.unwrap();
+                assert_eq!(target.runner.agents.len(), 2);
+            } else {
+                assert!(json_result.unwrap_err().contains("math profile"));
+                assert!(bytes_result.unwrap_err().contains("math profile"));
+                assert!(!target.started());
+            }
+        }
+    }
+
     /// Corrupt parent checkpoints are errors, never panics (a panic traps WASM).
     #[test]
     fn malformed_parent_checkpoints_are_rejected() {
@@ -1622,6 +1789,7 @@ mod tests {
             4242,
             0,
             0,
+            crate::math::profile::MathProfile::Proton,
         )
         .unwrap();
         for s in [&mut cpu, &mut gpu] {

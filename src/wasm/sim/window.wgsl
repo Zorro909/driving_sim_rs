@@ -72,6 +72,7 @@ fn forward_kernel(@builtin(workgroup_id) group:vec3<u32>, @builtin(local_invocat
  workgroupBarrier();
  if(enabled && j==0u){cars[i*800u+39u]=cars[i*800u+39u] | atomicLoad(&sensor_error);}
  var position=i*params.stride;
+ let math=load_World(params.world_offset).math_profile;
  for(var layer=0u;layer+1u<params.layers;layer=layer+1u){
   let rows=world_data[params.shape_offset+layer];
   let cols=world_data[params.shape_offset+layer+1u];
@@ -79,7 +80,7 @@ fn forward_kernel(@builtin(workgroup_id) group:vec3<u32>, @builtin(local_invocat
   if(enabled && j<cols){
    var sum=F64_ZERO;
    for(var r=0u;r<rows;r=r+1u){sum=f64_add(sum,f64_mul(layer_input[r],networks[position+r*cols+j]));}
-   output=game_tanh(f64_add(sum,networks[position+rows*cols+j]));
+   output=profile_tanh(math,f64_add(sum,networks[position+rows*cols+j]));
   }
   workgroupBarrier();
   layer_input[j]=output;

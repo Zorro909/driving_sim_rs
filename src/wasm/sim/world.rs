@@ -26,7 +26,7 @@ pub(super) fn encode_world(w: &WorldDesc) -> Result<Vec<u32>, String> {
         )
     }?;
     data[14] = w.path_points;
-    data[15] = w.pad0;
+    data[15] = w.math_profile;
     data[16] = unsafe { append_ptr(&mut data, w.path_segments, w.path_points.saturating_sub(1) as usize) }?;
     data[17] = unsafe { append_ptr(&mut data, w.path_offsets, w.path_points as usize) }?;
     let cells = (w.path_grid.nx as usize)

@@ -1,5 +1,6 @@
 //! The two independent random streams used by the shipped .NET 8 game.
 //! Exact replay requires both states: the game seeds them independently.
+use crate::math::profile::MathProfile;
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug)]
@@ -87,7 +88,8 @@ impl GameRandom {
         self.seed_array[self.inext] = value;
         value as f64 * (1.0 / i32::MAX as f64)
     }
-    pub fn normal_array(&mut self, count: usize, sigma: f64) -> Vec<f64> {
+    /// .NET's normal draws, whose Math.Log is the C runtime's `math.log`.
+    pub fn normal_array(&mut self, count: usize, sigma: f64, math: MathProfile) -> Vec<f64> {
         if count == 0 {
             return Vec::new();
         }
@@ -110,7 +112,7 @@ impl GameRandom {
             if s >= 1.0 || s == 0.0 {
                 continue;
             }
-            let factor = ((-2.0 * crate::math::double_math::log(s)) / s).sqrt();
+            let factor = ((-2.0 * math.log(s)) / s).sqrt();
             result.push(0.0 + sigma * (u * factor));
             if result.len() < count {
                 result.push(0.0 + sigma * (v * factor));

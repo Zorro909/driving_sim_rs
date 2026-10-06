@@ -387,6 +387,113 @@ fn f64_div(a: F64, b: F64) -> F64 {
     return f64_round_pack(sign, ez, U64(sz.x | select(0u, 1u, u64_nonzero(r)), sz.y));
 }
 
+// ---- fused multiply-add ----------------------------------------------------
+
+struct U128 {
+    lo: U64,
+    hi: U64,
+}
+
+fn u128_add(a: U128, b: U128) -> U128 {
+    let lo = u64_add(a.lo, b.lo);
+    return U128(lo, u64_add(u64_add(a.hi, b.hi), U64(select(0u, 1u, u64_lt(lo, a.lo)), 0u)));
+}
+fn u128_sub(a: U128, b: U128) -> U128 {
+    return U128(u64_sub(a.lo, b.lo), u64_sub(u64_sub(a.hi, b.hi), U64(select(0u, 1u, u64_lt(a.lo, b.lo)), 0u)));
+}
+fn u128_lt(a: U128, b: U128) -> bool { return u64_lt(a.hi, b.hi) || (u64_eq(a.hi, b.hi) && u64_lt(a.lo, b.lo)); }
+fn u128_clz(a: U128) -> u32 { return select(u64_clz(a.hi), 64u + u64_clz(a.lo), !u64_nonzero(a.hi)); }
+// Counts that wrap below zero are u64 shifts of 64 or more, which give zero.
+fn u128_shl(a: U128, n: u32) -> U128 {
+    return U128(u64_shl(a.lo, n), u64_shl(a.hi, n) | u64_shr(a.lo, 64u - n) | u64_shl(a.lo, n - 64u));
+}
+fn u128_shr_jam(a: U128, n: u32) -> U128 {
+    let z = U128(u64_shr(a.lo, n) | u64_shl(a.hi, 64u - n) | u64_shr(a.hi, n - 64u), u64_shr(a.hi, n));
+    let back = u128_shl(z, n);
+    let lost = !u64_eq(back.lo, a.lo) || !u64_eq(back.hi, a.hi);
+    return U128(U64(z.lo.x | select(0u, 1u, lost), z.lo.y), z.hi);
+}
+// a * b + c, rounded once (C fma, SoftFloat's f64_mulAdd). NaN operands
+// propagate in the order a, b, c; an infinite product with a zero factor, or
+// one added to the opposite infinity, gives the default NaN. The callers are
+// the Windows math kernels, which branch on uniform data far more than here.
+fn f64_fma(a: F64, b: F64, c: F64) -> F64 {
+    let sign_p = ((a.y ^ b.y) & F64_SIGN) != 0u;
+    let sign_c = f64_signbit(c);
+    var ea = f64_exp(a);
+    var eb = f64_exp(b);
+    var ec = f64_exp(c);
+    if (ea == 0x7ff || eb == 0x7ff || ec == 0x7ff) {
+        if (f64_isnan(a) || f64_isnan(b) || f64_isnan(c)) {
+            return f64_quiet(select(select(c, b, f64_isnan(b)), a, f64_isnan(a)));
+        }
+        if (ea == 0x7ff || eb == 0x7ff) {
+            if (f64_is_zero(a) || f64_is_zero(b) || (ec == 0x7ff && sign_c != sign_p)) { return F64_DEFAULT_NAN; }
+            return f64_inf(sign_p);
+        }
+        return c;
+    }
+    // An exact zero product adds as a signed zero; a zero c leaves the
+    // product, rounded once.
+    if (f64_is_zero(a) || f64_is_zero(b)) { return f64_add(f64_signed_zero(sign_p), c); }
+    if (f64_is_zero(c)) { return f64_mul(a, b); }
+    var ma = f64_frac(a);
+    var mb = f64_frac(b);
+    var mc = f64_frac(c);
+    if (ea == 0) {
+        let n = f64_norm_subnormal(ma);
+        ea = i32(n.x);
+        ma = n.yz;
+    }
+    if (eb == 0) {
+        let n = f64_norm_subnormal(mb);
+        eb = i32(n.x);
+        mb = n.yz;
+    }
+    if (ec == 0) {
+        let n = f64_norm_subnormal(mc);
+        ec = i32(n.x);
+        mc = n.yz;
+    }
+    // Both terms as 128-bit significands with the leading bit at 125, worth
+    // sig * 2^(e - 1148): the product exactly, c shifted up by 73.
+    let p = u64_mul_wide(u64_shl(U64(ma.x, ma.y | 0x100000u), 10u), u64_shl(U64(mb.x, mb.y | 0x100000u), 10u));
+    var wp = U128(p.xy, p.zw);
+    var e = ea + eb - 1022;
+    if (wp.hi.y < 0x20000000u) {
+        wp = u128_shl(wp, 1u);
+        e = e - 1;
+    }
+    var wc = U128(U64(0u, 0u), u64_shl(U64(mc.x, mc.y | 0x100000u), 9u));
+    // Align the smaller exponent with a sticky bit. Gaps of at most one shift
+    // out only zeros (both terms end in zero bits), so a difference with
+    // massive cancellation is exact; beyond that the sticky bit lies far below
+    // the rounding position.
+    let d = e - ec;
+    if (d >= 0) {
+        wc = u128_shr_jam(wc, u32(d));
+    } else {
+        wp = u128_shr_jam(wp, u32(-d));
+        e = ec;
+    }
+    var w: U128;
+    var sign = sign_p;
+    if (sign_p == sign_c) {
+        w = u128_add(wp, wc);
+    } else if (u128_lt(wp, wc)) {
+        w = u128_sub(wc, wp);
+        sign = sign_c;
+    } else {
+        w = u128_sub(wp, wc);
+    }
+    if (!u64_nonzero(w.lo) && !u64_nonzero(w.hi)) { return F64_ZERO; }
+    // Leading bit to 126: the top word then holds it at 62 for rounding.
+    let shift = u128_clz(w) - 1u;
+    w = u128_shl(w, shift);
+    e = e - i32(shift);
+    return f64_round_pack(sign, e, U64(w.hi.x | select(0u, 1u, u64_nonzero(w.lo)), w.hi.y));
+}
+
 // ---- comparisons (false for NaN operands) ---------------------------------
 
 fn f64_both_zero(a: F64, b: F64) -> bool { return ((a.x | b.x) | ((a.y | b.y) & 0x7fffffffu)) == 0u; }

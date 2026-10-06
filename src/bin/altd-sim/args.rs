@@ -1,6 +1,7 @@
 //! Argument parsing and values shared by the CLI commands.
 
 use super::io::load;
+use altd_sim::math::profile::MathProfile;
 use altd_sim::track::training_tracks::RandomTrainingTrackSettings;
 use altd_sim::training::evolution::RewardSpec;
 use altd_sim::training::Mode;
@@ -22,6 +23,12 @@ pub(super) struct Cli {
     /// cars advance one tick at a time like `TrainingRunner.step`.
     #[arg(long, global = true, value_enum, default_value_t = ModeArg::Independent)]
     pub(super) mode: ModeArg,
+    /// The C runtime math to reproduce: proton (Linux and macOS through
+    /// Proton), win10-fma3 (Windows 10, Windows 11 up to 23H2) or win11-fma3
+    /// (Windows 11 24H2 and later). Default: this machine's; train-scratch
+    /// --resume and --init-population keep the checkpoint's.
+    #[arg(long, global = true, value_name = "PROFILE")]
+    pub(super) math_profile: Option<MathProfile>,
     #[command(subcommand)]
     pub(super) command: Command,
 }
@@ -262,7 +269,7 @@ pub(super) enum Command {
         init_network: Option<PathBuf>,
         /// Continue another run's population: the checkpoint.json of a run with the same shape,
         /// e.g. from another simulator. Takes its networks, generation (mutation
-        /// schedule) and RNG; best laps start over.
+        /// schedule), RNG and math profile; best laps start over.
         #[arg(long, conflicts_with = "init_network")]
         init_population: Option<PathBuf>,
         #[arg(long, default_value_t = 2)]

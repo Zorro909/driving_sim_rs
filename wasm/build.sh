@@ -50,6 +50,33 @@ STAGING=$(mktemp -d "${TMPDIR:-/tmp}/altd-wasm.XXXXXX")
 trap 'rm -rf "$STAGING"' EXIT HUP INT TERM
 wasm-bindgen --target "$TARGET" --out-dir "$STAGING" --out-name altd_sim \
     "$BUILD_DIR/wasm32-unknown-unknown/$DIR/altd_sim.wasm"
+if [ "$TARGET" = web ]; then
+    # wasm-bindgen's start hook is synchronous even when Rust starts a future.
+    # Wait for Windows UA client hints in the asynchronous web initializer;
+    # keep initSync synchronous. Fail if a bindgen update changes this shape.
+    python3 - "$STAGING/altd_sim.js" "$THREADS" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+start = source.index('async function __wbg_init(')
+prefix, initializer = source[:start], source[start:]
+cached = '    if (wasm !== undefined) return wasm;'
+call = '__wbg_finalize_init(instance, module' + (', thread_stack_size' if sys.argv[2] == '1' else '') + ')'
+finish = '    return ' + call + ';'
+if initializer.count(cached) != 1 or initializer.count(finish) != 1:
+    raise SystemExit('Cannot add math profile detection: unexpected wasm-bindgen web initializer.')
+initializer = initializer.replace(cached, '''    if (wasm !== undefined) {
+        await detectMathProfile();
+        return wasm;
+    }''', 1)
+initializer = initializer.replace(finish, f'''    const exports = {call};
+    await detectMathProfile();
+    return exports;''', 1)
+path.write_text(prefix + initializer)
+PY
+fi
 OPTIMIZER=null
 if command -v wasm-opt >/dev/null 2>&1 && [ "$PROFILE" = release ]; then
     OPTIMIZER="\"$(wasm-opt --version)\""

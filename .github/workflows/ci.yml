@@ -29,6 +29,40 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  math-shaders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+      - name: Check generated math kernels and simulation shader
+        run: |
+          python3 -m pip install -r wasm/requirements-sim.txt
+          python3 tools/ucrt/gen-math.py --check
+          python3 gpu/gen_tables.py --check
+          python3 wasm/gen-sim.py --check
+      - uses: actions/cache@v4
+        with:
+          path: target/naga-cli
+          key: ${{ runner.os }}-naga-cli-30.0.1-rust-1.94.0
+      - name: Install the shader validator
+        run: |
+          if [ "$(target/naga-cli/bin/naga --version 2>/dev/null || true)" != "30.0.1" ]; then
+            cargo install naga-cli --version 30.0.1 --locked --root target/naga-cli
+          fi
+      - name: Validate complete and specialized shaders for every math profile
+        env:
+          NAGA: target/naga-cli/bin/naga
+        run: node wasm/test/validate-shader.mjs
+
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -212,11 +246,31 @@ jobs:
           # Hosted Ubuntu runners supply Chrome. CHROMIUM also allows local replay.
           export CHROMIUM="${CHROMIUM:-$(command -v google-chrome)}"
           test -x "$CHROMIUM"
+          NO_GPU=1 PAGE=math-profile-init.html node wasm/test/run.mjs
+          NO_GPU=1 PAGE=math-profile-init.html PACKAGE_BASE=target/wasm-thread-test/threads node wasm/test/run.mjs
           NO_GPU=1 node wasm/test/run.mjs
           for scenario in rally_asphalt rally_mixed rally_ice; do
             NO_GPU=1 SCENARIO="wasm/test/scenarios/$scenario.json" REFERENCE="wasm/test/scenarios/$scenario-reference.json" node wasm/test/run.mjs
           done
           NO_GPU=1 PAGE=threads.html THREADS=2 node wasm/test/run.mjs
+      - name: Compare browser CPU with native references for every math profile
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+        run: |
+          export CHROMIUM="${CHROMIUM:-$(command -v google-chrome)}"
+          mkdir -p target/math-profile-test
+          for profile in proton win10-fma3 win11-fma3; do
+            scenario="target/math-profile-test/scenario-$profile.json"
+            reference="target/math-profile-test/reference-$profile.json"
+            python3 -c 'import json,sys; s=json.load(open("wasm/test/scenario.json")); s["options"]["mathProfile"]=sys.argv[1]; json.dump(s,open(sys.argv[2],"w"))' "$profile" "$scenario"
+            cargo run --locked --release --example wasm_reference -- "$scenario" "$reference"
+            NO_GPU=1 SCENARIO="$scenario" REFERENCE="$reference" node wasm/test/run.mjs
+          done
+      - name: Compare software WebGPU arithmetic and captured profile fixtures
+        run: |
+          export CHROMIUM="${CHROMIUM:-$(command -v google-chrome)}"
+          GPU=software PAGE=f64.html node wasm/test/run.mjs
+          GPU=software PAGE=math-profiles.html node wasm/test/run.mjs
 
   docs:
     runs-on: ubuntu-latest

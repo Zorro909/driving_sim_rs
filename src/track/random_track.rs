@@ -1,5 +1,6 @@
 //! Original TrackFactory path search, surface assignment and block selection.
 //! Each generation takes its own .NET Xoshiro state, independent of reproduction.
+use crate::math::profile::MathProfile;
 use crate::training::game_random::GameRandom;
 use crate::{math::godot_math::F2, track::curve::Curve};
 use serde::{Deserialize, Serialize};
@@ -241,7 +242,7 @@ impl Connection {
     }
 }
 
-fn tangent_parameters(base: F2, delta: F2, own: usize, other: usize) -> (F2, f32) {
+fn tangent_parameters(base: F2, delta: F2, own: usize, other: usize, math: MathProfile) -> (F2, f32) {
     let smoothness = if matches!(own, 0 | 2 | 100) && matches!(other, 1 | 3 | 4) {
         0.2
     } else {
@@ -249,8 +250,8 @@ fn tangent_parameters(base: F2, delta: F2, own: usize, other: usize) -> (F2, f32
     };
     let angle = match own {
         1 => std::f32::consts::PI / 4.0,
-        3 => crate::math::native_math::atan2(128.0, 384.0),
-        4 => crate::math::native_math::atan2(384.0, 128.0),
+        3 => math.atan2(128.0, 384.0),
+        4 => math.atan2(384.0, 128.0),
         _ => return (base, smoothness),
     };
     let cross = base.cross(delta);
@@ -270,7 +271,7 @@ fn vector_json(value: F2) -> Value {
 
 impl GeneratedTrack {
     /// Original TrackUtils.GetPathCurve control points, before native baking.
-    pub fn curve_controls(&self) -> Value {
+    pub fn curve_controls(&self, math: MathProfile) -> Value {
         let mut position = self.start;
         let mut connection = self.connection;
         let mut points = Vec::new();
@@ -306,8 +307,8 @@ impl GeneratedTrack {
             let next = points[(i + 1) % points.len()];
             let incoming_distance = (position - previous.0).length();
             let outgoing_distance = (position - next.0).length();
-            let (outgoing, out_smoothness) = tangent_parameters(normal, next.0 - position, kind, next.2);
-            let (incoming, in_smoothness) = tangent_parameters(-normal, previous.0 - position, kind, previous.2);
+            let (outgoing, out_smoothness) = tangent_parameters(normal, next.0 - position, kind, next.2, math);
+            let (incoming, in_smoothness) = tangent_parameters(-normal, previous.0 - position, kind, previous.2, math);
             controls.push(json!({
                 "position":vector_json(position),
                 "incoming":vector_json((incoming * incoming_distance) * in_smoothness),
@@ -320,9 +321,9 @@ impl GeneratedTrack {
 
     /// Build the complete scene consumed by World using original TileSet resources.
     /// Vehicle and space settings come from the supplied scene template.
-    pub fn to_scene(&self, template: &Value) -> Value {
-        let controls = self.curve_controls();
-        let curve = Curve::from_json(&controls);
+    pub fn to_scene(&self, template: &Value, math: MathProfile) -> Value {
+        let controls = self.curve_controls(math);
+        let curve = Curve::from_json(&controls, math);
         let mut tiles = Vec::new();
         let mut polygons = Vec::new();
         let mut shapes = Vec::new();
@@ -376,7 +377,7 @@ impl GeneratedTrack {
             tree.collect(&mut walls);
         }
         let direction = curve.direction(0.0);
-        let rotation = crate::math::native_math::atan2(direction.y, direction.x) + std::f32::consts::PI / 2.0;
+        let rotation = math.atan2(direction.y, direction.x) + std::f32::consts::PI / 2.0;
         let mut scene = template.clone();
         scene["reset_position"] = vector_json(curve.position(0.0));
         scene["reset_rotation"] = json!(rotation as f64);
@@ -798,8 +799,8 @@ pub fn place_tile_map(scene: &mut Value, position: [i32; 2]) {
 
 /// A saved game track as a training scene for independent cars, using the
 /// vehicle and physics of `template`.
-pub fn saved_track_scene(saved: &Value, name: &str, template: &Value) -> Result<Value, String> {
-    let mut scene = GeneratedTrack::from_saved(saved, name)?.to_scene(template);
+pub fn saved_track_scene(saved: &Value, name: &str, template: &Value, math: MathProfile) -> Result<Value, String> {
+    let mut scene = GeneratedTrack::from_saved(saved, name)?.to_scene(template, math);
     place_tile_map(&mut scene, GAME_TILE_MAP_POSITION);
     scene["track"]["native_broadphase"] = Value::Bool(false);
     Ok(scene)
@@ -861,7 +862,7 @@ mod saved_tests {
             (parsed.start, parsed.connection, &parsed.tiles),
             (track.start, track.connection, &track.tiles)
         );
-        let scene = saved_track_scene(&file, "test", &json!({"vehicle":{},"physics":{}})).unwrap();
+        let scene = saved_track_scene(&file, "test", &json!({"vehicle":{},"physics":{}}), MathProfile::Proton).unwrap();
         assert_eq!(scene["track"]["tile_map_position"], json!(GAME_TILE_MAP_POSITION));
         assert_eq!(scene["track"]["native_broadphase"], json!(false));
         let shape = &scene["track"]["physics_shapes"][0];

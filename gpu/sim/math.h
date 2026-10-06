@@ -493,4 +493,48 @@ __device__ inline double game_tanh(double value) {
 #endif
 }
 
+// ---- math profiles (crate::math::profile) ----------------------------------
+// The Windows UCRT functions of math/kernels/ucrt.h. World::math_profile picks a
+// profile for the whole simulation, so the branches below never diverge.
+
+#define ALTD_MATH_FN __device__ inline
+#define ALTD_MATH_TABLE __device__ constexpr
+#define ALTD_MATH_CONST constexpr
+#include "../../math/kernels/ucrt.h"
+
+// MathProfile::index.
+enum : uint32_t { MATH_PROTON = 0, MATH_WIN10_FMA3 = 1, MATH_WIN11_FMA3 = 2 };
+
+// sinf and cosf are musl's with the Windows exceptions. Inputs beyond
+// WIN_TRIG_LIMIT are flagged by the musl reduction already.
+__device__ inline float profile_sin(uint32_t math, float x, uint32_t& err) {
+    float musl = native_sin(x, err);
+    return math == MATH_PROTON ? musl : win_sinf_fix(x, musl);
+}
+__device__ inline float profile_cos(uint32_t math, float x, uint32_t& err) {
+    float musl = native_cos(x, err);
+    return math == MATH_PROTON ? musl : win_cosf_fix(x, musl);
+}
+// The profile is uniform, so these branch rather than select (WGSL's select
+// evaluates both operands).
+__device__ inline float profile_atan2(uint32_t math, float y, float x) {
+    if (math == MATH_PROTON) return native_atan2(y, x);
+    return win_atan2f(y, x);
+}
+__device__ inline double profile_exp(uint32_t math, double x) {
+    if (math == MATH_PROTON) return dexp(x);
+    if (math == MATH_WIN10_FMA3) return win10_exp(x);
+    return win11_exp(x);
+}
+__device__ inline double profile_pow(uint32_t math, double x, double y) {
+    if (math == MATH_PROTON) return dpow(x, y);
+    if (math == MATH_WIN10_FMA3) return win10_pow(x, y);
+    return win11_pow(x, y);
+}
+__device__ inline double profile_tanh(uint32_t math, double x) {
+    if (math == MATH_PROTON) return game_tanh(x);
+    if (math == MATH_WIN10_FMA3) return win10_tanh(x);
+    return win11_tanh(x);
+}
+
 }  // namespace altd

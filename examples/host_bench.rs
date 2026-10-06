@@ -46,7 +46,7 @@ fn main() {
         world.clone(),
         altd_sim::track::world::vector(&scene["reset_position"]),
         scene["reset_rotation"].as_f64().unwrap(),
-        SensorLayout::from_exports(&template, &model),
+        SensorLayout::from_exports(&template, &model, altd_sim::math::profile::MathProfile::Proton),
         &outputs,
         settings,
         rng,
@@ -119,7 +119,9 @@ fn main() {
         // Reproduction and installation make up the CPU turnover.
         let t = Instant::now();
         let results: Vec<_> = runner.agents.iter().map(|a| a.result()).collect();
-        let generation = runner.rng.reproduce(&results, &runner.settings);
+        let generation = runner
+            .rng
+            .reproduce(&results, &runner.settings, altd_sim::math::profile::MathProfile::Proton);
         let reproduce = t.elapsed().as_secs_f64();
         std::hint::black_box(&generation.networks);
         drop(generation);
