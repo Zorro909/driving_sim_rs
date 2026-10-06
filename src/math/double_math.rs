@@ -55,6 +55,9 @@ fn exp_inner(x: f64, xtail: f64, negative: bool) -> f64 {
     scale + scale * tmp
 }
 pub fn exp(x: f64) -> f64 {
+    if super::windows_libm() {
+        return super::ucrt_math::exp(x);
+    }
     if x.is_nan() {
         return x;
     }
@@ -108,6 +111,9 @@ fn integer_kind(bits: u64) -> u32 {
     }
 }
 pub fn pow(x: f64, y: f64) -> f64 {
+    if super::windows_libm() {
+        return super::ucrt_math::pow(x, y);
+    }
     let mut ix = x.to_bits();
     let iy = y.to_bits();
     let mut topx = (ix >> 52) as u32;
@@ -175,6 +181,9 @@ pub fn pow(x: f64, y: f64) -> f64 {
     exp_inner(ehi, elo, negative)
 }
 pub fn log(x: f64) -> f64 {
+    if super::windows_libm() {
+        return super::ucrt_math::log(x);
+    }
     let mut ix = x.to_bits();
     if ix.wrapping_sub(0.9375f64.to_bits()) < (1.064697265625f64.to_bits() - 0.9375f64.to_bits()) {
         if x == 1.0 {

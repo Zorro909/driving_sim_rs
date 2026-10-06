@@ -178,7 +178,7 @@ impl Network {
     /// where `sum` follows the game's managed MathNet accumulation order.
     pub fn forward_into<'a>(&self, inputs: &[f64], scratch: &'a mut ForwardScratch) -> &'a [f64] {
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx2") {
+        if !crate::math::windows_libm() && std::is_x86_feature_detected!("avx2") {
             assert_eq!(
                 inputs.len(),
                 self.shape[0],
@@ -326,8 +326,12 @@ pub(crate) fn game_expm1(mut x: f64) -> f64 {
     }
 }
 
-/// Windows .NET 8.0.2 Math.Tanh under the game's Proton runtime.
+/// Windows .NET 8.0.2 Math.Tanh under the game's Proton runtime, or the Windows UCRT's `tanh`
+/// with [`crate::math::Libm::Windows`].
 pub fn game_tanh(value: f64) -> f64 {
+    if crate::math::windows_libm() {
+        return crate::math::ucrt_math::tanh(value);
+    }
     let x = value.abs();
     let high = (x.to_bits() >> 32) as u32;
     let t = if high > 0x3fe193ea {

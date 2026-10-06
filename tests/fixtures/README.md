@@ -88,3 +88,11 @@ checks scene conversion and curve baking. It is current-code generated input.
 
 Fixture JSON is parsed with the crate's round-trip float parser. Keep numeric
 values and array order intact when editing provenance text or adding coverage.
+
+`ucrt_vectors.json` holds inputs and results recorded from the live Windows
+`ucrtbase.dll` (sinf, cosf, atan2f, exp, tanh, pow, as hex bit patterns), including
+special values and NaN payloads. `tests/ucrt_math.rs` replays them against
+`src/math/ucrt_math.rs`; `cargo run --release --example ucrt_probe -- --export
+tests/fixtures/ucrt_vectors.json` rewrites them on Windows. They are not captures
+of the game: the `windows_*` captures above come from the game under Proton and
+match the default `proton` math, not the Windows UCRT.

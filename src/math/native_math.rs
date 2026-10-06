@@ -60,6 +60,9 @@ pub(crate) fn nonfinite_trig_result(value: f32) -> f32 {
 }
 
 pub fn sin(x: f32) -> f32 {
+    if super::windows_libm() {
+        return super::ucrt_math::sinf(x);
+    }
     let bits = x.to_bits() & 0x7fffffff;
     let negative = x.is_sign_negative();
     let a = x as f64;
@@ -99,6 +102,9 @@ pub fn sin(x: f32) -> f32 {
     }
 }
 pub fn cos(x: f32) -> f32 {
+    if super::windows_libm() {
+        return super::ucrt_math::cosf(x);
+    }
     let bits = x.to_bits() & 0x7fffffff;
     let negative = x.is_sign_negative();
     let a = x as f64;
@@ -187,6 +193,9 @@ fn atan(mut x: f32) -> f32 {
 }
 
 pub fn atan2(y: f32, x: f32) -> f32 {
+    if super::windows_libm() {
+        return super::ucrt_math::atan2f(y, x);
+    }
     let pi = std::f32::consts::PI;
     let pi_lo = f32::from_bits(0xb3bbbd2e);
     if x.is_nan() || y.is_nan() {
