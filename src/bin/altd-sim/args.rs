@@ -380,8 +380,8 @@ pub(super) enum Command {
         #[arg(long = "allow-origin", value_name = "ORIGIN", value_parser = altd_sim::server::protocol::normalize_origin)]
         allow_origin: Vec<String>,
     },
-    /// Load the HIP simulator library used by --gpu and check that it matches this binary.
-    /// Needs a ROCm runtime but no GPU.
+    /// Load the GPU simulator library used by --gpu and check that it matches this binary.
+    /// Needs the GPU runtime (ROCm on AMD, the driver on NVIDIA) but no GPU.
     GpuInfo {
         /// Library path (default: ALTD_GPU_LIB, then beside the executable, then target/gpu).
         #[arg(long)]
