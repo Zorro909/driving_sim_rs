@@ -1,6 +1,6 @@
 # CLI reference
 
-Run commands from the repository root or an unpacked release archive; both contain `assets/`. `altd-sim --version` identifies the build, including nightly packages. `--threads N` sets the Rayon pool; the default respects CPU affinity. `--mode independent|lockstep` selects native scheduling. Both are global flags. Each command's `--help` is the complete argument reference.
+Run commands from the repository root or an unpacked release archive; both contain `assets/`. `altd-sim --version` identifies the build, including nightly packages. `--threads N` sets the Rayon pool; the default respects CPU affinity. `--mode independent|lockstep` selects native scheduling. `--libm proton|windows` (or `ALTD_LIBM`) selects the C runtime math that the simulated game uses; see [fidelity](fidelity.md#math-flavours). All three are global flags. Each command's `--help` is the complete argument reference.
 
 ## Commands and inputs
 
@@ -44,7 +44,7 @@ target/release/altd-sim --threads 8 serve --port 47800
 target/release/altd-sim serve --allow-origin http://127.0.0.1:5173
 ```
 
-`serve` binds `127.0.0.1` only and defaults to port 47800. Repeat `--allow-origin` to replace the default `https://drivinglab.jectrum.de` allowlist. The shared Rayon pool uses the global `--threads` flag. The server prints its address, allowed origins, thread count and HIP availability. It is included by the default `server` feature. See [the server protocol](server.md) for handshake checks, session operations, binary frames and resume behavior. Drive Lab client integration is a separate change.
+`serve` binds `127.0.0.1` only and defaults to port 47800. Repeat `--allow-origin` to replace the default `https://drivinglab.jectrum.de` allowlist. The shared Rayon pool uses the global `--threads` flag. The server prints its address, allowed origins, thread count and HIP availability. It prints the active math flavour too. It is included by the default `server` feature. See [the server protocol](server.md) for handshake checks, session operations, binary frames and resume behavior. Drive Lab client integration is a separate change.
 
 ## Scratch training
 

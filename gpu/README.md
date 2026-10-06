@@ -48,6 +48,10 @@ gpu/build-cuda.ps1                 # Windows, writes target/gpu/altd_gpu.dll
 
 The CPU/GPU checks above pass on an RTX 4070 Laptop (sm_89, Windows, CUDA 13.4) and `train-scratch --gpu` checkpoints are byte-identical to the CPU's. The Linux build script and other GPU generations are untested. Consumer NVIDIA GPUs run float64 at 1/64 of their float32 rate, which bounds the network forward pass. A Windows GPU that drives a display kills kernels that run for more than a couple of seconds; the windowed launches stay well below that in the checks above.
 
+## Math flavours
+
+`--libm windows` (or `ALTD_LIBM=windows`) makes the CPU and the GPU use the Windows UCRT's `sinf`, `cosf`, `atan2f`, `exp`, `pow` and `tanh` instead of the Proton/musl ones; see [fidelity](../docs/fidelity.md#math-flavours). The binary tells the library through `altd_gpu_set_libm` before it creates a simulator, so no rebuild or second library is needed. A library without that function still works for the default flavour. `ALTD_LIBM=windows target/release/examples/gpu_check` runs every check with the Windows math. `gen_tables.py` generates `sim/ucrt_tables.h` from `src/math/ucrt_tables.rs` next to `sim/double_tables.h`, and `sim/ucrt_math.h` is the device port of `src/math/ucrt_math.rs`; change them together.
+
 ## Execution model
 
 GPU driving uses tick-major execution for independent cars. Native shared broadphase and paused windows are unsupported. Generated CLI tracks disable shared broadphase. Track preparation runs on a CPU producer with a bounded queue; `--track-buffer-size` sets its depth, default eight. Population/network buffers stay allocated while each fresh track replaces geometry.
