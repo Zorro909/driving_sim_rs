@@ -159,6 +159,22 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
         .count(if config.resume { checkpoint.as_ref() } else { None });
     run["tracks_per_generation"] = json!(track_count);
     run["track_seed_version"] = json!(2);
+    let libm = altd_sim::math::libm().name();
+    if config.resume {
+        // Runs made before --libm existed used the Proton math.
+        let saved = std::fs::read(dir.join("run.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|saved| saved["libm"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "proton".into());
+        assert_eq!(
+            saved,
+            libm,
+            "--resume: {} was made with the {saved} math; pass --libm {saved}",
+            dir.display()
+        );
+    }
+    run["libm"] = json!(libm);
     let started = Instant::now();
     let restored_meta = if config.resume {
         checkpoint.as_ref()

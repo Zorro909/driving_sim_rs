@@ -22,6 +22,10 @@ fn main() {
     } else {
         args.iter().map(String::as_str).collect()
     };
+    // ALTD_LIBM=windows checks the Windows UCRT math on the CPU and the GPU.
+    if let Some(libm) = altd_sim::math::libm_from_env().unwrap_or_else(|e| panic!("{e}")) {
+        altd_sim::math::set_libm(libm).unwrap_or_else(|e| panic!("{e}"));
+    }
     let gpu = Gpu::open(None).unwrap_or_else(|e| panic!("{e}"));
     let mut ok = true;
     for part in parts {

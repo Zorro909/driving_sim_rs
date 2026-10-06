@@ -29,6 +29,22 @@ use std::sync::Arc;
 
 fn main() {
     let cli = Cli::parse();
+    let libm = match cli
+        .libm
+        .map(Into::into)
+        .map(Some)
+        .map_or_else(altd_sim::math::libm_from_env, Ok)
+    {
+        Ok(libm) => libm.unwrap_or(altd_sim::math::Libm::Proton),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = altd_sim::math::set_libm(libm) {
+        eprintln!("--libm {}: {e}", libm.name());
+        std::process::exit(2);
+    }
     let mut pool = rayon::ThreadPoolBuilder::new();
     if let Some(threads) = cli.threads {
         pool = pool.num_threads(threads);
@@ -333,6 +349,7 @@ fn serve(port: u16, allow_origin: Vec<String>, threads: usize) {
     eprintln!("altd-sim serve: listening on ws://{address}{PATH}");
     eprintln!("  allowed origins: {}", origins.join(", "));
     eprintln!("  CPU threads: {threads}");
+    eprintln!("  math: {}", altd_sim::math::libm().name());
     eprintln!("  HIP: {hip}");
     if let Err(e) = server.run() {
         eprintln!("altd-sim serve: {e}");

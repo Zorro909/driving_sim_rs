@@ -22,8 +22,28 @@ pub(super) struct Cli {
     /// cars advance one tick at a time like `TrainingRunner.step`.
     #[arg(long, global = true, value_enum, default_value_t = ModeArg::Independent)]
     pub(super) mode: ModeArg,
+    /// C runtime math of the game under simulation: `proton` (the Proton/Wine UCRT, the default) or
+    /// `windows` (the Windows UCRT; needs a Windows MSVC build). Results differ in the last bits, so
+    /// a resumed run keeps the choice it started with. ALTD_LIBM sets the default.
+    #[arg(long, global = true, value_enum)]
+    pub(super) libm: Option<LibmArg>,
     #[command(subcommand)]
     pub(super) command: Command,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum LibmArg {
+    Proton,
+    Windows,
+}
+
+impl From<LibmArg> for altd_sim::math::Libm {
+    fn from(arg: LibmArg) -> Self {
+        match arg {
+            LibmArg::Proton => altd_sim::math::Libm::Proton,
+            LibmArg::Windows => altd_sim::math::Libm::Windows,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
