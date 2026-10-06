@@ -91,6 +91,8 @@ device.destroy();
 
 Await GPU windows before changing the Session. A failed window retains the last committed WASM state for CPU continuation. Full GPU simulation rejects paused physics and native shared broadphase; it supports layer widths and input counts up to 64 and requires Curve2D control points for path sensors. Run device verification on each browser/adapter. [WASM fidelity](../docs/wasm.md) records device arithmetic limits; [performance](../docs/performance.md) distinguishes CPU worker scaling from WebGPU timings.
 
+Pending GPU completion and readback waits prompt Firefox's completion polling with empty queue submissions every 4 ms. The timer exists only while the original operation is pending, adds no simulation commands, and stops after completion, device loss or a submission exception. This avoids the fixed callback delays that can hold six-tick windows near 30 ticks/s. Rebuild both WASM packages and reload existing app workers to use the updated runtime.
+
 ## Browser checks
 
 Install Playwright with Chromium, locally or globally. The runner serves this repository with isolation headers and exits nonzero on comparison failures.
@@ -102,15 +104,18 @@ GPU=hardware node wasm/test/run.mjs
 PAGE=f64.html node wasm/test/run.mjs
 PAGE=math-profiles.html GPU=software node wasm/test/run.mjs
 PAGE=math-profiles.html GPU=hardware node wasm/test/run.mjs
+node --test wasm/test/runtime-waits.mjs
+BROWSER=firefox FIREFOX=/usr/bin/firefox PAGE=bench.html \
+  POPULATION=32 TICKS=120 STEP=6 KEEP_ALIVE=1 node wasm/test/run.mjs
 for track in rally_asphalt rally_mixed rally_ice; do
   NO_GPU=1 SCENARIO="wasm/test/scenarios/$track.json" \
     REFERENCE="wasm/test/scenarios/$track-reference.json" node wasm/test/run.mjs
 done
 ```
 
-`GPU=software` is the default and selects SwiftShader. `GPU=hardware` requires a physical Vulkan adapter and reports its identity. `NO_GPU=1` explicitly skips device checks. `CHROMIUM` selects an executable; `VERIFY_RAYS`, `VERIFY_POINTS`, `VERIFY_SEED` and `TICK_CHECK` expand ray/tick coverage. `PAGE=full-sim.html VERIFY_SIM=1 GPU=hardware` checks full GPU simulation. Shader validation can run without a GPU using Naga 30.0.1 and `node wasm/test/validate-shader.mjs`; `NAGA` selects its executable.
+`GPU=software` is the Chromium default and selects SwiftShader. `GPU=hardware` uses the physical Vulkan adapter; Chromium reports its identity. `BROWSER=firefox` defaults to hardware and enables WebGPU preferences; `FIREFOX` selects a native executable through WebDriver BiDi, otherwise the runner uses Playwright Firefox. Firefox does not support the SwiftShader mode. `NO_GPU=1` explicitly skips device checks. `CHROMIUM` selects a Chromium executable; `VERIFY_RAYS`, `VERIFY_POINTS`, `VERIFY_SEED` and `TICK_CHECK` expand ray/tick coverage. `PAGE=full-sim.html VERIFY_SIM=1 GPU=hardware` checks full GPU simulation. Shader validation can run without a GPU using Naga 30.0.1 and `node wasm/test/validate-shader.mjs`; `NAGA` selects its executable.
 
-The shader validator checks the complete modules and every simulation entry point under all three profiles. `PAGE=math-profile-init.html` tests default detection with delayed, rejected and unavailable browser hints; `PACKAGE_BASE` selects a threaded package for the same cases. `PAGE=f64.html` tests the software binary64 operations, including fused multiply-add, against exact references. `PAGE=math-profiles.html` compares device `atan2f`, `exp`, `pow` and `tanh` directly with the captured fixture bits for every profile. Full simulation on SwiftShader can stall during compilation of the network forward pipeline; the same limitation was reproduced on the PR#11 baseline with Chromium 151 and 153. Use a physical adapter for full simulation parity. This does not affect the CPU-only, raycaster or binary64 primitive checks.
+The shader validator checks the complete modules and every simulation entry point under all three profiles. `node --test wasm/test/runtime-waits.mjs` exercises the public runtime against a device that delivers completions only when polled, checking progress, command order, snapshot bits, concurrency and cleanup without a browser or GPU. `PAGE=bench.html` separates wall time, mapping waits and per-kernel timestamp measurements; its `wallMs` gives throughput as `1000 * ticks / wallMs`. `PAGE=math-profile-init.html` tests default detection with delayed, rejected and unavailable browser hints; `PACKAGE_BASE` selects a threaded package for the same cases. `PAGE=f64.html` tests the software binary64 operations, including fused multiply-add, against exact references. `PAGE=math-profiles.html` compares device `atan2f`, `exp`, `pow` and `tanh` directly with the captured fixture bits for every profile. Full simulation on SwiftShader can stall during compilation of the network forward pipeline; the same limitation was reproduced on the PR#11 baseline with Chromium 151 and 153. Use a physical adapter for full simulation parity. This does not affect the CPU-only, raycaster or binary64 primitive checks.
 
 ```sh
 cargo run --release --offline --example wasm_reference -- wasm/test/scenario.json target/native-reference.json

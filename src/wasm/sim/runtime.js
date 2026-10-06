@@ -141,6 +141,29 @@ class Simulator {
       throw new Error("GPU load must be in (0, 1]");
     this.load = load;
   }
+  async waitForGpu(completion) {
+    // Firefox can defer completion callbacks to its next maintenance poll.
+    // Empty submissions prompt polling without dispatching simulation work.
+    // Only pending waits need the timer; fast completions cancel it first.
+    const timer = setInterval(() => {
+      if (this.lost) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        this.device.queue.submit([]);
+      } catch {
+        // Retain the original operation: a pending map must settle before
+        // the window releases its busy flag or reuses the readback buffer.
+        clearInterval(timer);
+      }
+    }, MIN_IDLE_MS);
+    try {
+      return await completion;
+    } finally {
+      clearInterval(timer);
+    }
+  }
   buffer(size, usage) {
     if (
       size > this.device.limits.maxBufferSize ||
@@ -314,20 +337,21 @@ class Simulator {
         if (last === ticks) break;
         // Bound the queued submissions.
         queued.push(this.device.queue.onSubmittedWorkDone());
-        if (queued.length > QUEUED_SUBMISSIONS) await queued.shift();
+        if (queued.length > QUEUED_SUBMISSIONS)
+          await this.waitForGpu(queued.shift());
         const owed =
           ((performance.now() - started - idle) * (1 - this.load)) /
             this.load -
           idle;
         if (owed >= MIN_IDLE_MS) {
-          await queued.at(-1);
+          await this.waitForGpu(queued.at(-1));
           queued.length = 0;
           const t = performance.now();
           await new Promise((resolve) => setTimeout(resolve, owed));
           idle += performance.now() - t;
         }
       }
-      await this.readback.mapAsync(GPUMapMode.READ);
+      await this.waitForGpu(this.readback.mapAsync(GPUMapMode.READ));
       const busy = performance.now() - started - idle;
       this.tickMs =
         (this.tickMs + Math.min(50, Math.max(0.05, busy / ticks))) / 2;

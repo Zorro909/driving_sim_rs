@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Runs wasm/test/index.html in headless Chromium: serves the repository root
+// Runs wasm/test/index.html in a headless browser: serves the repository root
 // on a local port and prints the page's report. Exits 1 on any mismatch.
 // Needs wasm/pkg (wasm/build.sh), wasm/test/reference.json
 // (cargo run --release --example wasm_reference -- --generate-fixtures) and Playwright with its
 // Chromium (npm i -g playwright && npx playwright install chromium).
 // CHROMIUM=/path/to/chrome overrides the browser; GPU=hardware uses Vulkan
 // and rejects software adapters, GPU=software selects SwiftShader (default).
+// BROWSER=firefox uses Playwright Firefox; FIREFOX=/usr/bin/firefox selects
+// native Firefox through WebDriver BiDi and enables its WebGPU preferences.
 // NO_GPU=1 runs only the CPU comparison. PAGE=f64.html runs the soft-float
 // unit test (wasm/test/f64.html) instead of the simulator comparison.
 import { createServer } from 'node:http';
@@ -49,8 +51,10 @@ const port = server.address().port;
 const browserType = process.env.BROWSER || 'chromium';
 const browserLauncher = loadPlaywright()[browserType];
 if (!browserLauncher) throw new Error(`unknown browser: ${browserType}`);
-const gpuMode = process.env.NO_GPU ? 'none' : process.env.GPU || 'software';
+const gpuMode = process.env.NO_GPU ? 'none' : process.env.GPU || (browserType === 'firefox' ? 'hardware' : 'software');
 if (!['none', 'hardware', 'software'].includes(gpuMode)) throw new Error(`unknown GPU mode: ${gpuMode}`);
+if (browserType === 'firefox' && gpuMode === 'software')
+    throw new Error('Firefox supports GPU=hardware or NO_GPU=1; SwiftShader requires Chromium');
 const args = gpuMode === 'none' ? [] : [
     '--enable-unsafe-webgpu', '--enable-blink-features=WebGPU', '--ignore-gpu-blocklist',
     '--enable-features=Vulkan',
@@ -58,7 +62,18 @@ const args = gpuMode === 'none' ? [] : [
         ? ['--use-angle=vulkan', '--disable-vulkan-surface', '--enable-webgpu-developer-features']
         : ['--enable-unsafe-swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader']),
 ];
-const browser = await browserLauncher.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, args: browserType === 'chromium' ? args : [] });
+const firefox = browserType === 'firefox';
+const browser = await browserLauncher.launch({
+    headless: true,
+    executablePath: firefox ? process.env.FIREFOX || undefined : process.env.CHROMIUM || undefined,
+    ...(firefox && process.env.FIREFOX ? { channel: 'moz-firefox' } : {}),
+    ...(firefox ? { firefoxUserPrefs: {
+        'dom.webgpu.enabled': true,
+        'gfx.webgpu.ignore-blocklist': true,
+        'dom.webgpu.allow-in-parent': true,
+    } } : {}),
+    args: browserType === 'chromium' ? args : [],
+});
 let report;
 try {
     const page = await browser.newPage();
@@ -94,7 +109,7 @@ try {
     report = await page.evaluate(() => window.altdReport);
     report.browser = browser.version();
     report.gpuMode = gpuMode;
-    if (gpuMode === 'hardware') {
+    if (gpuMode === 'hardware' && browserType === 'chromium') {
         const cdp = await browser.newBrowserCDPSession();
         const { gpu } = await cdp.send('SystemInfo.getInfo');
         report.hardware = { devices: gpu.devices, renderer: gpu.auxAttributes.glRenderer };

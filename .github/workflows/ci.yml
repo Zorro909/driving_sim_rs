@@ -194,6 +194,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Check WebGPU completion waits without a browser
+        run: node --test wasm/test/runtime-waits.mjs
       - name: Read the locked wasm-bindgen version
         id: bindgen
         run: echo "version=$(wasm/bindgen-version.sh)" >> "$GITHUB_OUTPUT"
