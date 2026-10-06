@@ -39,7 +39,7 @@ There is no LAN binding, TLS or authentication token. These checks restrict brow
 The first frame is a JSON text greeting:
 
 ```json
-{"type":"hello","protocol":1,"version":"1.0.0","threads":8,"carStateStride":14,"carStateFields":["x","y","..."],"hip":{"available":true,"device":"AMD Radeon RX 7900 XTX","platform":"HIP"},"mathProfile":"proton","mathProfiles":["proton","win10-fma3","win11-fma3"]}
+{"type":"hello","protocol":1,"version":"1.1.0","threads":8,"carStateStride":14,"carStateFields":["x","y","..."],"hip":{"available":true,"device":"AMD Radeon RX 7900 XTX","platform":"HIP"},"mathProfile":"proton","mathProfiles":["proton","win10-fma3","win11-fma3"]}
 ```
 
 Read `carStateStride` and `carStateFields` from the greeting rather than hard-coding them. The example's fields are abbreviated. `platform` is `"HIP"` for the AMD library and `"CUDA"` for the NVIDIA one. When HIP is unavailable, `hip` instead contains `{"available":false,"reason":"..."}`. Availability means the process opened the library and device; a particular session can still fall back to CPU. `mathProfile` is the default math profile and `mathProfiles` lists every profile a session can choose; [math profiles](../math/README.md) documents their runtime variants.
