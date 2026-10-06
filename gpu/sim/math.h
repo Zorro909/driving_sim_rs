@@ -119,13 +119,7 @@ __device__ inline float native_atan(float x) {
 __device__ inline float native_atan2(float y, float x) {
     const float pi = 3.14159274101257324f;
     const float pi_lo = ffrom(0xb3bbbd2eu);
-    if (isnan(x) || isnan(y)) {
-#ifdef __CUDACC__
-        return altd_nan_operand(y, x);  // the CPU build of `x + y` returns y when both are NaN
-#else
-        return x + y;
-#endif
-    }
+    if (isnan(x) || isnan(y)) return altd_nan_operand(y, x);  // the CPU's `x + y` returns y when both are NaN
     uint32_t ix = fbits(x), iy = fbits(y);
     if (ix == 0x3f800000u) return native_atan(y);
     uint32_t m = ((iy >> 31) & 1u) | ((ix >> 30) & 2u);

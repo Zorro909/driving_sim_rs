@@ -31,7 +31,7 @@ pub fn library_candidates(explicit: Option<&Path>, env: Option<PathBuf>, exe_dir
 /// Explains a HIP status returned by the library.
 pub(crate) fn status_message(status: i32) -> String {
     let hint = match status {
-        35 => " (hipErrorInsufficientDriver: the installed GPU driver is older than the runtime)",
+        35 => " (hipErrorInsufficientDriver: the GPU driver is missing or older than the runtime)",
         100 => " (hipErrorNoDevice: no supported GPU; check `rocminfo` and /dev/kfd permissions on AMD, `nvidia-smi` on NVIDIA)",
         209 => {
             " (hipErrorNoBinaryForGpu: the library has no kernels for this GPU; \
@@ -130,30 +130,23 @@ impl Gpu {
         })
     }
 
+    /// The runtime the library was built for: "HIP" (AMD) or "CUDA" (NVIDIA).
+    /// Libraries without `altd_gpu_platform` predate the CUDA build and are HIP.
+    pub fn platform(&self) -> String {
+        let f: Option<unsafe extern "C" fn() -> *const std::ffi::c_char> = self.try_symbol("altd_gpu_platform");
+        f.map_or_else(
+            || "HIP".to_string(),
+            |f| unsafe { CStr::from_ptr(f()) }.to_string_lossy().into_owned(),
+        )
+    }
+
     /// The device name, or the library path for older libraries. The legacy
     /// math entry point probes device availability when no name is exported.
     pub fn device_name(&self) -> Result<String, String> {
         let f: Option<unsafe extern "C" fn(*mut std::ffi::c_char, i32) -> i32> =
             self.try_symbol("altd_gpu_device_name");
         let Some(f) = f else {
-            let probe: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 = self
-                .try_symbol("altd_gpu_math")
-                .ok_or("the HIP library lacks the device probe entry points")?;
-            let input = 0.0f32;
-            let mut output = 0.0f32;
-            let mut error = 0u32;
-            let status = unsafe {
-                probe(
-                    MathOp::NativeSin as i32,
-                    1,
-                    std::ptr::from_ref(&input).cast(),
-                    std::ptr::from_mut(&mut output).cast(),
-                    &mut error,
-                )
-            };
-            if status != 0 {
-                return Err(format!("no usable HIP device ({})", status_message(status)));
-            }
+            self.probe_kernels()?;
             return Ok(self.path.display().to_string());
         };
         let mut name = [0 as std::ffi::c_char; 256];
@@ -162,6 +155,40 @@ impl Gpu {
             return Err(format!("no usable HIP device ({})", status_message(status)));
         }
         Ok(unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    /// Runs one small kernel. A device can be present while the library has no
+    /// code for it (built for another GPU_ARCH or CUDA_ARCH); this reports that
+    /// before a simulation needs the device.
+    pub fn probe_kernels(&self) -> Result<(), String> {
+        // Asks before launching where the library can: a ROCm 7.1 launch without
+        // kernels for the device crashes the process.
+        let check: Option<unsafe extern "C" fn() -> i32> = self.try_symbol("altd_gpu_probe");
+        if let Some(check) = check {
+            let status = unsafe { check() };
+            if status != 0 {
+                return Err(format!("no usable HIP device ({})", status_message(status)));
+            }
+        }
+        let probe: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 = self
+            .try_symbol("altd_gpu_math")
+            .ok_or("the HIP library lacks the device probe entry points")?;
+        let input = 0.0f32;
+        let mut output = 0.0f32;
+        let mut error = 0u32;
+        let status = unsafe {
+            probe(
+                MathOp::NativeSin as i32,
+                1,
+                std::ptr::from_ref(&input).cast(),
+                std::ptr::from_mut(&mut output).cast(),
+                &mut error,
+            )
+        };
+        if status != 0 {
+            return Err(format!("no usable HIP device ({})", status_message(status)));
+        }
+        Ok(())
     }
 
     pub(crate) fn check(status: i32, what: &str) {

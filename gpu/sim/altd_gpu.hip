@@ -16,9 +16,6 @@
 #include "sensors.h"
 #include "step.h"
 #include "stats.h"
-#ifdef _WIN32
-#include "win_time.h"  // after the other headers: see its first lines
-#endif
 
 using namespace altd;
 
@@ -134,12 +131,18 @@ struct NetShape {
     int32_t control_src[5];
 };
 
+}  // namespace
+
+// Sim and WindowArgs stay outside the anonymous namespace: g++ (nvcc's host compiler) gives the
+// extern "C" functions that take them internal linkage otherwise, and leaves them out of the library.
 struct WindowArgs {
     uint64_t start_tick, ticks;
     uint32_t start_batch, batches_per_tick, stats_phase, stop_when_inactive;
     uint32_t eliminate_on_wall, eliminate_when_idle, has_time_limit, pad;
     double time_limit;
 };
+
+namespace {
 
 struct WindowState {
     uint32_t live_count[2][8], step_count[2];
@@ -154,6 +157,8 @@ uint32_t live_total(const WindowState& st, uint32_t p) {
     for (uint32_t b = 0; b < 8; b++) count += st.live_count[p][b];
     return count;
 }
+
+}  // namespace
 
 struct Sim {
     World world;  // device pointers, owned by the world handle
@@ -188,6 +193,8 @@ struct Sim {
     WindowArgs graph_args;
     uint32_t graph_n;
 };
+
+namespace {
 
 // Kernel arguments captured by the period graph. The requested window length
 // only affects the host's replay count and is not part of the captured graph.
@@ -446,7 +453,7 @@ __global__ void __launch_bounds__(STEP_THREADS) step_end_kernel(World w, Vehicle
 __global__ void active_count_kernel(const Car* cars, uint32_t n, uint32_t* count) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t mask = altd_ballot(i < n && (cars[i].flags & CAR_ACTIVE));
-    if (mask && altd_lane_id() ==(uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
+    if (mask && altd_lane_id() == (uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
 }
 
 uint32_t blocks(size_t n, uint32_t size = 256) { return (uint32_t)((n + size - 1) / size); }
@@ -456,6 +463,19 @@ bool split_step() {
     static const char* env = getenv("ALTD_GPU_SPLIT");
     static const bool split = !(env && strcmp(env, "0") == 0);
     return split;
+}
+
+// Host clocks of ALTD_GPU_PROFILE, in seconds. The host thread's CPU time is only read on POSIX;
+// elsewhere it is negative and not printed.
+double wall_seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+double thread_cpu_seconds() {
+#ifdef _WIN32
+    return -1.0;
+#else
+    timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+#endif
 }
 
 // The step kernels need ~300 MB of scratch at full occupancy, over the HSA
@@ -856,18 +876,18 @@ __device__ inline void append(bool take, uint32_t value, uint32_t* list, uint32_
 
 // The Car state `car_step` reads: everything but `tick`, and the used pairs and contacts.
 __device__ inline void snapshot(const Car& c, Car& s) {
-    __builtin_memcpy(&s, &c, offsetof(Car, pairs));
-    __builtin_memcpy(s.pairs, c.pairs, sizeof(uint32_t) * c.pair_count);
-    __builtin_memcpy(s.axes, c.axes, sizeof(Vec2) * c.pair_count);
-    __builtin_memcpy(s.contacts, c.contacts, sizeof(Contact) * c.contact_count);
+    altd_memcpy(&s, &c, offsetof(Car, pairs));
+    altd_memcpy(s.pairs, c.pairs, sizeof(uint32_t) * c.pair_count);
+    altd_memcpy(s.axes, c.axes, sizeof(Vec2) * c.pair_count);
+    altd_memcpy(s.contacts, c.contacts, sizeof(Contact) * c.contact_count);
 }
 
 __device__ inline bool same_words(const void* a, const void* b, size_t bytes) {
     uint32_t differ = 0;
     for (size_t k = 0; k < bytes; k += 4) {
         uint32_t x, y;
-        __builtin_memcpy(&x, (const char*)a + k, 4);
-        __builtin_memcpy(&y, (const char*)b + k, 4);
+        altd_memcpy(&x, (const char*)a + k, 4);
+        altd_memcpy(&y, (const char*)b + k, 4);
         differ |= x ^ y;
     }
     return differ == 0;
@@ -1050,9 +1070,7 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
     static const bool profile = profile_env && strcmp(profile_env, "host") != 0;
     static const char* graph_env = getenv("ALTD_GPU_GRAPH");
     static const bool use_graph = !profile && !(graph_env && strcmp(graph_env, "0") == 0);
-    timespec cpu0, wall0;
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
-    clock_gettime(CLOCK_MONOTONIC, &wall0);
+    const double cpu0 = profile_env ? thread_cpu_seconds() : 0, wall0 = profile_env ? wall_seconds() : 0;
     double spent[4] = {0, 0, 0, 0};  // stats, sensors, forward, step
     struct Timed { int slot; uint64_t k; hipEvent_t start, stop; };
     std::vector<Timed> timed;
@@ -1171,12 +1189,11 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
     int polls = 0;
     bool host_stop = false;
     double launch_wall = 0, wait_wall = 0;  // host profile: time in launches and in polls
-    auto now = [] { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec; };
     for (uint64_t m = 0; m < periods && !host_stop; m++) {
-        double t0 = profile_env ? now() : 0;
+        double t0 = profile_env ? wall_seconds() : 0;
         if (exec) CHECK(hipGraphLaunch(exec, stream));
         else enqueue_period();
-        if (profile_env) launch_wall += now() - t0;
+        if (profile_env) launch_wall += wall_seconds() - t0;
         CHECK(hipGetLastError());
         if (a->stop_when_inactive && (m + 1) % POLL == 0) {
             int slot = polls % DEPTH;
@@ -1185,9 +1202,9 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
             polls++;
             if (polls >= DEPTH) {  // wait for the oldest queued poll
                 int oldest = polls % DEPTH;
-                double t1 = profile_env ? now() : 0;
+                double t1 = profile_env ? wall_seconds() : 0;
                 CHECK(hipEventSynchronize(s->chunk_done[oldest]));
-                if (profile_env) wait_wall += now() - t1;
+                if (profile_env) wait_wall += wall_seconds() - t1;
                 host_stop = seen[oldest] != 0;
             }
         }
@@ -1225,7 +1242,7 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
         unsigned long long c[16];
         int rate_khz = 0;
         CHECK(hipMemcpyFromSymbol(c, HIP_SYMBOL(g_step_cycles), sizeof c));
-        CHECK(hipDeviceGetAttribute(&rate_khz, hipDeviceAttributeWallClockRate, 0));
+        CHECK(altd_wall_clock_khz(&rate_khz));
         const char* names[6] = {"drive", "validate", "contacts+merge", "active", "solver", "finish"};
         double us = 1e3 / (double)rate_khz, steps = (double)(c[8] ? c[8] : 1);
         fprintf(stderr, "altd_gpu step sections (%llu car steps, %llu solving, %llu pair updates, %llu full scans), us per car step:",
@@ -1241,17 +1258,18 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
     }
 #endif
     if (profile_env) {
-        timespec cpu1, wall1;
-        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu1);
-        clock_gettime(CLOCK_MONOTONIC, &wall1);
-        auto seconds = [](timespec a, timespec b) { return (double)(b.tv_sec - a.tv_sec) + 1e-9 * (double)(b.tv_nsec - a.tv_nsec); };
-        fprintf(stderr, "altd_gpu window: host thread cpu %.3f s of %.3f s wall (%s): launches %.3f s, polls %.3f s\n",
-                seconds(cpu0, cpu1), seconds(wall0, wall1), exec ? "graph" : "direct", launch_wall, wait_wall);
+        double cpu = cpu0 >= 0 ? thread_cpu_seconds() - cpu0 : -1.0, wall = wall_seconds() - wall0;
+        if (cpu >= 0) fprintf(stderr, "altd_gpu window: host thread cpu %.3f s of %.3f s wall", cpu, wall);
+        else fprintf(stderr, "altd_gpu window: %.3f s wall", wall);
+        fprintf(stderr, " (%s): launches %.3f s, polls %.3f s\n", exec ? "graph" : "direct", launch_wall, wait_wall);
     }
     return 0;
 }
 
 ALTD_API int altd_gpu_version() { return 9; }
+
+// The runtime the library was built for: "HIP" (AMD) or "CUDA" (NVIDIA).
+ALTD_API const char* altd_gpu_platform() { return ALTD_PLATFORM; }
 
 // Writes the current device's name, NUL-terminated and truncated to `len`
 // bytes; returns the HIP error, so it also tells whether a device is usable.
@@ -1265,6 +1283,18 @@ ALTD_API int altd_gpu_device_name(char* out, int len) {
     if (e != hipSuccess) return (int)e;
     snprintf(out, (size_t)len, "%s", prop.name);
     return 0;
+}
+
+// Whether the library has kernels for the current device, without launching one: ROCm 7.1 crashes
+// in the launch instead of returning an error when the library was built for another GPU_ARCH.
+// Returns the HIP error, hipErrorNoBinaryForGpu when the kernels are missing.
+ALTD_API int altd_gpu_probe() {
+    hipFuncAttributes attributes;
+    hipError_t e = hipFuncGetAttributes(&attributes, (const void*)math_kernel);
+#if !defined(__CUDACC__)
+    if (e == hipErrorInvalidKernelFile) return (int)hipErrorNoBinaryForGpu;  // HIP's answer for a missing code object
+#endif
+    return (int)e;
 }
 
 // Runs one math primitive over `n` host inputs; `err` gets the per-element error bits.

@@ -381,7 +381,8 @@ pub(super) enum Command {
         allow_origin: Vec<String>,
     },
     /// Load the GPU simulator library used by --gpu and check that it matches this binary.
-    /// Needs the GPU runtime (ROCm on AMD, the driver on NVIDIA) but no GPU.
+    /// Needs the GPU runtime (ROCm on AMD, the driver on NVIDIA) but no GPU; with a GPU it also
+    /// runs one kernel, which fails when the library was built for another GPU.
     GpuInfo {
         /// Library path (default: ALTD_GPU_LIB, then beside the executable, then target/gpu).
         #[arg(long)]
