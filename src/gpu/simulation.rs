@@ -319,7 +319,7 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
     use std::mem::{offset_of, size_of};
     let f: unsafe extern "C" fn(*mut u64, i32) -> i32 = gpu
         .try_symbol("altd_gpu_layout")
-        .ok_or("libaltd_gpu.so lacks altd_gpu_layout; rebuild it with gpu/build.sh")?;
+        .ok_or("libaltd_gpu.so lacks altd_gpu_layout; rebuild it with gpu/build.sh or gpu/build-cuda.*")?;
     let mut got = [0u64; 32];
     let count = unsafe { f(got.as_mut_ptr(), got.len() as i32) } as usize;
     let want = [
@@ -345,7 +345,7 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
         offset_of!(VehicleDesc, gravity),
     ];
     if count != want.len() {
-        return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh".into());
+        return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh or gpu/build-cuda.*".into());
     }
     for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
         if g != w as u64 {

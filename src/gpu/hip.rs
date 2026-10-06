@@ -31,11 +31,11 @@ pub fn library_candidates(explicit: Option<&Path>, env: Option<PathBuf>, exe_dir
 /// Explains a HIP status returned by the library.
 pub(crate) fn status_message(status: i32) -> String {
     let hint = match status {
-        35 => " (hipErrorInsufficientDriver: the installed AMD driver is older than the ROCm runtime)",
-        100 => " (hipErrorNoDevice: ROCm sees no AMD GPU; check `rocminfo` and /dev/kfd permissions)",
+        35 => " (hipErrorInsufficientDriver: the installed GPU driver is older than the runtime)",
+        100 => " (hipErrorNoDevice: no supported GPU; check `rocminfo` and /dev/kfd permissions on AMD, `nvidia-smi` on NVIDIA)",
         209 => {
             " (hipErrorNoBinaryForGpu: the library has no kernels for this GPU; \
-             rebuild it with GPU_ARCH set to the gfx name `rocminfo` reports)"
+             rebuild it with GPU_ARCH set to the gfx name `rocminfo` reports, or CUDA_ARCH set to your sm_ target on NVIDIA)"
         }
         _ => "",
     };
@@ -94,7 +94,7 @@ impl Gpu {
             }
         }
         Err(format!(
-            "cannot load the HIP simulator library; build it with gpu/build.sh or set ALTD_GPU_LIB\n  {}",
+            "cannot load the GPU simulator library; build it with gpu/build.sh (AMD) or gpu/build-cuda.ps1 / gpu/build-cuda.sh (NVIDIA), or set ALTD_GPU_LIB\n  {}",
             errors.join("\n  ")
         ))
     }
@@ -106,8 +106,12 @@ impl Gpu {
 
     /// Function pointer `name` of type `F` (an `unsafe extern "C" fn`).
     pub(crate) fn symbol<F: Copy>(&self, name: &str) -> F {
-        self.try_symbol(name)
-            .unwrap_or_else(|| panic!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+        self.try_symbol(name).unwrap_or_else(|| {
+            panic!(
+                "{} lacks {name}; rebuild it with gpu/build.sh or gpu/build-cuda.*",
+                self.path.display()
+            )
+        })
     }
 
     /// `symbol`, or `None` when the library lacks `name`.
@@ -118,8 +122,12 @@ impl Gpu {
 
     /// A required function pointer, reporting incompatible libraries without panicking.
     pub(crate) fn required_symbol<F: Copy>(&self, name: &str) -> Result<F, String> {
-        self.try_symbol(name)
-            .ok_or_else(|| format!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+        self.try_symbol(name).ok_or_else(|| {
+            format!(
+                "{} lacks {name}; rebuild it with gpu/build.sh or gpu/build-cuda.*",
+                self.path.display()
+            )
+        })
     }
 
     /// The device name, or the library path for older libraries. The legacy
