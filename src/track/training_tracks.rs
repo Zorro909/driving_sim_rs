@@ -1,4 +1,5 @@
 //! CPU generation and bounded prefetch of tracks for independent training cars.
+use crate::math::profile::MathProfile;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::math::vec2::V2;
 use crate::track::random_track::{self, GeneratedTrack, RandomTrackConfig, TrackGenerator};
@@ -194,8 +195,9 @@ pub(crate) fn training_scene(
     generator: Option<&TrackGenerator>,
     seed: i64,
     generation: u64,
+    math: MathProfile,
 ) -> Result<(GeneratedTrack, Value), String> {
-    training_scene_at(template, settings, generator, seed, generation, 0)
+    training_scene_at(template, settings, generator, seed, generation, 0, math)
 }
 
 /// Track zero preserves the historical seed stream; other slots have independent streams.
@@ -206,6 +208,7 @@ pub fn training_scene_at(
     seed: i64,
     generation: u64,
     track_index: usize,
+    math: MathProfile,
 ) -> Result<(GeneratedTrack, Value), String> {
     let slot_seed = if track_index == 0 {
         seed
@@ -227,7 +230,7 @@ pub fn training_scene_at(
             if track.config.length < settings.length.bounds().0 {
                 continue;
             }
-            let mut scene = track.to_scene(template);
+            let mut scene = track.to_scene(template, math);
             // CLI training uses independent cars on both backends. Native shared
             // TileMap redraw replay remains available through TrainingRunner.
             scene["track"]["native_broadphase"] = Value::Bool(false);
@@ -247,15 +250,16 @@ fn prepare(
     seed: i64,
     generation: u64,
     track_index: usize,
+    math: MathProfile,
 ) -> Result<PreparedTrainingTrack, String> {
-    let (track, scene) = training_scene_at(template, settings, generator, seed, generation, track_index)?;
+    let (track, scene) = training_scene_at(template, settings, generator, seed, generation, track_index, math)?;
     let position = crate::track::world::vector(&scene["reset_position"]);
     let rotation = scene["reset_rotation"].as_f64().unwrap();
     Ok(PreparedTrainingTrack {
         generation,
         track_index,
         track,
-        world: Arc::new(World::from_scene(&scene)),
+        world: Arc::new(World::from_scene_with(&scene, math)),
         position,
         rotation,
         gpu_world: None,
@@ -280,10 +284,21 @@ impl TrainingTrackBuffer {
         first_generation: u64,
         capacity: usize,
         prepare_gpu: bool,
+        math: MathProfile,
     ) -> Result<Self, String> {
-        Self::new_batched(template, settings, seed, first_generation, capacity, prepare_gpu, 1)
+        Self::new_batched(
+            template,
+            settings,
+            seed,
+            first_generation,
+            capacity,
+            prepare_gpu,
+            1,
+            math,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_batched(
         template: Value,
         settings: RandomTrainingTrackSettings,
@@ -292,6 +307,7 @@ impl TrainingTrackBuffer {
         capacity: usize,
         prepare_gpu: bool,
         tracks_per_generation: usize,
+        math: MathProfile,
     ) -> Result<Self, String> {
         settings.validate()?;
         if capacity == 0 {
@@ -312,13 +328,21 @@ impl TrainingTrackBuffer {
                 let generator = hash_seed.map(TrackGenerator::new);
                 for generation in first_generation..u64::MAX {
                     for track_index in 0..tracks_per_generation {
-                        let result = prepare(&template, &settings, generator.as_ref(), seed, generation, track_index)
-                            .and_then(|mut track| {
-                                if prepare_gpu {
-                                    track.gpu_world = Some(crate::gpu::hip::PreparedGpuWorld::new(&track.world)?);
-                                }
-                                Ok(track)
-                            });
+                        let result = prepare(
+                            &template,
+                            &settings,
+                            generator.as_ref(),
+                            seed,
+                            generation,
+                            track_index,
+                            math,
+                        )
+                        .and_then(|mut track| {
+                            if prepare_gpu {
+                                track.gpu_world = Some(crate::gpu::hip::PreparedGpuWorld::new(&track.world)?);
+                            }
+                            Ok(track)
+                        });
                         let failed = result.is_err();
                         if sender.send(result).is_err() || failed {
                             return;

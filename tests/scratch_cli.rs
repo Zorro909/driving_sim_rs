@@ -45,11 +45,11 @@ fn run(root: &Path, name: &str, extra: &[&str]) -> Output {
     if !extra.contains(&"--spawn-trace") {
         command.arg("--spawn-trace").arg(root.join("spawn.json"));
     }
+    command.arg("--out-dir").arg(root.join(name));
+    if !extra.contains(&"--init-population") && !extra.contains(&"--init-network") {
+        command.arg("--init-network").arg(root.join("seed.json"));
+    }
     command
-        .arg("--out-dir")
-        .arg(root.join(name))
-        .arg("--init-network")
-        .arg(root.join("seed.json"))
         .arg("--scene")
         .arg(root.join("scene.json"))
         .arg("--network")
@@ -95,6 +95,76 @@ fn seed_workspace(root: &Path, settings: &Value) {
 }
 fn stop_reason(root: &Path, name: &str) -> Value {
     load(root.join(name).join("checkpoint.json"))["stop_reason"].clone()
+}
+
+#[test]
+fn scratch_checkpoints_preserve_math_on_resume_and_population_import() {
+    let workspace = Workspace::new("math-profile-checkpoints");
+    let root = &workspace.0;
+    seed_workspace(root, &json!({"selection_size": 1, "preserve_parents_size": 1}));
+    for profile in ["proton", "win10-fma3", "win11-fma3"] {
+        let name = profile;
+        success(run(
+            root,
+            name,
+            &["--math-profile", profile, "--ticks", "12", "--generations", "1"],
+        ));
+        let checkpoint = root.join(name).join("checkpoint.json");
+        assert_eq!(load(&checkpoint)["math_profile"], profile);
+        success(run(root, name, &["--resume", "--ticks", "12", "--generations", "2"]));
+        assert_eq!(load(&checkpoint)["math_profile"], profile);
+        assert_eq!(load(root.join(name).join("run.json"))["math_profile"], profile);
+        let imported = format!("{profile}-imported");
+        success(run(
+            root,
+            &imported,
+            &[
+                "--init-population",
+                checkpoint.to_str().unwrap(),
+                "--ticks",
+                "12",
+                "--generations",
+                "3",
+            ],
+        ));
+        assert_eq!(load(root.join(&imported).join("run.json"))["math_profile"], profile);
+        assert_eq!(
+            load(root.join(&imported).join("checkpoint.json"))["math_profile"],
+            profile
+        );
+        let other = if profile == "proton" { "win10-fma3" } else { "proton" };
+        let rejected = run(
+            root,
+            &format!("{profile}-mismatch"),
+            &[
+                "--init-population",
+                checkpoint.to_str().unwrap(),
+                "--math-profile",
+                other,
+                "--ticks",
+                "12",
+                "--generations",
+                "3",
+            ],
+        );
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("--math-profile"));
+        let rejected = run(
+            root,
+            name,
+            &[
+                "--resume",
+                "--math-profile",
+                other,
+                "--ticks",
+                "12",
+                "--generations",
+                "3",
+            ],
+        );
+        assert!(!rejected.status.success());
+        assert_eq!(load(&checkpoint)["math_profile"], profile);
+    }
 }
 
 #[test]
@@ -877,7 +947,7 @@ fn public_diagnostics_and_benchmark_accept_generated_inputs() {
     let network = load(root.join("seed.json"));
     let model = generated::model("rally");
     let world = World::from_scene(&scene);
-    let layout = SensorLayout::from_exports(&network, &model);
+    let layout = SensorLayout::from_exports(&network, &model, altd_sim::math::profile::MathProfile::Proton);
     let mut car = Car::new(
         &world,
         altd_sim::track::world::vector(&scene["reset_position"]),
@@ -918,7 +988,7 @@ fn public_diagnostics_and_benchmark_accept_generated_inputs() {
     let report_path = root.join("report.json");
     let run_diagnostic = |name: &str, paths: &[&Path], options: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_altd-sim"));
-        command.args(["--threads", "1", name]);
+        command.args(["--threads", "1", "--math-profile", "proton", name]);
         for path in paths {
             command.arg(path);
         }

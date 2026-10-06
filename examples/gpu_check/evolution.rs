@@ -4,7 +4,7 @@ use super::shared::Tally;
 use super::simulation::{car_text, compare_runners, field_diff};
 use altd_sim::gpu::hip::{Gpu, GpuWorld};
 use altd_sim::gpu::simulation::GpuCar;
-use altd_sim::{math::double_math, nn::network};
+use altd_sim::nn::network;
 
 /// Partial windows exercise batch wrapping, graph re-use, list parity, and
 /// populations that do not fill a wave or divide evenly into eight batches.
@@ -101,7 +101,7 @@ pub(super) fn check_novelty(gpu: &Gpu) -> bool {
                     .params
                     .iter()
                     .zip(&mean)
-                    .map(|(a, b)| double_math::pow(a - b, 2.0))
+                    .map(|(a, b)| world.math.pow(a - b, 2.0))
                     .fold(0.0, |a, b| a + b)
                     .sqrt();
                 tally.record(0, expected.to_bits() == got[i].to_bits(), || {

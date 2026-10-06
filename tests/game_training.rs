@@ -81,10 +81,13 @@ fn generated_statistics_and_laps_match_pre_change_bits() {
 #[test]
 fn checkpoint_roundtrip_preserves_both_game_streams() {
     let mut original = GameRandom::new([1, 2, 3, 4], 12345);
-    original.normal_array(3, 0.1);
+    original.normal_array(3, 0.1, altd_sim::math::profile::MathProfile::Proton);
     original.randrange(37);
     let mut restored = GameRandom::from_json(&original.to_json());
-    assert_eq!(original.normal_array(17, 0.2), restored.normal_array(17, 0.2));
+    assert_eq!(
+        original.normal_array(17, 0.2, altd_sim::math::profile::MathProfile::Proton),
+        restored.normal_array(17, 0.2, altd_sim::math::profile::MathProfile::Proton)
+    );
     assert_eq!(original.random().to_bits(), restored.random().to_bits());
     for rng in [
         TrainingRandom::Game(original),
@@ -219,6 +222,7 @@ fn every_original_sensor_name_loads_with_its_original_defaults() {
     let layout = SensorLayout::from_exports(
         &serde_json::json!({"inputs":original["names"]}),
         &serde_json::json!({"vision":[]}),
+        altd_sim::math::profile::MathProfile::Proton,
     );
     for (actual, original) in layout.sensors.iter().zip(original["sensors"].as_array().unwrap()) {
         assert_eq!(*actual, Sensor::by_name(original["$type"].as_str().unwrap()));
@@ -276,7 +280,7 @@ fn generated_curve_controls_and_baking_match_original_engine() {
             .find(|c| c["i"] == row["i"] && c["generation"] == row["generation"])
             .unwrap();
         let track: GeneratedTrack = serde_json::from_value(case["result"].clone()).unwrap();
-        let actual = track.curve_controls();
+        let actual = track.curve_controls(altd_sim::math::profile::MathProfile::Proton);
         let expected = &row["curve"];
         assert_eq!(
             actual["points"].as_array().unwrap().len(),
@@ -298,7 +302,7 @@ fn generated_curve_controls_and_baking_match_original_engine() {
                 );
             }
         }
-        let curve = Curve::from_json(&actual);
+        let curve = Curve::from_json(&actual, altd_sim::math::profile::MathProfile::Proton);
         let baked = row["baked"].as_array().unwrap();
         assert_eq!(curve.points.len(), baked.len());
         for (i, (a, b)) in curve.points.iter().zip(baked).enumerate() {
@@ -399,7 +403,8 @@ fn exact_sensor_export_retains_order_and_parameters() {
         serde_json::from_str(include_str!("fixtures/native_generated_ordered_sensors32.json")).unwrap();
     let model = serde_json::json!({"sensor_layout":fixture["sensor_layout"]});
     let network = serde_json::json!({"inputs":fixture["sensor_layout"]["names"]});
-    let layout = altd_sim::training::SensorLayout::from_exports(&network, &model);
+    let layout =
+        altd_sim::training::SensorLayout::from_exports(&network, &model, altd_sim::math::profile::MathProfile::Proton);
     assert_eq!(layout.names.len(), 10);
     assert_eq!(layout.names[0], layout.names[1]);
     match (layout.sensors[0], layout.sensors[1]) {
@@ -569,7 +574,7 @@ fn car_major_windows_match_tick_major_scheduler() {
             world.clone(),
             altd_sim::track::world::vector(&spawn["position"]),
             spawn["rotation"].as_f64().unwrap(),
-            SensorLayout::from_exports(&network, &model),
+            SensorLayout::from_exports(&network, &model, altd_sim::math::profile::MathProfile::Proton),
             &outputs,
             settings,
             GameRandom::new([1, 2, 3, 4], 3),
@@ -646,13 +651,21 @@ fn vision_lengths_match_the_game_editor_for_every_whole_angle() {
     assert_eq!(rows.len(), 361);
     let mismatches: Vec<_> = rows
         .iter()
-        .filter(|r| vision_length(r[0].as_f64().unwrap() as f32).to_bits() as u64 != r[1].as_u64().unwrap())
+        .filter(|r| {
+            vision_length(
+                r[0].as_f64().unwrap() as f32,
+                altd_sim::math::profile::MathProfile::Proton,
+            )
+            .to_bits() as u64
+                != r[1].as_u64().unwrap()
+        })
         .collect();
     assert!(mismatches.is_empty(), "{mismatches:?}");
     // Unlisted angles fall back to the editor length; listed ones keep the model's.
     let layout = SensorLayout::from_exports(
         &serde_json::json!({"inputs":["↑ 45°","↑ 0°"]}),
         &serde_json::json!({"vision":[{"angle":0,"length":123.0}]}),
+        altd_sim::math::profile::MathProfile::Proton,
     );
     let lengths: Vec<_> = layout
         .sensors
@@ -662,5 +675,11 @@ fn vision_lengths_match_the_game_editor_for_every_whole_angle() {
             _ => unreachable!(),
         })
         .collect();
-    assert_eq!(lengths, [vision_length(45.0) as f64, 123.0]);
+    assert_eq!(
+        lengths,
+        [
+            vision_length(45.0, altd_sim::math::profile::MathProfile::Proton) as f64,
+            123.0
+        ]
+    );
 }

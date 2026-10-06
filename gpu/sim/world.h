@@ -51,7 +51,8 @@ struct World {
     int64_t tile_x0, tile_y0, tile_nx, tile_ny;
     const TileCell* tiles;
     // baked path (Track::closest_path)
-    uint32_t path_points, pad0;
+    uint32_t path_points;
+    uint32_t math_profile;  // MathProfile::index (math.h MATH_*)
     const PathSeg* path_segments;
     const double* path_offsets;
     NearGrid path_grid;

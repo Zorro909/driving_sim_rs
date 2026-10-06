@@ -14,7 +14,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help") {
         println!("usage: gpu_check [math|rays|sensors|infer|step|stats|window|schedules|reuse|novelty|turnover|benchfixed|benchtrain] ...");
-        println!("Defaults use generated rally geometry and deterministic Xavier networks. Overrides: ALTD_GPU_SCENE, ALTD_GPU_SPAWN, ALTD_GPU_NETWORK, ALTD_GPU_MODEL, ALTD_GPU_CKPT, ALTD_GPU_LIB.");
+        println!("Defaults use generated rally geometry and deterministic Xavier networks. Overrides: ALTD_GPU_SCENE, ALTD_GPU_SPAWN, ALTD_GPU_NETWORK, ALTD_GPU_MODEL, ALTD_GPU_CKPT, ALTD_GPU_LIB, ALTD_GPU_MATH (a math profile).");
         return;
     }
     let parts: Vec<&str> = if args.is_empty() {

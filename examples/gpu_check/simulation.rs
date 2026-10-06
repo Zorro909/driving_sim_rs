@@ -169,7 +169,7 @@ pub(super) fn check_infer(gpu: &Gpu, networks: usize, rounds: usize, ticks: u64)
                 let mut inputs = Vec::new();
                 runner.layout.read_into(&world, &a.car, &mut scratch, &mut inputs);
                 let mut forward = network::ForwardScratch::default();
-                let out = a.network.forward_into(&inputs, &mut forward);
+                let out = a.network.forward_into(&inputs, &mut forward, world.math);
                 let mut c = altd_sim::physics::car::Controls::default();
                 for (name, &v) in outputs.iter().zip(out) {
                     c.set(name, v);

@@ -7,6 +7,7 @@
 //! answer, the query falls back to the exact linear scan.
 
 use crate::math::godot_math::{ray_intersection, F2};
+use crate::math::profile::MathProfile;
 use crate::math::pymath::{clamp, f32r, floor_i64};
 use crate::math::vec2::{closest_point, V2};
 use rayon::prelude::*;
@@ -397,6 +398,8 @@ pub struct Track {
 pub struct World {
     pub vehicle: VehicleConfig,
     pub track: Track,
+    /// The C runtime math of the game being reproduced.
+    pub math: MathProfile,
 }
 
 pub const PATH_WINDOW: f64 = 450.0;
@@ -953,8 +956,13 @@ impl PhysicsShape {
 }
 
 impl World {
-    /// `compare_game_trace.load_scene(scene)` plus the static acceleration grids.
+    /// `from_scene_with` under Proton, where the game traces were recorded.
     pub fn from_scene(scene: &Value) -> World {
+        World::from_scene_with(scene, MathProfile::Proton)
+    }
+
+    /// `compare_game_trace.load_scene(scene)` plus the static acceleration grids.
+    pub fn from_scene_with(scene: &Value, math: MathProfile) -> World {
         let vehicle = load_vehicle(scene);
         let track = &scene["track"];
         let empty = Vec::new();
@@ -1109,7 +1117,9 @@ impl World {
                 shapes,
                 path,
                 path_forward,
-                curve: track.get("curve").map(crate::track::curve::Curve::from_json),
+                curve: track
+                    .get("curve")
+                    .map(|c| crate::track::curve::Curve::from_json(c, math)),
                 path_grid,
                 path_segments,
                 path_offsets,
@@ -1128,6 +1138,7 @@ impl World {
                 shape_grid,
             },
             vehicle,
+            math,
         }
     }
 }

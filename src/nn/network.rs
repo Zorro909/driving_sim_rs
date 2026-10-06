@@ -3,6 +3,7 @@
 //! Parameters are stored flat in `Network.vector()` order: for each layer the
 //! input-neuron weight rows, then the bias.
 
+use crate::math::profile::MathProfile;
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,23 +24,32 @@ pub fn parameter_count(shape: &[usize]) -> usize {
 }
 
 impl Network {
-    pub fn xavier_game(shape: &[usize], rng: &mut crate::training::game_random::GameRandom) -> Network {
+    pub fn xavier_game(
+        shape: &[usize],
+        rng: &mut crate::training::game_random::GameRandom,
+        math: MathProfile,
+    ) -> Network {
         let mut params = Vec::with_capacity(parameter_count(shape));
         for layer in shape.windows(2) {
             let (rows, cols) = (layer[0], layer[1]);
-            let weights = rng.normal_array(rows * cols, (2.0 / (rows + cols) as f64).sqrt());
+            let weights = rng.normal_array(rows * cols, (2.0 / (rows + cols) as f64).sqrt(), math);
             for row in 0..rows {
                 for col in 0..cols {
                     params.push(weights[col * rows + row]);
                 }
             }
-            params.extend(rng.normal_array(cols, 0.1));
+            params.extend(rng.normal_array(cols, 0.1, math));
         }
         Self::from_vector(shape, params)
     }
     // Column-major normal draws map onto row-major parameters by their original indices.
     #[allow(clippy::needless_range_loop)]
-    pub fn mutate_xavier_game(&self, rate: f64, rng: &mut crate::training::game_random::GameRandom) -> Network {
+    pub fn mutate_xavier_game(
+        &self,
+        rate: f64,
+        rng: &mut crate::training::game_random::GameRandom,
+        math: MathProfile,
+    ) -> Network {
         let mut output = self.clone();
         if rate <= 0.0 {
             return output;
@@ -47,7 +57,7 @@ impl Network {
         let mut offset = 0;
         for layer in self.shape.windows(2) {
             let (rows, cols) = (layer[0], layer[1]);
-            let noise = rng.normal_array(rows * cols, (2.0 / (rows + cols) as f64).sqrt() * rate);
+            let noise = rng.normal_array(rows * cols, (2.0 / (rows + cols) as f64).sqrt() * rate, math);
             for row in 0..rows {
                 for col in 0..cols {
                     output.params[offset + row * cols + col] += noise[col * rows + row];
@@ -58,7 +68,7 @@ impl Network {
         offset = 0;
         for layer in self.shape.windows(2) {
             let (rows, cols) = (layer[0], layer[1]);
-            let noise = rng.normal_array(cols, 0.1 * rate);
+            let noise = rng.normal_array(cols, 0.1 * rate, math);
             for col in 0..cols {
                 output.params[offset + rows * cols + col] += noise[col];
             }
@@ -169,14 +179,15 @@ impl Network {
         json!({"shape": self.shape, "weights": weights, "biases": biases})
     }
 
-    pub fn forward(&self, inputs: &[f64]) -> Vec<f64> {
+    pub fn forward(&self, inputs: &[f64], math: MathProfile) -> Vec<f64> {
         let mut scratch = ForwardScratch::default();
-        self.forward_into(inputs, &mut scratch).to_vec()
+        self.forward_into(inputs, &mut scratch, math).to_vec()
     }
 
     /// `Network.forward`: each output is `tanh(sum(v_i * W[i][j]) + b[j])`
-    /// where `sum` follows the game's managed MathNet accumulation order.
-    pub fn forward_into<'a>(&self, inputs: &[f64], scratch: &'a mut ForwardScratch) -> &'a [f64] {
+    /// where `sum` follows the game's managed MathNet accumulation order and
+    /// tanh is the C runtime's (.NET Math.Tanh).
+    pub fn forward_into<'a>(&self, inputs: &[f64], scratch: &'a mut ForwardScratch, math: MathProfile) -> &'a [f64] {
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2") {
             assert_eq!(
@@ -190,14 +201,19 @@ impl Network {
             values.clear();
             values.extend_from_slice(inputs);
             // SAFETY: AVX2 is available; the kernel is bit-identical to the loop below.
-            unsafe { crate::nn::network_simd::forward(&self.shape, &self.params, values, next) };
+            unsafe { crate::nn::network_simd::forward(&self.shape, &self.params, values, next, math) };
             return &values[..];
         }
-        self.forward_into_scalar(inputs, scratch)
+        self.forward_into_scalar(inputs, scratch, math)
     }
 
     /// Portable reference for `forward_into`.
-    pub(crate) fn forward_into_scalar<'a>(&self, inputs: &[f64], scratch: &'a mut ForwardScratch) -> &'a [f64] {
+    pub(crate) fn forward_into_scalar<'a>(
+        &self,
+        inputs: &[f64],
+        scratch: &'a mut ForwardScratch,
+        math: MathProfile,
+    ) -> &'a [f64] {
         assert_eq!(
             inputs.len(),
             self.shape[0],
@@ -223,7 +239,7 @@ impl Network {
                 }
             }
             for j in 0..n_out {
-                next[j] = game_tanh(next[j] + bias[j]);
+                next[j] = math.tanh(next[j] + bias[j]);
             }
             std::mem::swap(values, next);
             position += (n_in + 1) * n_out;
@@ -361,7 +377,7 @@ mod tests {
     fn vector_layout_matches_python() {
         // Network.from_vector((2, 1), [w00, w10, b0]).forward([1, 2]) = tanh(w00 + 2*w10 + b0)
         let network = Network::from_vector(&[2, 1], vec![0.5, -0.25, 0.1]);
-        let out = network.forward(&[1.0, 2.0]);
+        let out = network.forward(&[1.0, 2.0], MathProfile::Proton);
         assert_eq!(out, vec![(0.5f64 - 0.5 + 0.1).tanh()]);
     }
 

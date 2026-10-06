@@ -7,5 +7,7 @@ pub mod godot_math;
 mod managed_sine_tables;
 mod managed_trig;
 pub mod native_math;
+pub mod profile;
 pub mod pymath;
+pub mod ucrt;
 pub mod vec2;

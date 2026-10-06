@@ -2,6 +2,7 @@
 //! a remote session that matches a direct `Session` bit for bit.
 #![cfg(all(feature = "server", not(target_arch = "wasm32")))]
 
+use altd_sim::math::profile::MathProfile;
 use altd_sim::nn::network::Network;
 use altd_sim::server::protocol::{decode_binary, encode_binary};
 use altd_sim::server::{Config, Server};
@@ -24,6 +25,7 @@ fn start() -> SocketAddr {
     let server = Server::bind(Config {
         port: 0,
         origins: vec![ORIGIN.to_string()],
+        math_profile: Some(MathProfile::Proton),
     })
     .unwrap();
     let address = server.local_addr().unwrap();
@@ -130,12 +132,16 @@ impl Client {
     }
 }
 
+/// A local session with the options of a remote one, on the server's
+/// default math profile unless the options name one.
 fn direct(options: &Value) -> Session {
+    let mut options = SessionOptions::from_json(&options.to_string()).unwrap();
+    options.math_profile.get_or_insert(MathProfile::Proton);
     Session::new(
         &generated::scene("formula", 0),
         &generated::network("formula"),
         &generated::model("formula"),
-        SessionOptions::from_json(&options.to_string()).unwrap(),
+        options,
     )
     .unwrap()
 }
@@ -191,6 +197,8 @@ fn hello_describes_the_server() {
         true => assert!(hello["hip"]["device"].is_string()),
         false => assert!(hello["hip"]["reason"].is_string()),
     }
+    assert_eq!(hello["mathProfile"], "proton");
+    assert_eq!(hello["mathProfiles"], json!(["proton", "win10-fma3", "win11-fma3"]));
 }
 
 #[test]
@@ -198,6 +206,7 @@ fn server_configuration_normalizes_and_rejects_invalid_origins() {
     let server = Server::bind(Config {
         port: 0,
         origins: vec!["HTTP://127.0.0.1:5173/".to_string()],
+        math_profile: None,
     })
     .unwrap();
     let address = server.local_addr().unwrap();
@@ -206,6 +215,7 @@ fn server_configuration_normalizes_and_rejects_invalid_origins() {
     let error = Server::bind(Config {
         port: 0,
         origins: vec!["null".to_string()],
+        math_profile: None,
     })
     .err()
     .expect("invalid origins must fail before listening");
@@ -221,14 +231,17 @@ fn a_remote_session_matches_a_direct_session() {
     let address = start();
     let mut client = Client::connect(address);
     let mut session = direct(&options);
-    assert_eq!(client.create(&options), json!({"backend": "cpu", "backendNote": null}));
+    assert_eq!(
+        client.create(&options),
+        json!({"backend": "cpu", "backendNote": null, "mathProfile": "proton"})
+    );
     let shape = [20, 8, 5];
     let (reply, _) = client.call_raw("startWithShape", json!({"shape": shape}), None);
     session.start_with_shape(&shape).unwrap();
     assert_eq!(
         reply["state"],
         json!({"started": true, "generation": 0, "tick": 0, "population": 8, "activeCount": 8,
-            "checkpointGeneration": 0, "backend": "cpu", "backendNote": null})
+            "checkpointGeneration": 0, "backend": "cpu", "backendNote": null, "mathProfile": "proton"})
     );
     assert_eq!(
         client.call("advance", json!({"ticks": 90, "stopWhenInactive": false})),
@@ -293,6 +306,41 @@ fn a_remote_session_matches_a_direct_session() {
         client.call_raw("checkpointBytes", Value::Null, None).1,
         session.checkpoint_bytes().unwrap()
     );
+}
+
+/// A session's own math profile overrides the server's, and its
+/// checkpoints only restore into sessions of the same profile.
+#[test]
+fn sessions_choose_their_math_profile() {
+    let options = json!({"population": 4, "seed": 9, "mathProfile": "win11-fma3"});
+    let address = start();
+    let mut client = Client::connect(address);
+    let mut session = direct(&options);
+    assert_eq!(client.create(&options)["mathProfile"], "win11-fma3");
+    client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    session.start_with_shape(&[20, 8, 5]).unwrap();
+    assert_eq!(
+        client.call("advanceGeneration", json!({"timeLimitTicks": 240})),
+        json!(session.advance_generation(240).unwrap())
+    );
+    let (reply, checkpoint) = client.call_raw("checkpointBytes", Value::Null, None);
+    assert_eq!(reply["state"]["mathProfile"], "win11-fma3");
+    assert_eq!(checkpoint, session.checkpoint_bytes().unwrap());
+
+    let mut proton = Client::connect(address);
+    proton.create(&json!({"population": 4}));
+    let (reply, _) = proton.call_raw("restoreCheckpointBytes", Value::Null, Some(&checkpoint));
+    assert!(reply["error"].as_str().unwrap().contains("win11-fma3"), "{reply}");
+    let mut win11 = Client::connect(address);
+    win11.create(&options);
+    let (reply, _) = win11.call_raw("restoreCheckpointBytes", Value::Null, Some(&checkpoint));
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert!(Client::connect(address)
+        .error(
+            "create",
+            json!({"scene": "{}", "network": "{}", "model": "{}", "options": {"mathProfile": "win12"}})
+        )
+        .contains("options"));
 }
 
 #[test]
@@ -451,11 +499,14 @@ fn hip_sessions_end_with_their_connection() {
         return;
     }
     let options = json!({"population": 8, "seed": 2, "eliminateOnWall": true, "backend": "hip"});
-    assert_eq!(client.create(&options), json!({"backend": "hip", "backendNote": null}));
+    assert_eq!(
+        client.create(&options),
+        json!({"backend": "hip", "backendNote": null, "mathProfile": "proton"})
+    );
     let mut second = Client::connect(address);
     assert_eq!(
         second.create(&options),
-        json!({"backend": "cpu", "backendNote": "another session is using the GPU"})
+        json!({"backend": "cpu", "backendNote": "another session is using the GPU", "mathProfile": "proton"})
     );
     for c in [&mut client, &mut second] {
         c.call("startWithShape", json!({"shape": [20, 8, 5]}));

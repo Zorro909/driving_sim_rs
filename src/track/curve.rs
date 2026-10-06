@@ -3,6 +3,7 @@
 //! Copyright (c) 2014-present Godot Engine contributors; MIT license.
 use crate::math::godot_math::F2;
 use crate::math::native_math;
+use crate::math::profile::MathProfile;
 use serde_json::Value;
 #[derive(Clone, Debug)]
 pub struct Curve {
@@ -10,6 +11,7 @@ pub struct Curve {
     pub offsets: Vec<f32>,
     pub(crate) forwards: Vec<F2>,
     grid: Option<crate::track::segment_grid::SegmentGrid>,
+    math: MathProfile,
 }
 fn divide(p: F2, n: f32) -> F2 {
     F2 { x: p.x / n, y: p.y / n }
@@ -58,7 +60,7 @@ pub fn json_vector(v: &Value) -> F2 {
     }
 }
 impl Curve {
-    pub fn from_json(data: &Value) -> Self {
+    pub fn from_json(data: &Value, math: MathProfile) -> Self {
         let controls = data["points"].as_array().unwrap();
         let interval = data["bake_interval"].as_f64().unwrap() as f32;
         let mut curve = Self {
@@ -66,6 +68,7 @@ impl Curve {
             offsets: Vec::new(),
             forwards: Vec::new(),
             grid: None,
+            math,
         };
         for (i, pair) in controls.windows(2).enumerate() {
             let a = json_vector(&pair[0]["position"]);
@@ -134,7 +137,7 @@ impl Curve {
         }
         let length = a2.sqrt();
         let result_length = length + (b2.sqrt() - length) * t;
-        let angle = native_math::atan2(a.cross(b), a.dot(b)) * t;
+        let angle = self.math.atan2(a.cross(b), a.dot(b)) * t;
         let (s, c) = (native_math::engine_sin(angle), native_math::engine_cos(angle));
         (F2 {
             x: a.x * c - a.y * s,

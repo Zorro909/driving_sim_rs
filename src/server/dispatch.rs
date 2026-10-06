@@ -1,5 +1,6 @@
 //! Operations of `altd-sim serve` on one connection's `Session`.
 
+use crate::math::profile::MathProfile;
 use crate::training::session::{Backend, Session, SessionOptions};
 use serde_json::{json, Value};
 
@@ -11,9 +12,10 @@ pub enum Reply {
 }
 
 /// The session of one connection; `create` installs it.
-#[derive(Default)]
 pub struct Connection {
     session: Option<Session>,
+    /// The math profile of sessions whose options name none.
+    math: MathProfile,
 }
 
 fn arg<'a>(args: &'a Value, name: &str) -> Result<&'a Value, String> {
@@ -50,6 +52,10 @@ fn backend_name(backend: Backend) -> &'static str {
 }
 
 impl Connection {
+    pub fn new(math: MathProfile) -> Connection {
+        Connection { session: None, math }
+    }
+
     /// Handles one request. `payload` is the binary payload of a binary
     /// request frame. Errors leave the connection usable.
     pub fn handle(&mut self, id: u64, op: &str, args: &Value, payload: Option<&[u8]>) -> Reply {
@@ -74,6 +80,7 @@ impl Connection {
             "checkpointGeneration": s.boundary().map(|(g, _)| g),
             "backend": backend_name(s.backend()),
             "backendNote": s.backend_note(),
+            "mathProfile": s.math_profile(),
         })
     }
 
@@ -93,19 +100,24 @@ impl Connection {
                 if self.session.is_some() {
                     return Err("the connection already has a session".into());
                 }
-                let options: SessionOptions = match args.get("options") {
+                let mut options: SessionOptions = match args.get("options") {
                     None | Some(Value::Null) => SessionOptions::default(),
                     Some(o) => {
                         serde_json::from_value(o.clone()).map_err(|e| format!("invalid session options: {e}"))?
                     }
                 };
+                options.math_profile.get_or_insert(self.math);
                 let session = Session::new(
                     &parse(string_arg(args, "scene")?, "scene")?,
                     &parse(string_arg(args, "network")?, "network")?,
                     &parse(string_arg(args, "model")?, "model")?,
                     options,
                 )?;
-                let reply = json!({"backend": backend_name(session.backend()), "backendNote": session.backend_note()});
+                let reply = json!({
+                    "backend": backend_name(session.backend()),
+                    "backendNote": session.backend_note(),
+                    "mathProfile": session.math_profile(),
+                });
                 self.session = Some(session);
                 ok(reply)
             }

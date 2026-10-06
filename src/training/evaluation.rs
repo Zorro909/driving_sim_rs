@@ -1,5 +1,6 @@
 //! CPU evaluation of one frozen model. Each track gets a new runner and car.
 use crate::{
+    math::profile::MathProfile,
     nn::network::Network,
     track::world::{vector, World},
     training::evolution::EvolutionSettings,
@@ -240,11 +241,14 @@ fn validate_scene(scene: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `math` is the profile asked for on the command line; a suite may name one
+/// in `options.math_profile`. Without either, this machine's math is used.
 pub fn evaluate(
     network_path: &Path,
     model_path: &Path,
     suite_path: &Path,
     report_path: &Path,
+    math: Option<MathProfile>,
 ) -> Result<Value, String> {
     let started = Instant::now();
     let (candidate_bytes, candidate) = load(network_path)?;
@@ -364,6 +368,18 @@ pub fn evaluate(
     let idle = options["idle_eliminate"]
         .as_bool()
         .ok_or("missing idle elimination rule")?;
+    let suite_math = match options.get("math_profile") {
+        None => None,
+        Some(name) => Some(
+            name.as_str()
+                .ok_or("invalid suite math profile")?
+                .parse::<MathProfile>()?,
+        ),
+    };
+    let math = match (math, suite_math) {
+        (Some(a), Some(b)) if a != b => return Err(format!("the suite uses math profile {b}, not {a}")),
+        (a, b) => a.or(b).unwrap_or_else(MathProfile::detect),
+    };
     let tracks = suite["tracks"]
         .as_array()
         .filter(|v| !v.is_empty())
@@ -407,12 +423,13 @@ pub fn evaluate(
     for (row, scene, spawn, ticks) in prepared {
         let track_started = Instant::now();
         // Malformed scene exports report an error instead of aborting the CLI.
-        let world = std::panic::catch_unwind(|| World::from_scene(&scene)).map_err(|_| "invalid suite scene")?;
+        let world =
+            std::panic::catch_unwind(|| World::from_scene_with(&scene, math)).map_err(|_| "invalid suite scene")?;
         let one_lap_score = world.track.path_length() * (5.0 / 384.0);
         if !one_lap_score.is_finite() || one_lap_score <= 0.0 {
             return Err("track has no lap path".into());
         }
-        let layout = SensorLayout::from_exports(&candidate, &model);
+        let layout = SensorLayout::from_exports(&candidate, &model, math);
         let settings = EvolutionSettings {
             population: 1,
             ..Default::default()
@@ -441,7 +458,7 @@ pub fn evaluate(
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let report = json!({"version": 1, "model_sha256": sha256(&model_bytes), "candidate_sha256": sha256(&candidate_bytes), "suite_sha256": sha256(&suite_bytes),
-        "simulator_sha256": sha256(&fs::read(exe).map_err(|e| e.to_string())?), "options": options,
+        "simulator_sha256": sha256(&fs::read(exe).map_err(|e| e.to_string())?), "options": options, "math_profile": math,
         "tracks": results, "elapsed_seconds": started.elapsed().as_secs_f64()});
     let temp = report_path.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&temp, serde_json::to_vec_pretty(&report).unwrap()).map_err(|e| e.to_string())?;

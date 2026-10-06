@@ -14,10 +14,46 @@ fn buffered_tracks_are_fresh_bounded_and_reproducible_on_resume() {
         "length": {"min": 6, "max": 12}, "allow_double": [false, true], "distribution": [0, 1]
     }))
     .unwrap();
-    let small = TrainingTrackBuffer::new(template(), settings.clone(), 19, 0, 1, false).unwrap();
-    let large = TrainingTrackBuffer::new(template(), settings.clone(), 19, 0, 4, false).unwrap();
-    let resumed = TrainingTrackBuffer::new(template(), settings.clone(), 19, 2, 2, false).unwrap();
-    assert!(TrainingTrackBuffer::new(template(), settings, 19, 0, 0, false).is_err());
+    let small = TrainingTrackBuffer::new(
+        template(),
+        settings.clone(),
+        19,
+        0,
+        1,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
+    let large = TrainingTrackBuffer::new(
+        template(),
+        settings.clone(),
+        19,
+        0,
+        4,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
+    let resumed = TrainingTrackBuffer::new(
+        template(),
+        settings.clone(),
+        19,
+        2,
+        2,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
+    assert!(TrainingTrackBuffer::new(
+        template(),
+        settings,
+        19,
+        0,
+        0,
+        false,
+        altd_sim::math::profile::MathProfile::Proton
+    )
+    .is_err());
     let mut previous = None;
     for generation in 0..4 {
         let a = small.next_track().unwrap();
@@ -39,9 +75,38 @@ fn buffered_tracks_are_fresh_bounded_and_reproducible_on_resume() {
 #[test]
 fn batched_track_slots_are_queue_independent_and_keep_track_zero() {
     let settings = RandomTrainingTrackSettings::default();
-    let a = TrainingTrackBuffer::new_batched(template(), settings.clone(), 7, 2, 1, false, 3).unwrap();
-    let b = TrainingTrackBuffer::new_batched(template(), settings.clone(), 7, 2, 8, false, 3).unwrap();
-    let single = TrainingTrackBuffer::new(template(), settings.clone(), 7, 2, 1, false).unwrap();
+    let a = TrainingTrackBuffer::new_batched(
+        template(),
+        settings.clone(),
+        7,
+        2,
+        1,
+        false,
+        3,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
+    let b = TrainingTrackBuffer::new_batched(
+        template(),
+        settings.clone(),
+        7,
+        2,
+        8,
+        false,
+        3,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
+    let single = TrainingTrackBuffer::new(
+        template(),
+        settings.clone(),
+        7,
+        2,
+        1,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     for generation in 2..4 {
         for track_index in 0..3 {
             let track = a.next_track().unwrap();
@@ -98,7 +163,16 @@ fn batch_runner(
 
 #[test]
 fn reset_keeps_networks_rng_and_novelty_and_restarts_eliminated_agents() {
-    let buffer = TrainingTrackBuffer::new(template(), RandomTrainingTrackSettings::default(), 7, 0, 1, false).unwrap();
+    let buffer = TrainingTrackBuffer::new(
+        template(),
+        RandomTrainingTrackSettings::default(),
+        7,
+        0,
+        1,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     let first = buffer.next_track().unwrap();
     let mut runner = batch_runner(first.world, first.position, first.rotation);
     runner.advance_generation(30);
@@ -133,7 +207,16 @@ fn reset_keeps_networks_rng_and_novelty_and_restarts_eliminated_agents() {
 
 #[test]
 fn scored_single_track_turnover_preserves_both_rng_backends() {
-    let buffer = TrainingTrackBuffer::new(template(), RandomTrainingTrackSettings::default(), 7, 0, 1, false).unwrap();
+    let buffer = TrainingTrackBuffer::new(
+        template(),
+        RandomTrainingTrackSettings::default(),
+        7,
+        0,
+        1,
+        false,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     let first = buffer.next_track().unwrap();
     for game in [false, true] {
         let mut a = batch_runner(first.world.clone(), first.position, first.rotation);
@@ -162,9 +245,17 @@ fn gpu_track_batches_match_cpu_and_only_advance_evolution_after_all_tracks() {
         training::batch_evaluation::BatchEvaluation,
     };
     let gpu = Gpu::open(None).unwrap();
-    let buffer =
-        TrainingTrackBuffer::new_batched(template(), RandomTrainingTrackSettings::default(), 83, 0, 4, true, 3)
-            .unwrap();
+    let buffer = TrainingTrackBuffer::new_batched(
+        template(),
+        RandomTrainingTrackSettings::default(),
+        83,
+        0,
+        4,
+        true,
+        3,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     let mut first = buffer.next_track().unwrap();
     let mut cpu = batch_runner(first.world.clone(), first.position, first.rotation);
     let mut on_gpu = batch_runner(first.world.clone(), first.position, first.rotation);
@@ -222,7 +313,16 @@ fn gpu_track_switches_preserve_cpu_results_and_reuse_population_buffers() {
         training::{SensorLayout, TrainingRunner},
     };
     let gpu = Gpu::open(None).unwrap();
-    let buffer = TrainingTrackBuffer::new(template(), RandomTrainingTrackSettings::default(), 83, 0, 4, true).unwrap();
+    let buffer = TrainingTrackBuffer::new(
+        template(),
+        RandomTrainingTrackSettings::default(),
+        83,
+        0,
+        4,
+        true,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap();
     let mut first = buffer.next_track().unwrap();
     let make_runner = || {
         let settings = EvolutionSettings {

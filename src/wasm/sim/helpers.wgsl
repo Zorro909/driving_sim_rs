@@ -33,6 +33,12 @@ fn fp_isinf(a: f32) -> bool { return (bitcast<u32>(a) & 0x7fffffffu) == 0x7f8000
 fn fp_isfinite(a: f32) -> bool { return (bitcast<u32>(a) & 0x7f800000u) != 0x7f800000u; }
 fn fp_signbit(a: f32) -> bool { return (bitcast<u32>(a) & 0x80000000u) != 0u; }
 fn fp_copysign(a: f32,b: f32) -> f32 { return bitcast<f32>((bitcast<u32>(a) & 0x7fffffffu) | (bitcast<u32>(b) & 0x80000000u)); }
+// x86 NaN propagation: the first NaN operand, quieted. altd_invalid is the
+// default NaN 0xffc00000 for non-NaN operands.
+fn fp_nan_operand(a: f32,b: f32) -> f32 { return bitcast<f32>(select(bitcast<u32>(b),bitcast<u32>(a),fp_isnan(a)) | 0x00400000u); }
+fn fp_invalid(a: f32) -> f32 { return bitcast<f32>(select(0xffc00000u,bitcast<u32>(a) | 0x00400000u,fp_isnan(a))); }
+fn f64_nan_operand(a: F64,b: F64) -> F64 { let r=select(b,a,f64_isnan(a)); return F64(r.x,r.y | 0x00080000u); }
+fn f64_invalid(a: F64) -> F64 { return select(F64(0u,0xfff80000u),F64(a.x,a.y | 0x00080000u),f64_isnan(a)); }
 fn fp_mod(a: f32,b: f32) -> f32 {
  let ad=f64_from_f32(a); let bd=f64_from_f32(b);
  return f64_to_f32(f64_sub(ad,f64_mul(f64_trunc(f64_div(ad,bd)),bd)));

@@ -5,6 +5,7 @@
 pub mod dispatch;
 pub mod protocol;
 
+use crate::math::profile::MathProfile;
 use dispatch::{Connection, Reply};
 use protocol::{decode_binary, encode_binary, host_allowed, normalize_origin, origin_allowed, Request, PROTOCOL};
 use serde_json::{json, Value};
@@ -27,12 +28,15 @@ pub struct Config {
     pub port: u16,
     /// Allowed HTTP(S) origins; `bind` validates and normalizes them.
     pub origins: Vec<String>,
+    /// The math profile of sessions whose options name none; None detects it.
+    pub math_profile: Option<MathProfile>,
 }
 
 /// A bound server; `run` accepts connections.
 pub struct Server {
     listener: TcpListener,
     origins: Arc<Vec<String>>,
+    math: MathProfile,
 }
 
 /// HIP availability as `hello` reports it.
@@ -43,7 +47,7 @@ fn hip_status() -> Value {
     }
 }
 
-fn hello() -> Value {
+fn hello(math: MathProfile) -> Value {
     json!({
         "type": "hello",
         "protocol": PROTOCOL,
@@ -52,6 +56,8 @@ fn hello() -> Value {
         "carStateStride": crate::training::CAR_STATE_STRIDE,
         "carStateFields": crate::training::CAR_STATE_FIELDS,
         "hip": hip_status(),
+        "mathProfile": math,
+        "mathProfiles": MathProfile::ALL,
     })
 }
 
@@ -89,11 +95,17 @@ impl Server {
         Ok(Server {
             listener,
             origins: Arc::new(origins),
+            math: config.math_profile.unwrap_or_else(MathProfile::detect),
         })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// The math profile of sessions whose options name none.
+    pub fn math_profile(&self) -> MathProfile {
+        self.math
     }
 
     /// Whether HIP sessions can run, as `hello` reports it.
@@ -112,16 +124,16 @@ impl Server {
                     continue;
                 }
             };
-            let origins = self.origins.clone();
+            let (origins, math) = (self.origins.clone(), self.math);
             std::thread::Builder::new()
                 .name("altd-sim-connection".into())
-                .spawn(move || serve_connection(stream, &origins, port))?;
+                .spawn(move || serve_connection(stream, &origins, port, math))?;
         }
         Ok(())
     }
 }
 
-fn serve_connection(stream: TcpStream, origins: &[String], port: u16) {
+fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: MathProfile) {
     let peer = stream.peer_addr().map_or_else(|_| "?".into(), |a| a.to_string());
     let _ = stream.set_nodelay(true);
     let mut origin = String::new();
@@ -149,7 +161,7 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16) {
         Err(_) => return,
     };
     eprintln!("altd-sim serve: connected {peer} (origin {origin})");
-    match converse(&mut socket) {
+    match converse(&mut socket, math) {
         Ok(()) => eprintln!("altd-sim serve: {peer} disconnected"),
         Err(e) => eprintln!("altd-sim serve: {peer} closed: {e}"),
     }
@@ -164,10 +176,10 @@ fn send(socket: &mut WebSocket<TcpStream>, reply: Reply) -> tungstenite::Result<
 
 /// Greets the client and answers its requests until it closes. The
 /// session drops with the connection.
-fn converse(socket: &mut WebSocket<TcpStream>) -> Result<(), String> {
-    let mut connection = Connection::default();
+fn converse(socket: &mut WebSocket<TcpStream>, math: MathProfile) -> Result<(), String> {
+    let mut connection = Connection::new(math);
     socket
-        .send(Message::text(hello().to_string()))
+        .send(Message::text(hello(math).to_string()))
         .map_err(|e| e.to_string())?;
     loop {
         let message = match socket.read() {

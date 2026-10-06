@@ -46,25 +46,28 @@ enum MathOp : int {
     OP_ENGINE_RAW = 7,     // f32 -> (f32, f32), without exceptions
     OP_GAME_TANH = 8,      // f64 -> f64
 };
+// altd_gpu_math's op carries a math profile above these bits; it selects the
+// variant of the sin, cos, atan2, exp, pow and tanh ops.
+constexpr int OP_MASK = 0xff, OP_PROFILE_SHIFT = 8;
 
 __global__ void math_kernel(int op, int n, const void* in, void* out, uint32_t* err) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    uint32_t e = 0;
+    uint32_t e = 0, math = (uint32_t)op >> OP_PROFILE_SHIFT;
     const float* fi = (const float*)in;
     const double* di = (const double*)in;
     float* fo = (float*)out;
     double* dout = (double*)out;
-    switch (op) {
-        case OP_NATIVE_SIN: fo[i] = native_sin(fi[i], e); break;
-        case OP_NATIVE_COS: fo[i] = native_cos(fi[i], e); break;
-        case OP_NATIVE_ATAN2: fo[i] = native_atan2(fi[2 * i], fi[2 * i + 1]); break;
+    switch (op & OP_MASK) {
+        case OP_NATIVE_SIN: fo[i] = profile_sin(math, fi[i], e); break;
+        case OP_NATIVE_COS: fo[i] = profile_cos(math, fi[i], e); break;
+        case OP_NATIVE_ATAN2: fo[i] = profile_atan2(math, fi[2 * i], fi[2 * i + 1]); break;
         case OP_MANAGED_SINCOS: managed_sin_cos(fi[i], fo[2 * i], fo[2 * i + 1], e); break;
-        case OP_DEXP: dout[i] = dexp(di[i]); break;
-        case OP_DPOW: dout[i] = dpow(di[2 * i], di[2 * i + 1]); break;
+        case OP_DEXP: dout[i] = profile_exp(math, di[i]); break;
+        case OP_DPOW: dout[i] = profile_pow(math, di[2 * i], di[2 * i + 1]); break;
         case OP_ENGINE_SINCOS: engine_sin_cos(fi[i], fo[2 * i], fo[2 * i + 1], e); break;
         case OP_ENGINE_RAW: engine_sin_cos_raw(fi[i], fo[2 * i], fo[2 * i + 1]); break;
-        case OP_GAME_TANH: dout[i] = game_tanh(di[i]); break;
+        case OP_GAME_TANH: dout[i] = profile_tanh(math, di[i]); break;
     }
     err[i] = e;
 }
@@ -81,7 +84,7 @@ __global__ void engine_scan_kernel(uint32_t first, uint32_t n, uint32_t* out) {
 }
 
 size_t in_size(int op) {
-    switch (op) {
+    switch (op & OP_MASK) {
         case OP_NATIVE_ATAN2: return 8;
         case OP_DEXP: case OP_GAME_TANH: return 8;
         case OP_DPOW: return 16;
@@ -89,7 +92,7 @@ size_t in_size(int op) {
     }
 }
 size_t out_size(int op) {
-    switch (op) {
+    switch (op & OP_MASK) {
         case OP_MANAGED_SINCOS: case OP_ENGINE_SINCOS: case OP_ENGINE_RAW: return 8;
         case OP_DEXP: case OP_DPOW: case OP_GAME_TANH: return 8;
         default: return 4;
@@ -280,8 +283,8 @@ __device__ inline void load_rows(double (&w)[ROW_CHUNK], const double* __restric
 
 // Every thread of the block must call it (barriers); `car` and `live` are the
 // caller's slot (threadIdx.x / LANES).
-__device__ inline void forward_car(const NetShape& shape, const double* __restrict__ params, size_t stride, bool live, uint32_t car,
-                                   const double* __restrict__ inputs, Agent* agents) {
+__device__ inline void forward_car(uint32_t math, const NetShape& shape, const double* __restrict__ params, size_t stride, bool live,
+                                   uint32_t car, const double* __restrict__ inputs, Agent* agents) {
     // Two activation buffers: a layer reads one and writes the other, so one
     // barrier per layer orders the writes before the next layer's reads (the
     // previous barrier already ordered this layer's reads before those writes).
@@ -339,7 +342,7 @@ __device__ inline void forward_car(const NetShape& shape, const double* __restri
 #if ALTD_FORWARD_DIAG == 1 || ALTD_FORWARD_DIAG >= 4
             out = acc + bias;
 #else
-            out = game_tanh(acc + bias);
+            out = profile_tanh(math, acc + bias);
 #endif
         }
         if (active) buffers[current ^ 1][s][j] = out;
@@ -354,11 +357,11 @@ __device__ inline void forward_car(const NetShape& shape, const double* __restri
 }
 
 __global__ void __launch_bounds__(LANES * CARS_PER_BLOCK)
-    forward_kernel(NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars, uint32_t n,
-                   const double* __restrict__ inputs, Agent* agents) {
+    forward_kernel(uint32_t math, NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
+                   uint32_t n, const double* __restrict__ inputs, Agent* agents) {
     uint32_t car = blockIdx.x * CARS_PER_BLOCK + threadIdx.x / LANES;
     bool live = car < n && reads(m, cars[car], car);
-    forward_car(shape, params, stride, live, car, inputs, agents);
+    forward_car(math, shape, params, stride, live, car, inputs, agents);
 }
 
 // The agent's side of a step of car i: a reported wall contact sets
@@ -596,7 +599,7 @@ ALTD_API int altd_gpu_layout(uint64_t* out, int n) {
                     sizeof(WheelDesc), sizeof(ShapeDev), sizeof(TileCell), sizeof(PathSeg), sizeof(NearGrid),
                     offsetof(World, tiles), offsetof(World, curve_grid), offsetof(World, shape_grid),
                     offsetof(Car, tick), offsetof(Car, pairs), offsetof(Car, contacts), offsetof(Agent, recent),
-                    offsetof(VehicleDesc, steering_speed), offsetof(VehicleDesc, gravity)};
+                    offsetof(VehicleDesc, steering_speed), offsetof(VehicleDesc, gravity), offsetof(World, math_profile)};
     int count = (int)(sizeof(v) / sizeof(v[0]));
     for (int i = 0; i < n && i < count; i++) out[i] = v[i];
     return count;
@@ -778,14 +781,14 @@ population_mean_kernel(const double* params, size_t stride, uint32_t n, double* 
 // parameter order used by TrainingRunner::install. pow(x, 2) is the game's
 // routine and must not be replaced by x*x or a parallel sum.
 __global__ void __launch_bounds__(64)
-population_novelty_kernel(const double* params, size_t stride, const double* mean, double* novelty) {
+population_novelty_kernel(uint32_t math, const double* params, size_t stride, const double* mean, double* novelty) {
     __shared__ double terms[64];
     size_t car = blockIdx.x;
     uint32_t lane = threadIdx.x;
     double sum = 0.0;
     for (size_t base = 0; base < stride; base += 64) {
         size_t j = base + lane;
-        if (j < stride) terms[lane] = dpow(params[car * stride + j] - mean[j], 2.0);
+        if (j < stride) terms[lane] = profile_pow(math, params[car * stride + j] - mean[j], 2.0);
         __syncthreads();
         if (lane == 0)
             for (uint32_t k = 0; k < 64 && base + k < stride; k++) sum += terms[k];
@@ -798,7 +801,7 @@ ALTD_API int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
     if (n != s->network_count || !s->params) return -1;
     if (n == 0) return 0;
     population_mean_kernel<<<blocks(s->stride, MEAN_COLS), MEAN_THREADS, 0, s->stream>>>(s->params, s->stride, n, s->mean);
-    population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->params, s->stride, s->mean, s->novelty);
+    population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->world.math_profile, s->params, s->stride, s->mean, s->novelty);
     CHECK(hipGetLastError());
     CHECK(hipMemcpyAsync(novelty, s->novelty, sizeof(double) * n, hipMemcpyDeviceToHost, s->stream));
     CHECK(hipStreamSynchronize(s->stream));
@@ -811,7 +814,7 @@ ALTD_API int altd_gpu_sim_infer(Sim* s, ReadMask mask) {
     if (s->n == 0) return 0;
     int status = altd_gpu_sim_sensors(s, mask, nullptr);
     if (status) return status;
-    forward_kernel<<<blocks(s->n, CARS_PER_BLOCK), LANES * CARS_PER_BLOCK>>>(s->shape, s->params, s->stride, mask, s->cars, s->n,
+    forward_kernel<<<blocks(s->n, CARS_PER_BLOCK), LANES * CARS_PER_BLOCK>>>(s->world.math_profile, s->shape, s->params, s->stride, mask, s->cars, s->n,
                                                                             s->inputs, s->agents);
     CHECK(hipGetLastError());
     return 0;
@@ -995,7 +998,7 @@ __global__ void w_sensor_kernel(World w, VehicleDesc v, Sensors s, ReadMask m, C
 }
 
 __global__ void __launch_bounds__(LANES * CARS_PER_BLOCK)
-w_forward_kernel(NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
+w_forward_kernel(uint32_t math, NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
                  const uint32_t* list, const WindowState* st, uint32_t p, const double* __restrict__ inputs, Agent* agents) {
     uint32_t batch = (m.batch_index + blockIdx.y) % 8;
     uint32_t count = st->live_count[p][batch];
@@ -1003,7 +1006,7 @@ w_forward_kernel(NetShape shape, const double* __restrict__ params, size_t strid
     uint32_t j = blockIdx.x * CARS_PER_BLOCK + threadIdx.x / LANES;
     uint32_t car = j < count ? list[batch * m.batch_size + j] : 0;
     bool live = j < count && (cars[car].flags & CAR_ACTIVE);
-    forward_car(shape, params, stride, live, car, inputs, agents);
+    forward_car(math, shape, params, stride, live, car, inputs, agents);
 }
 
 // Steps the cars of step list q. With `out`, inactive cars are checked for
@@ -1152,7 +1155,7 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
             });
             phase(2, [&] {
                 w_forward_kernel<<<dim3(blocks(mask.batch_size, CARS_PER_BLOCK), mask.batches_per_tick), LANES * CARS_PER_BLOCK, 0, stream>>>(
-                    s->shape, s->params, s->stride, mask, s->cars, s->live[p], st, p, s->inputs, s->agents);
+                    s->world.math_profile, s->shape, s->params, s->stride, mask, s->cars, s->live[p], st, p, s->inputs, s->agents);
             });
             phase(3, [&] {
                 // On statistics ticks list 1 - p is read and list p rebuilt.
@@ -1281,7 +1284,7 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
     return 0;
 }
 
-ALTD_API int altd_gpu_version() { return 9; }
+ALTD_API int altd_gpu_version() { return 10; }
 
 // The runtime the library was built for: "HIP" (AMD) or "CUDA" (NVIDIA).
 ALTD_API const char* altd_gpu_platform() { return ALTD_PLATFORM; }

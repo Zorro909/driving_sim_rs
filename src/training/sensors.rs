@@ -1,5 +1,6 @@
 //! Ordered game sensor descriptors and input layout.
 
+use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::physics::car::{Car, Sensor, SensorScratch};
 use crate::track::world::World;
@@ -31,8 +32,8 @@ pub(crate) fn vision_angle(name: &str) -> Option<f64> {
 
 /// `SensorsEditor.CalculateSensorLength`: the editor gives every vision ray
 /// `200 + 600 * |cos(degrees)|` pixels, in float32 with the game's UCRT cosf.
-pub fn vision_length(degrees: f32) -> f32 {
-    200.0 + 600.0 * crate::math::native_math::cos(degrees * (std::f32::consts::PI / 180.0)).abs()
+pub fn vision_length(degrees: f32, math: MathProfile) -> f32 {
+    200.0 + 600.0 * math.cos(degrees * (std::f32::consts::PI / 180.0)).abs()
 }
 
 #[derive(Clone, Debug)]
@@ -113,8 +114,9 @@ impl SensorLayout {
         Ok(SensorLayout { names, sensors })
     }
 
-    /// `SensorLayout.from_exports(live_network, model)`.
-    pub fn from_exports(live_network: &Value, model: &Value) -> SensorLayout {
+    /// `SensorLayout.from_exports(live_network, model)`. Vision rays the model
+    /// does not list get the editor's length under `math`.
+    pub fn from_exports(live_network: &Value, model: &Value, math: MathProfile) -> SensorLayout {
         if let Some(exact) = model.get("sensor_layout") {
             let layout = Self::from_ordered(exact).expect("exact sensor descriptors");
             let inputs: Vec<_> = live_network["inputs"]
@@ -151,7 +153,7 @@ impl SensorLayout {
                         .iter()
                         .rev()
                         .find(|(a, _)| *a == angle)
-                        .map_or_else(|| vision_length(angle as f32) as f64, |&(_, length)| length);
+                        .map_or_else(|| vision_length(angle as f32, math) as f64, |&(_, length)| length);
                     Sensor::Raycast { degrees: angle, length }
                 }
                 None => Sensor::by_name(sensor_type(name).unwrap_or_else(|| panic!("unknown sensor: {name}"))),

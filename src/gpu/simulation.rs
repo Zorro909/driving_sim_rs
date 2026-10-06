@@ -4,6 +4,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu::hip::{Gpu, GpuWorld};
 use crate::math::godot_math::F2;
+use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::physics::car::{Sensor, DT};
 use crate::track::world::{Surface, VehicleConfig, World, ASPHALT};
@@ -274,7 +275,8 @@ pub(crate) struct WorldDesc {
     pub(crate) tile_ny: i64,
     pub(crate) tiles: *const TileCell,
     pub(crate) path_points: u32,
-    pub(crate) pad0: u32,
+    /// `MathProfile::index`.
+    pub(crate) math_profile: u32,
     pub(crate) path_segments: *const [f32; 8],
     pub(crate) path_offsets: *const f64,
     pub(crate) path_grid: NearGridDesc,
@@ -343,6 +345,7 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
         offset_of!(GpuAgent, recent),
         offset_of!(VehicleDesc, steering_speed),
         offset_of!(VehicleDesc, gravity),
+        offset_of!(WorldDesc, math_profile),
     ];
     if count != want.len() {
         return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh or gpu/build-cuda.*".into());
@@ -719,6 +722,7 @@ pub(crate) const GRID_MARGIN: f64 = 1024.0;
 
 /// Owned host arrays behind a `WorldDesc`.
 pub struct TrackArrays {
+    math: MathProfile,
     pub surfaces: SurfaceTable,
     surface_rows: Vec<[f32; 4]>,
     default_surface: u32,
@@ -839,6 +843,7 @@ impl TrackArrays {
             .collect();
         let shape_grid = shape_grid(&shape_boxes, SHAPE_CELL, SHAPE_MARGIN);
         Ok(TrackArrays {
+            math: world.math,
             surfaces,
             surface_rows,
             default_surface,
@@ -913,7 +918,7 @@ impl TrackArrays {
             tile_ny: *ny,
             tiles: tiles.as_ptr(),
             path_points: self.path_offsets.len() as u32,
-            pad0: 0,
+            math_profile: self.math.index(),
             path_segments: self.path_rows.as_ptr(),
             path_offsets: self.path_offsets.as_ptr(),
             path_grid: NearGrid::desc(self.path_grid.as_ref()),
@@ -1693,8 +1698,16 @@ mod native_validation_tests {
         };
         let template = serde_json::from_str(include_str!("../../assets/scenes/formula_template.json")).unwrap();
         let settings = serde_json::from_str(include_str!("../../assets/random_track_settings.json")).unwrap();
-        let (_, scene) =
-            crate::track::training_tracks::training_scene_at(&template, &settings, None, 1729, 0, 0).unwrap();
+        let (_, scene) = crate::track::training_tracks::training_scene_at(
+            &template,
+            &settings,
+            None,
+            1729,
+            0,
+            0,
+            crate::math::profile::MathProfile::Proton,
+        )
+        .unwrap();
         let world = World::from_scene(&scene);
         let prepared = crate::gpu::hip::PreparedGpuWorld::new(&world).unwrap();
         let uploaded = GpuWorld::try_from_prepared(gpu, prepared).unwrap();

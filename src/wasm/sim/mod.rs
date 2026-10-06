@@ -283,8 +283,8 @@ fn encode(session: &crate::training::session::Session) -> Result<Encoded, String
             if desc.kind == 0 {
                 let angle = (desc.a - 90.0f32) * (std::f32::consts::PI / 180.0);
                 desc.offset = [
-                    crate::math::native_math::cos(angle) * desc.b,
-                    crate::math::native_math::sin(angle) * desc.b,
+                    runner.world.math.cos(angle) * desc.b,
+                    runner.world.math.sin(angle) * desc.b,
                 ];
             }
             desc

@@ -3,6 +3,7 @@
 use super::args::TrackOptions;
 use super::inputs::{elimination_options, frames, num, output_names};
 use super::platform::platform_json;
+use altd_sim::math::profile::MathProfile;
 use altd_sim::math::pymath::py_sum;
 use altd_sim::nn::network::Network;
 use altd_sim::track::training_tracks::TrainingTrackBuffer;
@@ -33,6 +34,7 @@ pub(super) fn train(
     threads: usize,
     game_rng_state: Option<&Value>,
     tracks: &TrackOptions,
+    math: MathProfile,
 ) -> (Value, Value) {
     let empty = json!({});
     let settings_data = settings_file.unwrap_or(&empty);
@@ -66,6 +68,7 @@ pub(super) fn train(
             tracks.track_buffer_size,
             false,
             track_count,
+            math,
         )
         .unwrap_or_else(|e| panic!("random tracks: {e}"))
     });
@@ -77,7 +80,7 @@ pub(super) fn train(
         None => {
             let spawn = &frames(spawn_trace)[0];
             (
-                Arc::new(World::from_scene(scene)),
+                Arc::new(World::from_scene_with(scene, math)),
                 vector(&spawn["position"]),
                 num(&spawn["rotation"]),
             )
@@ -89,7 +92,7 @@ pub(super) fn train(
         world,
         position,
         rotation,
-        SensorLayout::from_exports(network_data, model),
+        SensorLayout::from_exports(network_data, model, math),
         &output_names(network_data),
         settings.clone(),
         game_rng_state.map_or_else(
@@ -171,6 +174,7 @@ pub(super) fn train(
     best["outputs"] = network_data["outputs"].clone();
     let output = json!({
         "seed": seed,
+        "math_profile": math,
         "settings": settings.to_json(),
         "ticks_limit": ticks, "tracks_per_generation": track_count, "track_seed_version": 2,
         "eliminate_on_wall": eliminate_on_wall,

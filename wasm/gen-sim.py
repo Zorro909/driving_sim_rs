@@ -23,6 +23,7 @@ parser.add_argument(
 parser.add_argument("--check", action="store_true", help="compare outputs without writing files")
 args = parser.parse_args()
 subprocess.run(["python3", str(root / "gpu/gen_tables.py"), "--check"], check=True)
+subprocess.run(["python3", str(root / "tools/ucrt/gen-math.py"), "--check"], check=True)
 # Read the shared native GPU implementation.
 texts = {
     n: (root / "gpu/sim" / n).read_text()
@@ -106,6 +107,25 @@ for name in ["track.h", "step.h"]:
             pos = a + len(replacement)
         s += tail
     texts[name] = s
+# The Windows math kernels (math/kernels) replace math.h's include of them,
+# without the parts WGSL leaves out: log, and the sinf/cosf exceptions, which
+# the browser applies on the CPU (sensor offsets) instead. Their specifier
+# macros become plain functions and constants.
+kernels = root / "math/kernels"
+ucrt = (kernels / "ucrt_tables.h").read_text() + (kernels / "ucrt.h").read_text()
+ucrt = re.sub(r"#ifndef ALTD_MATH_WGSL\n.*?#endif\n", "", ucrt, flags=re.S)
+ucrt = (
+    ucrt.replace("ALTD_MATH_FN ", "")
+    .replace("ALTD_MATH_TABLE ", "const ")
+    .replace("ALTD_MATH_CONST ", "const ")
+)
+assert "ALTD_MATH" not in re.sub(r"//[^\n]*", "", ucrt)
+s = texts["math.h"]
+s = re.sub(r"#define ALTD_MATH_\w+[^\n]*\n", "", s)
+s = s.replace('#include "../../math/kernels/ucrt.h"', ucrt)
+# Ray sensors read their precomputed offsets, so sin and cos keep musl's.
+s = re.sub(r"__device__ inline float profile_(?:sin|cos)\(.*?\n\}\n", "", s, flags=re.S)
+texts["math.h"] = s
 s = texts["step.h"]
 # Naga's SPIR-V backend panics on dynamically indexed private pointers passed
 # to functions. Keep contact references inside refresh_contact and pass its
@@ -144,9 +164,10 @@ s = s.replace('static_assert(MAX_PAIRS <= 32, "pair mask");', "")
 texts["step.h"] = s
 s = texts["sensors.h"]
 s = s.replace(
-    "float angle = (s.a - 90.0f) * (PI_F / 180.0f);\n            Vec2 local = Vec2{native_cos(angle, err) * s.b, native_sin(angle, err) * s.b};",
+    "float angle = (s.a - 90.0f) * (PI_F / 180.0f);\n            Vec2 local = Vec2{profile_cos(w.math_profile, angle, err) * s.b, profile_sin(w.math_profile, angle, err) * s.b};",
     "Vec2 local = s.offset;",
 )
+assert "profile_cos" not in s and "profile_sin" not in s
 texts["sensors.h"] = s
 s = texts["track.h"].replace("int64_t", "int32_t").replace("sat_i64", "sat_i32")
 s = (
@@ -510,6 +531,7 @@ def kind(n):
             "sqrtf": "f32",
             "fmodf": "f32",
             "fmax": "f64",
+            "fma": "f64",
             "copysignf": "f32",
             "isfinite": "bool",
             "isnan": "bool",
@@ -518,7 +540,14 @@ def kind(n):
             "make_float2": "vec2",
             "__double2int_rz": "i32",
             "sat_i32": "i32",
-        }.get(f, kind(n.args.exprs[0]) if f in ["min", "max"] else "unknown")
+        }.get(
+            f,
+            (
+                kind(n.args.exprs[0])
+                if f in ["min", "max", "altd_invalid", "altd_nan_operand"]
+                else "unknown"
+            ),
+        )
     if isinstance(n, A.ExprList):
         return kind(n.exprs[-1])
     raise ValueError(("kind", type(n), n))
@@ -666,6 +695,8 @@ def expr(n):
                 return v
             if t == "f64":
                 return f"f64_neg({v})"
+            if t == "f32" and op == "-":
+                return f"fp_neg({v})"
             if t in ["u64", "i64"]:
                 return f"i64_neg({v})" if op == "-" else f"~({v})"
             if t == "u32" and op == "-":
@@ -700,7 +731,7 @@ def expr(n):
                 f"var {v}: {wg(t)}; if ({c}) {{ {v} = {a}; }} else {{ {v} = {b}; }}"
             )
             return v
-        return f"select({b}, {a}, {c})"
+        return f'{"fp_select" if t == "f32" else "select"}({b}, {a}, {c})'
     if isinstance(n, A.FuncCall):
         f = n.name.name
         args = n.args.exprs if n.args else []
@@ -733,11 +764,15 @@ def expr(n):
             return f'{f}({", ".join(out)})'
         t = unref(kind(args[0])) if args else None
         if f in ["fbits", "ffrom"]:
-            return f'bitcast<{"u32" if f=="fbits" else "f32"}>({E(args[0])})'
+            if f == "ffrom":
+                # A constant -0 float can be canonicalized by a driver. Keep
+                # explicit bit patterns opaque with the uploaded zero pad.
+                return f'bitcast<f32>({E(args[0])} ^ params.pad)'
+            return f'bitcast<u32>({E(args[0])})'
         if f in ["dbits", "dfrom"]:
             return E(args[0])
         if f in ["fabs", "fabsf"]:
-            return f'{"f64_abs" if t=="f64" else "abs"}({E(args[0])})'
+            return f'{"f64_abs" if t=="f64" else "fp_abs"}({E(args[0])})'
         if f in ["isnan", "isinf", "isfinite", "signbit"]:
             return f'{"f64_" if t=="f64" else "fp_"}{f}({E(args[0])})'
         if f in ["floor", "rint", "round"]:
@@ -748,8 +783,15 @@ def expr(n):
             return f'fp_mod({E(args[0],"f32")}, {E(args[1],"f32")})'
         if f == "fmax":
             return f'f64_max({E(args[0],"f64")}, {E(args[1],"f64")})'
+        if f == "fma":
+            return f'f64_fma({E(args[0],"f64")}, {E(args[1],"f64")}, {E(args[2],"f64")})'
         if f == "copysignf":
             return f"fp_copysign({E(args[0])}, {E(args[1])})"
+        if f == "altd_invalid":
+            return f'{"f64_" if t=="f64" else "fp_"}invalid({E(args[0],t)})'
+        if f == "altd_nan_operand":
+            return f'{"f64_" if t=="f64" else "fp_"}nan_operand({E(args[0],t)}, {E(args[1],t)})'
+
         if f == "make_float2":
             return f'vec2<f32>({E(args[0],"f32")}, {E(args[1],"f32")})'
         if f == "__double2int_rz":

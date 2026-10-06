@@ -100,6 +100,7 @@ fn main() {
                 recipe["seed"].as_i64().unwrap(),
                 recipe["generation"].as_u64().unwrap(),
                 recipe["slot"].as_u64().unwrap() as usize,
+                altd_sim::math::profile::MathProfile::Proton,
             )
             .unwrap();
             let scene_file = scenario["scene"].as_str().unwrap();

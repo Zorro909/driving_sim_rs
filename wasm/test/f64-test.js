@@ -1,7 +1,8 @@
 // The browser side of `PAGE=f64.html node wasm/test/run.mjs`: runs the WGSL
 // binary64 library (src/wasm/sim/f64.wgsl) on the WebGPU device over special,
 // random and cancelling operands and compares every result bit for bit with
-// JavaScript's IEEE doubles. NaN results only need to be NaN.
+// JavaScript's IEEE doubles (fma: exact BigInt sums). NaN results only need
+// to be NaN.
 const text = async (url) => {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`${url}: ${response.status}`);
@@ -9,7 +10,7 @@ const text = async (url) => {
 };
 
 const OPS = ['add', 'sub', 'mul', 'div', 'lt', 'le', 'eq', 'from_f32', 'to_f32', 'rint', 'round', 'floor', 'trunc', 'to_i32',
-    'from_i32', 'from_u64', 'from_i64', 'to_i64', 'ceil', 'u64_div6'];
+    'from_i32', 'from_u64', 'from_i64', 'to_i64', 'ceil', 'u64_div6', 'fma', 'fma_err'];
 
 const KERNEL = `
 @group(0) @binding(0) var<storage, read> inputs: array<vec4<u32>>;
@@ -21,6 +22,8 @@ const KERNEL = `
     let q = inputs[i];
     let a = q.xy;
     let b = q.zw;
+    // fma's addend: the next case's second operand.
+    let c = inputs[(i + 1u) % test.y].zw;
     var r = vec4<u32>(0u);
     switch test.x {
         case 0u: { r = vec4<u32>(f64_add(a, b), 0u, 0u); }
@@ -43,6 +46,9 @@ const KERNEL = `
         case 17u: { r = vec4<u32>(f64_to_i64(a), 0u, 0u); }
         case 18u: { r = vec4<u32>(f64_ceil(a), 0u, 0u); }
         case 19u: { r = vec4<u32>(u64_div_small(a, 6u), 0u, 0u); }
+        case 20u: { r = vec4<u32>(f64_fma(a, b, c), 0u, 0u); }
+        // The product's rounding error: the addend cancels all but its tail.
+        case 21u: { r = vec4<u32>(f64_fma(a, b, f64_neg(f64_mul(a, b))), 0u, 0u); }
         default: {}
     }
     outputs[i] = r;
@@ -81,8 +87,47 @@ function toI64(x) {
 const big = (lo, hi) => (BigInt(hi) << 32n) | BigInt(lo);
 const bigBits = (v) => { const m = BigInt.asUintN(64, v); return [Number(m & 0xffffffffn), Number(m >> 32n)]; };
 
+// A finite double as m * 2^e with an integer m.
+function decompose(x) {
+    const [lo, hi] = bitsOf(x);
+    const field = (hi >>> 20) & 0x7ff;
+    const frac = big(lo, hi & 0xfffff);
+    const m = field === 0 ? frac : frac | (1n << 52n);
+    return { m: hi >>> 31 ? -m : m, e: field === 0 ? -1074 : field - 1075 };
+}
+// m * 2^e rounded to the nearest double, ties to even.
+function roundExact(m, e) {
+    if (m === 0n) return 0;
+    const negative = m < 0n;
+    const a = negative ? -m : m;
+    const top = a.toString(2).length - 1 + e;
+    const q = Math.max(top - 52, -1074);
+    let mant;
+    if (q <= e) {
+        mant = a << BigInt(e - q);
+    } else {
+        const shift = BigInt(q - e);
+        mant = a >> shift;
+        const rest = a - (mant << shift);
+        const half = 1n << (shift - 1n);
+        if (rest > half || (rest === half && (mant & 1n))) mant += 1n;
+    }
+    const r = Number(mant) * 2 ** q;
+    return negative ? -r : r;
+}
+function fma(a, b, c) {
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return a * b + c;
+    if (!Number.isFinite(c)) return c;
+    if (a === 0 || b === 0) return a * b + c;
+    if (c === 0) return a * b;
+    const x = decompose(a), y = decompose(b), z = decompose(c);
+    const ep = x.e + y.e;
+    const e = Math.min(ep, z.e);
+    return roundExact((x.m * y.m << BigInt(ep - e)) + (z.m << BigInt(z.e - e)), e);
+}
+
 // Expected result words for op and operand bits; `nan` marks a NaN result.
-function expected(op, a, b, q) {
+function expected(op, a, b, q, c) {
     const d = (x) => ({ words: [...bitsOf(x), 0, 0], nan: Number.isNaN(x) });
     switch (OPS[op]) {
         case 'add': return d(a + b);
@@ -105,6 +150,8 @@ function expected(op, a, b, q) {
         case 'to_i64': return { words: [...bigBits(toI64(a)), 0, 0] };
         case 'ceil': return d(Math.ceil(a));
         case 'u64_div6': return { words: [...bigBits(big(q[0], q[1]) / 6n), 0, 0] };
+        case 'fma': return d(fma(a, b, c));
+        case 'fma_err': return d(fma(a, b, -(a * b)));
     }
     throw new Error(`op ${op}`);
 }
@@ -199,7 +246,8 @@ export async function run(root) {
         let mismatches = 0, first = null;
         for (let i = 0; i < cases.length; i++) {
             const q = cases[i];
-            const want = expected(op, fromBits(q[0], q[1]), fromBits(q[2], q[3]), q);
+            const next = cases[(i + 1) % cases.length];
+            const want = expected(op, fromBits(q[0], q[1]), fromBits(q[2], q[3]), q, fromBits(next[2], next[3]));
             const words = got.subarray(4 * i, 4 * i + 4);
             let same;
             if (want.nan) {

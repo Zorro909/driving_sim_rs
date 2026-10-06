@@ -2,6 +2,7 @@
 //! See docs/fidelity.md for the capture-based accuracy checks and their limits.
 
 use crate::math::godot_math::{self, F2};
+use crate::math::profile::MathProfile;
 use crate::math::pymath::{clamp, f32r, py_max, py_mod};
 use crate::math::vec2::V2;
 use crate::physics::collision::{solve_wall_contacts, CollisionScratch, Contact};
@@ -108,6 +109,8 @@ pub struct Car {
     previous_contacts: Vec<Contact>,
     scratch: CollisionScratch,
     pub tick: u64,
+    /// The world's C runtime math.
+    pub(crate) math: MathProfile,
 }
 
 #[derive(Clone, Copy)]
@@ -118,9 +121,9 @@ struct NativeCallback {
     eliminate_on_wall: bool,
 }
 
-pub fn godot_ease(value: f64, curve: f64) -> f64 {
+pub fn godot_ease(value: f64, curve: f64, math: MathProfile) -> f64 {
     let value = clamp(value, 0.0, 1.0);
-    1.0 - crate::math::double_math::pow(1.0 - value, 1.0 / curve)
+    1.0 - math.pow(1.0 - value, 1.0 / curve)
 }
 
 /// Sensor kinds of `Simulator.sensor`, with their keyword arguments resolved.
@@ -177,7 +180,7 @@ pub struct SensorScratch {
     path_cache: Option<(V2, f64)>,
     /// Fixed ray geometry survives pose changes. The cursor makes ordered
     /// training reads an indexed lookup instead of a search.
-    ray_geometry: Vec<(u32, u32, F2)>,
+    ray_geometry: Vec<(u32, u32, MathProfile, F2)>,
     ray_cursor: usize,
 }
 
@@ -187,21 +190,21 @@ impl SensorScratch {
         self.path_cache = None;
         self.ray_cursor = 0;
     }
-    fn ray_local(&mut self, degrees: f64, length: f64) -> F2 {
-        let key = ((degrees as f32).to_bits(), (length as f32).to_bits());
+    fn ray_local(&mut self, degrees: f64, length: f64, math: MathProfile) -> F2 {
+        let key = ((degrees as f32).to_bits(), (length as f32).to_bits(), math);
         let cursor = self.ray_cursor;
         self.ray_cursor = self.ray_cursor.saturating_add(1);
-        if let Some(&(angle, len, local)) = self.ray_geometry.get(cursor) {
-            if (angle, len) == key {
+        if let Some(&(angle, len, m, local)) = self.ray_geometry.get(cursor) {
+            if (angle, len, m) == key {
                 return local;
             }
         }
-        if let Some(&(_, _, local)) = self.ray_geometry.iter().find(|&&(a, l, _)| (a, l) == key) {
+        if let Some(&(_, _, _, local)) = self.ray_geometry.iter().find(|&&(a, l, m, _)| (a, l, m) == key) {
             return local;
         }
-        let local = Car::ray_local(degrees, length);
+        let local = Car::ray_local(degrees, length, math);
         if self.ray_geometry.len() < 64 {
-            self.ray_geometry.push((key.0, key.1, local));
+            self.ray_geometry.push((key.0, key.1, key.2, local));
         }
         local
     }
@@ -225,7 +228,7 @@ impl Car {
     pub fn new(world: &World, position: V2, rotation: f64) -> Car {
         Car {
             position,
-            rotation: crate::math::native_math::atan2(
+            rotation: world.math.atan2(
                 crate::math::native_math::engine_sin(rotation as f32),
                 crate::math::native_math::engine_cos(rotation as f32),
             ) as f64,
@@ -256,6 +259,7 @@ impl Car {
             previous_contacts: Vec::new(),
             scratch: CollisionScratch::default(),
             tick: 0,
+            math: world.math,
         }
     }
 
@@ -288,7 +292,7 @@ impl Car {
         self.transform_angle = angle as f32 as f64;
         self.body_basis = godot_math::basis(self.transform_angle);
         let (x, _) = self.body_basis;
-        self.rotation = crate::math::native_math::atan2(x.y, x.x) as f64;
+        self.rotation = self.math.atan2(x.y, x.x) as f64;
     }
 
     /// Vehicle.SetIsActive(false) queues its reset for the next native callback.
@@ -393,7 +397,7 @@ impl Car {
 
     pub fn set_body_basis(&mut self, x: F2, y: F2) {
         self.body_basis = (x, y);
-        self.rotation = crate::math::native_math::atan2(x.y, x.x) as f64;
+        self.rotation = self.math.atan2(x.y, x.x) as f64;
         self.transform_angle = self.rotation;
     }
 
@@ -519,11 +523,11 @@ impl Car {
                     control.handbrake
                 };
                 let lateral_grip = 0.20000000298023224
-                    + (0.8 + (0.1 - 0.8) * godot_ease(handbrake, 0.3))
+                    + (0.8 + (0.1 - 0.8) * godot_ease(handbrake, 0.3, world.math))
                         / (1.0
-                            + crate::math::double_math::exp(
-                                (wheel_velocity.length() as f64 - 450.0) * 0.00800000037997961,
-                            ));
+                            + world
+                                .math
+                                .exp((wheel_velocity.length() as f64 - 450.0) * 0.00800000037997961));
                 let effective_grip = (self.wheel_initialization.grip as f32 as f64 * lateral_grip) as f32;
                 let lateral = right * (-effective_grip * lateral_speed) * surface.grip as f32;
                 // ImpulseAccumulator receives Drive and ApplyLateralForces separately.
@@ -714,19 +718,19 @@ impl Car {
     /// the float32 length. The ray runs from `position` to it.
     #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
     pub(crate) fn ray_end(&self, degrees: f64, length: f64) -> (V2, f32) {
-        let local = Self::ray_local(degrees, length);
+        let local = Self::ray_local(degrees, length, self.math);
         (
             godot_math::transform_point(self.position, self.body_basis, local.into()),
             length as f32,
         )
     }
-    fn ray_local(degrees: f64, length: f64) -> F2 {
+    fn ray_local(degrees: f64, length: f64, math: MathProfile) -> F2 {
         assert!(length > 0.0, "ray length must be positive");
         let length = length as f32;
         let angle = (degrees as f32 - 90.0f32) * (std::f32::consts::PI / 180.0);
         F2 {
-            x: crate::math::native_math::cos(angle) * length,
-            y: crate::math::native_math::sin(angle) * length,
+            x: math.cos(angle) * length,
+            y: math.sin(angle) * length,
         }
     }
 
@@ -762,7 +766,7 @@ impl Car {
         let track = &world.track;
         match sensor {
             Sensor::Raycast { degrees, length } => {
-                let local = scratch.ray_local(degrees, length);
+                let local = scratch.ray_local(degrees, length, world.math);
                 let end = godot_math::transform_point(self.position, self.body_basis, local.into());
                 let length = length as f32;
                 Self::ray_value(
@@ -858,8 +862,7 @@ impl Car {
                     let lookahead = min + (max - min) * speed;
                     let offset = (here as f32 + lookahead) % curve.length();
                     let ahead = curve.direction(offset).normalized();
-                    return (crate::math::native_math::atan2(tangent.cross(ahead), tangent.dot(ahead)).abs()
-                        / std::f32::consts::PI)
+                    return (world.math.atan2(tangent.cross(ahead), tangent.dot(ahead)).abs() / std::f32::consts::PI)
                         .clamp(0.0, 1.0) as f64;
                 }
                 let tangent = track.path_direction(here);

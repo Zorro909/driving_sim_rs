@@ -174,7 +174,7 @@ impl TrainingRunner {
             metrics: [None; 14],
             update_count: 0,
         };
-        let initial = self.rng.reproduce(&[seed_result], &self.settings);
+        let initial = self.rng.reproduce(&[seed_result], &self.settings, self.world.math);
         self.install(&initial.networks, false);
         initial
     }
@@ -187,7 +187,7 @@ impl TrainingRunner {
             update_count: 0,
         }];
         let scores = reward_values(&seed_result, &self.settings.rewards);
-        let (initial, lineage) = reproduce_traced(&mut self.rng, &seed_result, scores, &self.settings);
+        let (initial, lineage) = reproduce_traced(&mut self.rng, &seed_result, scores, &self.settings, self.world.math);
         self.install_with_novelty(initial.networks, false, None);
         lineage
     }
@@ -210,7 +210,7 @@ impl TrainingRunner {
                 rewards,
             },
             lineage,
-        ) = reproduce_traced(&mut self.rng, &results, scores, &self.settings);
+        ) = reproduce_traced(&mut self.rng, &results, scores, &self.settings, self.world.math);
         drop(results);
         self.install_with_novelty(networks, true, None);
         self.stats_phase = 0;
@@ -238,7 +238,7 @@ impl TrainingRunner {
             metrics: [None; 14],
             update_count: 0,
         };
-        let initial = self.rng.reproduce(&[seed_result], &self.settings);
+        let initial = self.rng.reproduce(&[seed_result], &self.settings, self.world.math);
         let track = self.generate_track(template, config, track_state)?;
         self.install(&initial.networks, false);
         Ok((initial, track))
@@ -274,6 +274,7 @@ impl TrainingRunner {
         };
         profile.mark("mean");
         let world = &*self.world;
+        let math = world.math;
         let (position, rotation) = (self.position, self.rotation);
         let retained = if reused {
             self.agents.len().min(networks.len())
@@ -309,7 +310,7 @@ impl TrainingRunner {
                             .params
                             .iter()
                             .zip(&mean)
-                            .map(|(&a, &b)| crate::math::double_math::pow(a - b, 2.0))
+                            .map(|(&a, &b)| math.pow(a - b, 2.0))
                             .fold(0.0, |a, b| a + b)
                             .sqrt()
                     },
@@ -471,10 +472,11 @@ impl TrainingRunner {
         } else {
             crate::track::random_track::generate(config, track_state)?
         };
-        let scene = track.to_scene(template);
+        let math = self.world.math;
+        let scene = track.to_scene(template, math);
         let position = crate::track::curve::json_vector(&scene["reset_position"]).into();
         let rotation = scene["reset_rotation"].as_f64().unwrap();
-        self.replace_track(Arc::new(World::from_scene(&scene)), position, rotation);
+        self.replace_track(Arc::new(World::from_scene_with(&scene, math)), position, rotation);
         *config = track.config.clone();
         Ok(track)
     }
@@ -496,7 +498,7 @@ impl TrainingRunner {
 
     fn reproduce_next(&mut self) -> Generation {
         let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        self.rng.reproduce(&results, &self.settings)
+        self.rng.reproduce(&results, &self.settings, self.world.math)
     }
 
     fn install_next(&mut self, generation: &Generation) {
@@ -516,7 +518,7 @@ impl TrainingRunner {
         let results: Vec<_> = self.agents.iter().map(TrainingAgent::result).collect();
         let generation = self
             .rng
-            .reproduce_scored(&results, scores, &self.settings, &mut Vec::new());
+            .reproduce_scored(&results, scores, &self.settings, &mut Vec::new(), self.world.math);
         self.install_next(&generation);
         generation
     }

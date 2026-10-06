@@ -1,4 +1,5 @@
 //! Generated fixtures and optional caller-supplied input files.
+use altd_sim::math::profile::MathProfile;
 use altd_sim::math::vec2::V2;
 use altd_sim::nn::network;
 use altd_sim::track::world::World;
@@ -28,8 +29,15 @@ fn load_scene() -> serde_json::Value {
     generated::scene("rally", 0)
 }
 
+/// The math profile of every check, ALTD_GPU_MATH or proton.
+pub(super) fn math_profile() -> MathProfile {
+    std::env::var("ALTD_GPU_MATH").map_or(MathProfile::Proton, |name| {
+        name.parse().unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
 pub(super) fn load_world() -> World {
-    World::from_scene(&load_scene())
+    World::from_scene_with(&load_scene(), math_profile())
 }
 
 /// Deterministic generated-track runner, or explicit ALTD_GPU_CKPT population.
@@ -104,10 +112,10 @@ pub(super) fn fixture_runner(networks: usize) -> TrainingRunner {
     let settings = EvolutionSettings::from_mcp(&serde_json::json!({"population": networks}));
     let p = &spawn["position"];
     let mut runner = TrainingRunner::new(
-        Arc::new(World::from_scene(&scene)),
+        Arc::new(World::from_scene_with(&scene, math_profile())),
         V2::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()),
         spawn["rotation"].as_f64().unwrap(),
-        SensorLayout::from_exports(&network_data, &model),
+        SensorLayout::from_exports(&network_data, &model, math_profile()),
         &outputs,
         settings,
         PyRandom::new(1),

@@ -39,7 +39,7 @@ __device__ inline double sensor_value(const World& w, const VehicleDesc& v, cons
     switch (s.kind) {
         case S_RAYCAST: {
             float angle = (s.a - 90.0f) * (PI_F / 180.0f);
-            Vec2 local = Vec2{native_cos(angle, err) * s.b, native_sin(angle, err) * s.b};
+            Vec2 local = Vec2{profile_cos(w.math_profile, angle, err) * s.b, profile_sin(w.math_profile, angle, err) * s.b};
             Vec2 end = transform_point(car.position, car.basis_x, car.basis_y, local);
             float2 hit;
             if (!raycast(w, make_float2(car.position.x, car.position.y), make_float2(end.x, end.y), hit)) return 0.0;
@@ -84,7 +84,7 @@ __device__ inline double sensor_value(const World& w, const VehicleDesc& v, cons
             float lo = rmax(s.a, 0.0f), hi = rmax(s.b, lo);
             float offset = fmodf(here + (lo + (hi - lo) * speed), w.curve_length);
             Vec2 ahead = normalized(curve_direction(w, offset, err));
-            return (double)rclamp(fabsf(native_atan2(cross(tangent, ahead), dot(tangent, ahead))) / PI_F, 0.0f, 1.0f);
+            return (double)rclamp(fabsf(profile_atan2(w.math_profile, cross(tangent, ahead), dot(tangent, ahead))) / PI_F, 0.0f, 1.0f);
         }
     }
     return 0.0;

@@ -36,7 +36,7 @@ pub(crate) fn verify(data: &Value) -> Value {
     for r in data["grips"].as_array().unwrap() {
         let v = d(r, "velocity");
         let h = d(r, "handbrake");
-        let ease = altd_sim::physics::car::godot_ease(h, 0.3);
+        let ease = altd_sim::physics::car::godot_ease(h, 0.3, altd_sim::math::profile::MathProfile::Proton);
         let g = 0.20000000298023224
             + (0.8 + (0.1 - 0.8) * ease) / (1.0 + altd_sim::math::double_math::exp((v - 450.0) * 0.00800000037997961));
         check("ease", r["ease"].as_u64().unwrap(), ease.to_bits(), r);
@@ -52,7 +52,12 @@ pub(crate) fn verify(data: &Value) -> Value {
         let mut rng =
             altd_sim::training::game_random::GameRandom::new([1, 2, 3, 4], r["seed"].as_i64().unwrap() as i32);
         let expected = r["bits"].as_array().unwrap();
-        for (i, (v, e)) in rng.normal_array(expected.len(), 0.37).iter().zip(expected).enumerate() {
+        for (i, (v, e)) in rng
+            .normal_array(expected.len(), 0.37, altd_sim::math::profile::MathProfile::Proton)
+            .iter()
+            .zip(expected)
+            .enumerate()
+        {
             check(
                 "normal",
                 e.as_u64().unwrap(),
@@ -74,7 +79,8 @@ pub(crate) fn verify(data: &Value) -> Value {
             check(
                 "normalization",
                 r["factors"][i].as_u64().unwrap(),
-                altd_sim::training::evolution::mutation_factor(&n, a).to_bits(),
+                altd_sim::training::evolution::mutation_factor(&n, a, altd_sim::math::profile::MathProfile::Proton)
+                    .to_bits(),
                 r,
             );
         }
