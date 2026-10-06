@@ -1,6 +1,6 @@
-# AMD HIP backend
+# GPU backends (AMD HIP, NVIDIA CUDA)
 
-The HIP library runs whole driving generations on an AMD GPU. Captured CPU/HIP checks compare simulation values, population parameters, RNG state and checkpoint bytes exactly. Rust owns evolution and checkpoint I/O; both backends can resume the same generation-boundary checkpoints. See [fidelity](../docs/fidelity.md) for the scope of that evidence.
+The GPU library runs whole driving generations on an AMD GPU (HIP) or an NVIDIA GPU (CUDA, see below). Captured CPU/HIP checks compare simulation values, population parameters, RNG state and checkpoint bytes exactly. Rust owns evolution and checkpoint I/O; both backends can resume the same generation-boundary checkpoints. See [fidelity](../docs/fidelity.md) for the scope of that evidence.
 
 ## Build and use
 
@@ -32,6 +32,23 @@ target/release/altd-sim --threads 8 train-scratch --gpu \
 The ROCm 7.1 runtime officially supports fewer consumer GPUs than this list; the remaining targets are best effort. The captured CPU/HIP equivalence checks have run on gfx1100 only. The script verifies the checked-in double tables against their Rust bit patterns without rewriting tracked files. `python3 gpu/gen_tables.py --output PATH` writes a header explicitly; `--check` validates it.
 
 The compiler flags `-ffp-contract=off` and `-fhip-fp32-correctly-rounded-divide-sqrt` preserve separate multiply/add rounding and correctly rounded float32 division/square root. Keep them when changing architecture. The native crate loads the library at runtime, so CPU-only builds do not require ROCm.
+
+## NVIDIA (CUDA)
+
+The same sources build for NVIDIA GPUs with `nvcc`; `sim/compat.h` maps the HIP runtime calls and warp helpers to CUDA. The backend, library ABI and checkpoints are unchanged: `--gpu`, `gpu-info` and `backend: "hip"` use whichever library is loaded. Install the CUDA toolkit (13.x tested) and a host compiler (Visual Studio Build Tools on Windows, gcc or clang on Linux), then build from the repository root:
+
+```sh
+gpu/build-cuda.sh                  # Linux, writes target/gpu/libaltd_gpu.so
+gpu/build-cuda.ps1                 # Windows, writes target/gpu/altd_gpu.dll
+```
+
+`OUT` overrides the output directory. `CUDA_ARCH` lists one or more targets separated by commas or spaces, default `sm_89` (RTX 40 series); `nvidia-smi --query-gpu=compute_cap --format=csv` reports the number, so 8.6 is `sm_86`. Both scripts check the double tables with `uv run gpu/gen_tables.py --check`. The binary loads `ALTD_GPU_LIB`, then the library beside the executable, then `target/gpu`, as on AMD.
+
+`-fmad=false` is the CUDA counterpart of `-ffp-contract=off`; keep it, and keep nvcc's default correctly rounded float32 division and square root (no `-use_fast_math`, no `-ftz=true`). NVIDIA arithmetic also replaces every NaN result with its canonical NaN, so the places where the CPU returns a NaN operand or the x86 default NaN call `altd_nan_operand` and `altd_invalid` from `sim/compat.h`. On HIP those are plain arithmetic.
+
+The CPU/GPU checks above pass on an RTX 4070 Laptop (sm_89, Windows, CUDA 13.4) and `train-scratch --gpu` checkpoints are byte-identical to the CPU's. The Linux build script and other GPU generations are untested. Consumer NVIDIA GPUs run float64 at 1/64 of their float32 rate, which bounds the network forward pass. A Windows GPU that drives a display kills kernels that run for more than a couple of seconds; the windowed launches stay well below that in the checks above.
+
+## Execution model
 
 GPU driving uses tick-major execution for independent cars. Native shared broadphase and paused windows are unsupported. Generated CLI tracks disable shared broadphase. Track preparation runs on a CPU producer with a bounded queue; `--track-buffer-size` sets its depth, default eight. Population/network buffers stay allocated while each fresh track replaces geometry.
 

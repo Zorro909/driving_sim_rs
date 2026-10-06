@@ -4,7 +4,7 @@
 // bit equality. Arguments outside the ported domains set an `err` bit instead
 // of taking the rare large-argument paths of the CPU code.
 #pragma once
-#include <hip/hip_runtime.h>
+#include "compat.h"
 #include <cstdint>
 #include "double_tables.h"
 #include "engine_exceptions.h"
@@ -65,7 +65,7 @@ __device__ inline float native_sin(float x, uint32_t& err) {
         if (bits <= 0x40afeddfu) return negative ? cos_kernel(a + 3.0 * p) : -cos_kernel(a - 3.0 * p);
         return sin_kernel(negative ? a + 4.0 * p : a - 4.0 * p);
     }
-    if (!isfinite(x)) return x - x;
+    if (!isfinite(x)) return altd_invalid(x);
     double y;
     int n = reduce_medium(x, y, err);
     switch (n & 3) { case 0: return sin_kernel(y); case 1: return cos_kernel(y); case 2: return sin_kernel(-y); default: return -cos_kernel(y); }
@@ -84,7 +84,7 @@ __device__ inline float native_cos(float x, uint32_t& err) {
         if (bits > 0x40afeddfu) return cos_kernel(negative ? a + 4.0 * p : a - 4.0 * p);
         return sin_kernel(negative ? -a - 3.0 * p : a - 3.0 * p);
     }
-    if (!isfinite(x)) return x - x;
+    if (!isfinite(x)) return altd_invalid(x);
     double y;
     int n = reduce_medium(x, y, err);
     switch (n & 3) { case 0: return cos_kernel(y); case 1: return sin_kernel(-y); case 2: return -cos_kernel(y); default: return sin_kernel(y); }
@@ -119,7 +119,13 @@ __device__ inline float native_atan(float x) {
 __device__ inline float native_atan2(float y, float x) {
     const float pi = 3.14159274101257324f;
     const float pi_lo = ffrom(0xb3bbbd2eu);
-    if (isnan(x) || isnan(y)) return x + y;
+    if (isnan(x) || isnan(y)) {
+#ifdef __CUDACC__
+        return altd_nan_operand(y, x);  // the CPU build of `x + y` returns y when both are NaN
+#else
+        return x + y;
+#endif
+    }
     uint32_t ix = fbits(x), iy = fbits(y);
     if (ix == 0x3f800000u) return native_atan(y);
     uint32_t m = ((iy >> 31) & 1u) | ((ix >> 30) & 2u);
@@ -312,15 +318,15 @@ __device__ inline double dpow(double x, double y) {
         if (y == 0.0 || !isfinite(y)) {
             if (y == 0.0) return 1.0;
             if (x == 1.0) return 1.0;
-            if (isnan(x) || isnan(y)) return x + y;
+            if (isnan(x) || isnan(y)) return altd_nan_operand(x, y);
             if (fabs(x) == 1.0) return 1.0;
             if ((fabs(x) < 1.0) == !signbit(y)) return 0.0;
             return y * y;
         }
         if (x == 0.0 || !isfinite(x)) {
-            double x2 = x * x;
-            if (signbit(x) && integer_kind(iy) == 1) x2 = -x2;
-            return signbit(y) ? 1.0 / x2 : x2;
+            double x2 = isnan(x) ? altd_nan_operand(x, x) : x * x;
+            if (signbit(x) && integer_kind(iy) == 1) x2 = dfrom(dbits(x2) ^ (1ull << 63));  // -x2, NaN included
+            return signbit(y) && !isnan(x2) ? 1.0 / x2 : x2;
         }
         if (signbit(x)) {
             uint32_t kind = integer_kind(iy);

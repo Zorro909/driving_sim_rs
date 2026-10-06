@@ -71,6 +71,8 @@ The Linux archive contains `libaltd_gpu.so` next to `altd-sim`. It needs a ROCm 
 
 A HIP session drives its first 12 ticks on both the GPU and the CPU and compares them. If they differ, or the network or track needs something HIP does not support, the session trains on CPU and Drive Lab shows the reason. Native CPU and HIP produce the same results. Browser training can differ from both in the last digits of a few values ([issue #3](https://github.com/Zorro909/driving_sim_rs/issues/3)), so a run moved between the browser and the server can develop differently from then on.
 
+NVIDIA GPUs use the same backend: build the library with `gpu/build-cuda.sh` (Linux) or `gpu/build-cuda.ps1` (Windows) as described in the [GPU guide](gpu/README.md#nvidia-cuda). The release archives do not include it.
+
 ### Troubleshooting
 
 - **`cannot listen on 127.0.0.1:47800: Address already in use`**: another server is already running, or another program uses the port. Stop it or choose another `--port`.
