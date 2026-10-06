@@ -16,6 +16,17 @@
 #include "sensors.h"
 #include "step.h"
 #include "stats.h"
+#ifdef _WIN32
+// For GetThreadTimes. After the other headers: windows.h defines `near` and `far`, which the
+// simulator headers use as variable names.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef near
+#undef far
+#endif
 
 using namespace altd;
 
@@ -465,12 +476,16 @@ bool split_step() {
     return split;
 }
 
-// Host clocks of ALTD_GPU_PROFILE, in seconds. The host thread's CPU time is only read on POSIX;
-// elsewhere it is negative and not printed.
+// Host clocks of ALTD_GPU_PROFILE, in seconds. A negative thread CPU time is not printed.
 double wall_seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 double thread_cpu_seconds() {
 #ifdef _WIN32
-    return -1.0;
+    FILETIME created, exited, kernel, user;  // 100 ns units
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return -1.0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime, k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime, u.HighPart = user.dwHighDateTime;
+    return 1e-7 * (double)(k.QuadPart + u.QuadPart);
 #else
     timespec t;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
