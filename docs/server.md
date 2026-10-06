@@ -68,7 +68,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | `advance` | `ticks`, `stopWhenInactive` | Executed ticks |
 | `advanceGeneration` | `timeLimitTicks` | Executed ticks |
 | `nextGeneration` | None | `{preservedCount, rewards}` |
-| `setEvolutionSettings` | `json` as an evolution-settings JSON string | `null` |
+| `setEvolutionSettings` | `json` as an evolution-settings JSON string; `algorithm` is `"ga"` or `"ars"` (see design notes) | `null` |
 | `replaceTrack` | `scene` as a scene JSON string | `null` |
 | `generationSummary` | None | `{bestIndex, bestScore, lapped, active, lapIndex, lapTime}`, optional `averageScore` and `worstScore` |
 | `networkJson` | `index` | Network JSON string |

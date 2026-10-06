@@ -1,5 +1,6 @@
 use super::*;
 use crate::training::pyrandom::PyRandom;
+use crate::training::Lineage;
 
 fn load(path: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -81,7 +82,7 @@ fn traced_turnover_matches_and_its_lineage_rebuilds_it() {
         a.settings = settings.clone();
         b.settings = settings.clone();
         a.start(&seed);
-        let first = b.start_traced(&seed);
+        let first = b.start_traced(&seed).into_lineage().unwrap();
         assert_eq!(
             first.parents.len(),
             1,
@@ -95,6 +96,7 @@ fn traced_turnover_matches_and_its_lineage_rebuilds_it() {
             b.advance(90, false);
             let expected = a.next_generation();
             let (turnover, lineage) = b.next_generation_traced();
+            let lineage = lineage.into_lineage().unwrap();
             assert_eq!(
                 (turnover.preserved_count, turnover.rewards.clone()),
                 (expected.preserved_count, expected.rewards.clone())
@@ -138,6 +140,7 @@ fn the_best_car_leads_the_parents_without_preservation() {
         runner.advance(90, false);
         let before: Vec<Network> = runner.agents.iter().map(|x| x.network.clone()).collect();
         let (turnover, lineage) = runner.next_generation_traced();
+        let lineage = lineage.into_lineage().unwrap();
         assert_eq!(turnover.preserved_count, 0);
         assert!(lineage.preserved.is_empty());
         // The first car with the highest reward, as `ranked` keeps ties in order.
@@ -162,7 +165,7 @@ fn the_best_car_leads_the_parents_without_preservation() {
 fn lineage_validate_rejects_malformed_networks() {
     let seed = Network::xavier(&[20, 8, 5], &mut PyRandom::new(9));
     let mut runner = generated_runner(10);
-    let lineage = runner.start_traced(&seed);
+    let lineage = runner.start_traced(&seed).into_lineage().unwrap();
     lineage.validate().unwrap();
     let invalid = |edit: &dyn Fn(&mut Lineage)| {
         let mut broken = lineage.clone();

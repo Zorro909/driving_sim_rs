@@ -58,16 +58,11 @@ impl TrainingRandom {
             Self::Game(r) => crate::training::evolution::reproduce_game_scored(agents, scores, settings, r),
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn reproduce_with_scratch(
-        &mut self,
-        agents: &[AgentResult],
-        settings: &EvolutionSettings,
-        scratch: &mut Vec<f64>,
-    ) -> Generation {
+    /// The next `count` standard normal variates, in `out`.
+    pub(crate) fn standard_normals_into(&mut self, count: usize, out: &mut Vec<f64>) {
         match self {
-            Self::Python(r) => crate::training::evolution::reproduce_with_scratch(agents, settings, r, scratch),
-            Self::Game(r) => crate::training::evolution::reproduce_game(agents, settings, r),
+            Self::Python(r) => r.standard_normals_into(count, out),
+            Self::Game(r) => *out = r.normal_array(count, 1.0),
         }
     }
     pub fn xavier(&mut self, shape: &[usize]) -> Network {

@@ -15,7 +15,9 @@ pub mod session;
 pub(crate) mod training_profile;
 
 mod agent;
+mod ars;
 mod lineage;
+mod optimizer;
 mod runner;
 mod sensors;
 mod stats;

@@ -54,6 +54,9 @@ pub(super) fn train(
         "population, generations, and ticks must be positive"
     );
     settings.population = population;
+    settings
+        .validate_algorithm()
+        .unwrap_or_else(|e| panic!("settings: {e}"));
     let started = Instant::now();
     let track_settings = tracks.settings();
     let track_count = tracks.count(None);

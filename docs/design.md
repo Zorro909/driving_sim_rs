@@ -46,3 +46,14 @@ Performance changes need workload medians as well as exact state, checkpoint and
 ## Formatting and lint checks
 
 `cargo fmt --all -- --check` uses the repository's 120-column width. Native checks use `cargo clippy --offline --all-targets -- -D warnings`. Browser bindings use `cargo clippy --offline --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings`. Scoped lint allowances explain preserved runtime constants, nonfinite comparisons, indexed numerical loops and packed GPU layouts. They do not relax warnings for unrelated code.
+
+## Optimizers
+
+`TrainingRunner` evaluates a whole population, scores it with `reward_values` (ranks within the generation), and hands the cars and scores to an `Optimizer` (`src/training/optimizer.rs`), which returns the next population. `settings.algorithm` chooses one; the runner replaces its optimizer when the name changes, and the new one continues from the cars it is next given.
+
+- `"ga"` is the default: selection, crossover, mutation and decay as in `evolution.rs`. Its random draws, and so every GA checkpoint and test, are unchanged.
+- `"ars"` (`src/training/ars.rs`) is Augmented Random Search V2-t with an elite pool. It keeps a search point `theta`; the population is the elites, `theta`, and antithetic probes `theta ± nu·d`, and the scores steer one step `alpha/(b·nu)·Σ(r+ − r−)·d` over the best `top_frac` of the pairs. The step is skipped when the scores are all alike. Elites are the best distinct cars of the last population, old elites included; they are re-run unchanged every generation, so ranks from different generations are never compared. Settings live under `settings.ars` (`nu`, `alpha`, `top_frac`, `elite_count`, `max_weight`), and `population` must be at least `elite_count + 3`.
+
+Rewards stay rank based for every algorithm. ARS therefore behaves like rank-based OpenAI-ES with top-b pair selection rather than reference ARS on raw magnitudes.
+
+Session checkpoints record how a population was made, so each optimizer has its own format: `ALTDCKP2` for GA parent lineage and `ALTDCKP3` for ARS, which stores `theta`, the elite pool, the sampling settings and the generator before the directions were drawn. Restoring one resamples the population and the directions exactly. A full population checkpoint (`ALTDCKP1`, JSON checkpoints, scratch CLI checkpoints) carries no search state, so ARS continues from the best restored car. A changed population size does the same.

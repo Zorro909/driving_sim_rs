@@ -1,13 +1,13 @@
 //! Population installation, vehicle reuse, and generation turnover.
 
 use super::agent::AgentScratch;
-use super::lineage::reproduce_traced;
-use super::{Lineage, SensorLayout, TrainingAgent, TrainingRandom, TrainingStats};
+use super::optimizer::{self, Optimizer, Produced, Record};
+use super::{SensorLayout, TrainingAgent, TrainingRandom, TrainingStats};
 use crate::math::vec2::V2;
 use crate::nn::network::Network;
 use crate::physics::car::{Car, Controls, SensorScratch, DT};
 use crate::track::world::World;
-use crate::training::evolution::{reward_values, AgentResult, EvolutionSettings, Generation};
+use crate::training::evolution::{AgentResult, EvolutionSettings, Generation};
 use rayon::prelude::*;
 use serde_json::Value;
 use std::sync::Arc;
@@ -98,6 +98,8 @@ pub struct TrainingRunner {
     outputs: Vec<ControlSlot>,
     pub settings: EvolutionSettings,
     pub rng: TrainingRandom,
+    /// Builds each new population; replaced when `settings.algorithm` changes.
+    pub(crate) optimizer: Box<dyn Optimizer>,
     pub batch_count: usize,
     pub stats_phase: u64,
     pub eliminate_on_wall: bool,
@@ -147,6 +149,7 @@ impl TrainingRunner {
             rotation,
             layout,
             outputs,
+            optimizer: optimizer::create(&settings.algorithm),
             settings,
             rng: rng.into(),
             batch_count,
@@ -168,50 +171,64 @@ impl TrainingRunner {
         (8 / self.batch_count).clamp(1, 8)
     }
 
+    /// Replaces the optimizer when `settings.algorithm` no longer names it.
+    /// A fresh optimizer starts from the cars it is next given.
+    fn sync_optimizer(&mut self) {
+        if self.optimizer.name() != self.settings.algorithm {
+            self.optimizer = optimizer::create(&self.settings.algorithm);
+        }
+    }
+
+    /// Forgets the optimizer's state, which belonged to cars no longer installed.
+    pub(crate) fn reset_optimizer(&mut self) {
+        self.optimizer = optimizer::create(&self.settings.algorithm);
+    }
+
+    fn start_produced(&mut self, seed: &Network, trace: bool) -> Produced {
+        self.sync_optimizer();
+        self.optimizer.start(seed, &self.settings, &mut self.rng, trace)
+    }
+
+    /// The population after the current agents, by the configured algorithm.
+    fn turnover(&mut self, scores: Option<Vec<f64>>, scratch: &mut Vec<f64>, trace: bool) -> Produced {
+        self.sync_optimizer();
+        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
+        self.optimizer
+            .next(&results, scores, &self.settings, &mut self.rng, scratch, trace)
+    }
+
     pub fn start(&mut self, seed: &Network) -> Generation {
-        let seed_result = AgentResult {
-            network: seed,
-            metrics: [None; 14],
-            update_count: 0,
-        };
-        let initial = self.rng.reproduce(&[seed_result], &self.settings);
+        let initial = self.start_produced(seed, false).generation;
         self.install(&initial.networks, false);
         initial
     }
 
-    /// `start`, returning the first reproduction as a `Lineage`.
-    pub(crate) fn start_traced(&mut self, seed: &Network) -> Lineage {
-        let seed_result = [AgentResult {
-            network: seed,
-            metrics: [None; 14],
-            update_count: 0,
-        }];
-        let scores = reward_values(&seed_result, &self.settings.rewards);
-        let (initial, lineage) = reproduce_traced(&mut self.rng, &seed_result, scores, &self.settings);
-        self.install_with_novelty(initial.networks, false, None);
-        lineage
+    /// `start`, returning the record a checkpoint rebuilds the first population from.
+    pub(crate) fn start_traced(&mut self, seed: &Network) -> Record {
+        let Produced { generation, record } = self.start_produced(seed, true);
+        self.install_with_novelty(generation.networks, false, None);
+        record.expect("a traced start returns its record")
     }
 
     /// `resume` with networks the new agents take over without a copy.
     pub(crate) fn resume_owned(&mut self, networks: Vec<Network>, generation: u64) {
+        self.reset_optimizer();
         self.install_with_novelty(networks, generation > 0, None);
         self.generation = generation;
     }
 
     /// `next_generation`, installing the offspring without a copy and
-    /// returning the reproduction as a `Lineage` for checkpoints.
-    pub(crate) fn next_generation_traced(&mut self) -> (Turnover, Lineage) {
-        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        let scores = reward_values(&results, &self.settings.rewards);
-        let (
-            Generation {
-                networks,
-                preserved_count,
-                rewards,
-            },
-            lineage,
-        ) = reproduce_traced(&mut self.rng, &results, scores, &self.settings);
-        drop(results);
+    /// returning the record a checkpoint rebuilds them from.
+    pub(crate) fn next_generation_traced(&mut self) -> (Turnover, Record) {
+        let Produced {
+            generation:
+                Generation {
+                    networks,
+                    preserved_count,
+                    rewards,
+                },
+            record,
+        } = self.turnover(None, &mut Vec::new(), true);
         self.install_with_novelty(networks, true, None);
         self.stats_phase = 0;
         self.generation += 1;
@@ -220,7 +237,7 @@ impl TrainingRunner {
                 preserved_count,
                 rewards,
             },
-            lineage,
+            record.expect("a traced turnover returns its record"),
         )
     }
 
@@ -233,12 +250,7 @@ impl TrainingRunner {
         config: &mut crate::track::random_track::RandomTrackConfig,
         track_state: &mut [u64; 4],
     ) -> Result<(Generation, crate::track::random_track::GeneratedTrack), &'static str> {
-        let seed_result = AgentResult {
-            network: seed,
-            metrics: [None; 14],
-            update_count: 0,
-        };
-        let initial = self.rng.reproduce(&[seed_result], &self.settings);
+        let initial = self.start_produced(seed, false).generation;
         let track = self.generate_track(template, config, track_state)?;
         self.install(&initial.networks, false);
         Ok((initial, track))
@@ -247,6 +259,7 @@ impl TrainingRunner {
     /// Restore the state `next_generation` left behind: `networks` installed on
     /// reused vehicles as generation `generation` (restore `rng` separately).
     pub fn resume(&mut self, networks: &[Network], generation: u64) {
+        self.reset_optimizer();
         self.install(networks, generation > 0);
         self.generation = generation;
     }
@@ -495,8 +508,7 @@ impl TrainingRunner {
     }
 
     fn reproduce_next(&mut self) -> Generation {
-        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        self.rng.reproduce(&results, &self.settings)
+        self.turnover(None, &mut Vec::new(), false).generation
     }
 
     fn install_next(&mut self, generation: &Generation) {
@@ -513,10 +525,7 @@ impl TrainingRunner {
     }
 
     pub fn next_generation_with_fitness(&mut self, scores: Vec<f64>) -> Generation {
-        let results: Vec<_> = self.agents.iter().map(TrainingAgent::result).collect();
-        let generation = self
-            .rng
-            .reproduce_scored(&results, scores, &self.settings, &mut Vec::new());
+        let generation = self.turnover(Some(scores), &mut Vec::new(), false).generation;
         self.install_next(&generation);
         generation
     }

@@ -108,9 +108,40 @@ impl AgentResult<'_> {
     }
 }
 
+/// Parameters of the `"ars"` algorithm (see `training::ars`).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArsSettings {
+    /// Standard deviation of the probe noise: probes are `theta +- nu * delta`.
+    pub nu: f64,
+    /// Step size of the search point.
+    pub alpha: f64,
+    /// Fraction of the antithetic pairs, best first, that steer the step.
+    pub top_frac: f64,
+    /// Best distinct cars carried over verbatim and re-evaluated each generation.
+    pub elite_count: usize,
+    /// Parameters are clamped to `[-max_weight, max_weight]`; 0 turns it off.
+    pub max_weight: f64,
+}
+
+impl Default for ArsSettings {
+    fn default() -> Self {
+        ArsSettings {
+            nu: 0.05,
+            alpha: 0.05,
+            top_frac: 1.0,
+            elite_count: 3,
+            max_weight: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EvolutionSettings {
+    /// `"ga"` (selection, crossover and mutation) or `"ars"`.
+    pub algorithm: String,
+    pub ars: ArsSettings,
     pub population: usize,
     pub selection_algorithm: String,
     pub selection_size: usize,
@@ -126,6 +157,8 @@ pub struct EvolutionSettings {
 impl Default for EvolutionSettings {
     fn default() -> Self {
         EvolutionSettings {
+            algorithm: "ga".into(),
+            ars: ArsSettings::default(),
             population: 300,
             selection_algorithm: "best".into(),
             selection_size: 3,
@@ -150,6 +183,12 @@ impl EvolutionSettings {
         let data = data.get("settings").unwrap_or(data);
         let mut s = EvolutionSettings::default();
         let int = |key: &str| data.get(key).map(|v| v.as_f64().expect(key) as usize);
+        if let Some(v) = data.get("algorithm") {
+            s.algorithm = v.as_str().expect("algorithm").into();
+        }
+        if let Some(v) = data.get("ars") {
+            s.ars = serde_json::from_value(v.clone()).expect("ars");
+        }
         if let Some(v) = int("population") {
             s.population = v;
         }
@@ -194,6 +233,32 @@ impl EvolutionSettings {
 
     /// `dataclasses.asdict(settings)`.
     pub fn to_json(&self) -> Value {
+        let mut value = self.base_json();
+        if self.algorithm != "ga" {
+            let ars = &self.ars;
+            value["algorithm"] = json!(self.algorithm);
+            value["ars"] = json!({
+                "nu": ars.nu,
+                "alpha": ars.alpha,
+                "top_frac": ars.top_frac,
+                "elite_count": ars.elite_count,
+                "max_weight": ars.max_weight,
+            });
+        }
+        value
+    }
+
+    /// Checks the fields of the chosen algorithm that the algorithms cannot
+    /// repair themselves. Anything is accepted for the GA, as before.
+    pub fn validate_algorithm(&self) -> Result<(), String> {
+        match self.algorithm.as_str() {
+            "ga" => Ok(()),
+            "ars" => crate::training::ars::validate(&self.ars, self.population),
+            other => Err(format!("unknown algorithm {other:?} (ga or ars)")),
+        }
+    }
+
+    fn base_json(&self) -> Value {
         json!({
             "population": self.population,
             "selection_algorithm": self.selection_algorithm,

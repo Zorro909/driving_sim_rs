@@ -105,6 +105,9 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
     }
     settings.population = config.population;
     settings.mutation_rate = scheduled_rate(config, 0);
+    settings
+        .validate_algorithm()
+        .unwrap_or_else(|e| panic!("settings: {e}"));
 
     let dir = &config.out_dir;
     let best_dir = dir.join("best_laps");
