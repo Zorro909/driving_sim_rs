@@ -1156,6 +1156,7 @@ impl<'a> GpuSim<'a> {
         capacity: usize,
     ) -> Result<GpuSim<'a>, String> {
         let gpu = world.gpu();
+        gpu.apply_libm()?;
         if sensors.len() > MAX_SENSORS {
             return Err(format!(
                 "{} sensors exceed the HIP maximum of {MAX_SENSORS}",

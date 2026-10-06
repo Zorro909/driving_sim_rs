@@ -8,6 +8,7 @@
 #include <cstdint>
 #include "double_tables.h"
 #include "engine_exceptions.h"
+#include "ucrt_math.h"
 
 namespace altd {
 
@@ -21,6 +22,10 @@ __device__ __host__ inline uint32_t fbits(float x) { return __builtin_bit_cast(u
 __device__ __host__ inline float ffrom(uint32_t b) { return __builtin_bit_cast(float, b); }
 __device__ __host__ inline uint64_t dbits(double x) { return __builtin_bit_cast(uint64_t, x); }
 __device__ __host__ inline double dfrom(uint64_t b) { return __builtin_bit_cast(double, b); }
+
+// 1 selects the Windows UCRT math (ucrt_math.h) for sinf, cosf, atan2f, exp, pow and tanh instead of
+// the Proton/musl math below. Set by altd_gpu_set_libm; every thread of a launch sees the same value.
+__device__ __constant__ uint32_t g_windows_libm = 0;
 
 // ---- musl sinf/cosf (native_math.rs) ------------------------------------
 
@@ -52,6 +57,12 @@ __device__ inline int reduce_medium(float x, double& y, uint32_t& err) {
     return (int)n;
 }
 __device__ inline float native_sin(float x, uint32_t& err) {
+    if (g_windows_libm) {
+        bool large = false;
+        float r = ucrt::sinf_(x, large);
+        if (large) err |= ERR_NATIVE_LARGE;
+        return r;
+    }
     uint32_t bits = fbits(x) & 0x7fffffffu;
     bool negative = signbit(x);
     double a = (double)x;
@@ -71,6 +82,12 @@ __device__ inline float native_sin(float x, uint32_t& err) {
     switch (n & 3) { case 0: return sin_kernel(y); case 1: return cos_kernel(y); case 2: return sin_kernel(-y); default: return -cos_kernel(y); }
 }
 __device__ inline float native_cos(float x, uint32_t& err) {
+    if (g_windows_libm) {
+        bool large = false;
+        float r = ucrt::cosf_(x, large);
+        if (large) err |= ERR_NATIVE_LARGE;
+        return r;
+    }
     uint32_t bits = fbits(x) & 0x7fffffffu;
     bool negative = signbit(x);
     double a = (double)x;
@@ -117,6 +134,7 @@ __device__ inline float native_atan(float x) {
     return negative ? -r : r;
 }
 __device__ inline float native_atan2(float y, float x) {
+    if (g_windows_libm) return ucrt::atan2f_(y, x);
     const float pi = 3.14159274101257324f;
     const float pi_lo = ffrom(0xb3bbbd2eu);
     if (isnan(x) || isnan(y)) {
@@ -265,6 +283,7 @@ __device__ inline double exp_inner(double x, double xtail, bool negative) {
     return scale + scale * tmp;
 }
 __device__ inline double dexp(double x) {
+    if (g_windows_libm) return ucrt::exp_(x);
     if (isnan(x)) return x;
     return exp_inner(x, 0.0, false);
 }
@@ -307,6 +326,7 @@ __device__ inline uint32_t integer_kind(uint64_t bits) {
     return (bits & (bit - 1)) ? 0 : ((bits & bit) ? 1 : 2);
 }
 __device__ inline double dpow(double x, double y) {
+    if (g_windows_libm) return ucrt::pow_(x, y);
     // pow(1, y) is 1 for every y, NaN included, as the paths below also give;
     // answering first skips the logarithm, e.g. for godot_ease(0, curve).
     if (dbits(x) == dbits(1.0)) return 1.0;
@@ -474,6 +494,7 @@ __device__ inline double expm1_lane(double x) {
 }
 
 __device__ inline double game_tanh(double value) {
+    if (g_windows_libm) return ucrt::tanh_(value);
 #ifdef ALTD_TANH_BRANCHY
     return game_tanh_branchy(value);
 #else

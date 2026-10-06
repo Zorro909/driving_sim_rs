@@ -174,10 +174,35 @@ impl Gpu {
         crate::gpu::simulation::check_layout(self);
     }
 
+    /// Makes the library use the process's math flavour ([`crate::math::libm`]). The setting is
+    /// device-wide, so call it before creating a simulator or running a primitive; it needs a GPU.
+    pub fn apply_libm(&self) -> Result<(), String> {
+        let windows = crate::math::libm() == crate::math::Libm::Windows;
+        let Some(set) = self.try_symbol::<unsafe extern "C" fn(i32) -> i32>("altd_gpu_set_libm") else {
+            // An older library has only the Proton math.
+            return if windows {
+                Err(format!(
+                    "{} lacks altd_gpu_set_libm, which the Windows math flavour needs; rebuild it with gpu/build.sh or gpu/build-cuda.*",
+                    self.path.display()
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        match unsafe { set(windows as i32) } {
+            0 => Ok(()),
+            status => Err(format!(
+                "cannot select the GPU math flavour: {}",
+                status_message(status)
+            )),
+        }
+    }
+
     /// Runs one math primitive. `input` and `output` hold `n` elements of the
     /// op's input and output layout (see gpu/sim/altd_gpu.hip); returns the error bits.
     pub fn math<I: Copy, O: Copy>(&self, op: MathOp, input: &[I], output: &mut [O]) -> Vec<u32> {
         assert_eq!(input.len(), output.len());
+        self.apply_libm().unwrap_or_else(|e| panic!("{e}"));
         let f: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 =
             self.symbol("altd_gpu_math");
         let mut err = vec![0u32; input.len()];

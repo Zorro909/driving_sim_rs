@@ -1253,6 +1253,14 @@ ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed
 
 ALTD_API int altd_gpu_version() { return 9; }
 
+// Selects the math flavour of every later launch: 0 Proton/musl (the default), 1 Windows UCRT.
+// Process-wide, like the CPU's math::set_libm; call it before creating a simulator.
+ALTD_API int altd_gpu_set_libm(int windows) {
+    uint32_t value = windows != 0;
+    CHECK(hipMemcpyToSymbol(HIP_SYMBOL(g_windows_libm), &value, sizeof value));
+    return 0;
+}
+
 // Writes the current device's name, NUL-terminated and truncated to `len`
 // bytes; returns the HIP error, so it also tells whether a device is usable.
 ALTD_API int altd_gpu_device_name(char* out, int len) {
