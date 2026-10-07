@@ -25,6 +25,9 @@ pub const DEFAULT_PORT: u16 = 47800;
 pub const DEFAULT_ORIGIN: &str = "https://drivinglab.jectrum.de";
 /// The WebSocket endpoint.
 pub const PATH: &str = "/v1";
+/// Finite transport ceilings, matching Tungstenite's supported defaults.
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Includes sockets that have not yet completed the handshake.
 pub const MAX_CONNECTIONS: usize = 64;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -234,8 +237,10 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: Math
             }
         }
     };
-    // Local native sessions are bounded by available memory, not message size.
-    let config = WebSocketConfig::default().max_message_size(None).max_frame_size(None);
+    // Check frames and assembled messages before application deserialization.
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_FRAME_BYTES));
     let stream = ConnectionStream {
         stream,
         handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
