@@ -624,6 +624,21 @@ fn unsupported_hip_scenes_and_networks_fall_back_without_losing_the_connection()
 }
 
 #[test]
+fn single_frame_requests_above_sixteen_mib_reach_dispatch() {
+    let mut client = Client::connect(start());
+    // Browser WebSocket.send cannot select continuation framing. Exercise
+    // both text and binary as one frame, as Firefox sends them.
+    let padding = " ".repeat(17 * 1024 * 1024);
+    let request = format!("{}{}", json!({"id": 91, "op": "unknown", "args": {}}), padding);
+    client.socket.send(Message::text(request)).unwrap();
+    let (reply, _) = client.read();
+    assert_eq!(reply["id"], 91);
+    assert!(reply["error"].as_str().unwrap().contains("unknown operation"));
+    let (reply, _) = client.call_raw("unknown", Value::Null, Some(padding.as_bytes()));
+    assert!(reply["error"].as_str().unwrap().contains("takes no binary payload"));
+}
+
+#[test]
 fn oversized_frame_is_rejected_before_its_payload_arrives() {
     use std::io::{Read, Write};
     let address = start();
