@@ -672,3 +672,140 @@ fn fragmented_messages_obey_the_assembled_limit() {
     let mut socket = WebSocket::from_raw_socket(Cursor::new(frames), Role::Server, Some(config));
     assert!(matches!(socket.read(), Err(tungstenite::Error::Capacity(_))));
 }
+/// Exercise the actual CLI process, not a thread with a test-only unwind profile.
+/// `cargo test --release --test server malformed_nested_inputs` also runs the
+/// production panic=abort executable.
+#[test]
+fn malformed_nested_inputs_return_errors_without_aborting_cli() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    struct Stop(Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
+        .args(["--threads", "1", "serve", "--port", "0", "--allow-origin", ORIGIN])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stop = Stop(child);
+    let stderr = stop.0.stderr.take().unwrap();
+    let mut stderr = BufReader::new(stderr);
+    let address = (&mut stderr)
+        .lines()
+        .map(Result::unwrap)
+        .find_map(|line| {
+            line.strip_prefix("altd-sim serve: listening on ws://")
+                .and_then(|s| s.strip_suffix("/v1"))
+                .map(|s| s.parse::<SocketAddr>().unwrap())
+        })
+        .expect("server listening address");
+    let scene = generated::scene("formula", 0);
+    let network = generated::network("formula");
+    let model = generated::model("formula");
+    let request = |scene: &Value, network: &Value, model: &Value, options: Value| {
+        json!({
+            "scene": scene.to_string(), "network": network.to_string(),
+            "model": model.to_string(), "options": options,
+        })
+    };
+    let mut client = Client::connect(address);
+    for bad in [
+        json!({}),
+        {
+            let mut v = scene.clone();
+            v["vehicle"]["shape_size"] = json!([1]);
+            v
+        },
+        {
+            let mut v = scene.clone();
+            v["track"]["path_forward"] = json!([[0, 1]]);
+            v
+        },
+        {
+            let mut v = scene.clone();
+            v["track"]["curve"]["points"] = json!([]);
+            v
+        },
+    ] {
+        assert!(!client
+            .error("create", request(&bad, &network, &model, json!({})))
+            .is_empty());
+    }
+    let mut bad_network = network.clone();
+    bad_network["inputs"][0] = json!("unknown sensor");
+    assert!(client
+        .error("create", request(&scene, &bad_network, &model, json!({})))
+        .contains("sensor"));
+    assert!(client
+        .error(
+            "create",
+            request(
+                &scene,
+                &network,
+                &model,
+                json!({
+                    "settings": {"selection_algorithm": "unknown"}
+                })
+            )
+        )
+        .contains("selection"));
+    client.create(&json!({"population": 4}));
+    client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    assert!(!client.error("replaceTrack", json!({"scene": "{}"})).is_empty());
+
+    let original = direct(&json!({"population": 4}));
+    let mut original = original;
+    original.start_with_shape(&[20, 8, 5]).unwrap();
+    let mut checkpoint = json!({
+        "generation": 0, "shape": [20, 8, 5],
+        "networks": original.runner.agents.iter().map(|a| &a.network.params).collect::<Vec<_>>(),
+        "rng": original.runner.rng.to_json(),
+    });
+    let valid_checkpoint = checkpoint.clone();
+    checkpoint["rng"]["state"] = json!([1]);
+    assert!(client
+        .error("restoreCheckpointJson", json!({"json": checkpoint.to_string()}))
+        .contains("state"));
+
+    // Both binary checkpoint formats carry the same JSON RNG inside an envelope.
+    for parent_format in [false, true] {
+        if parent_format {
+            original.advance_generation(1).unwrap();
+            original.next_generation().unwrap();
+        }
+        let bytes = if parent_format {
+            original.checkpoint_bytes().unwrap()
+        } else {
+            client.call("restoreCheckpointJson", json!({"json": valid_checkpoint.to_string()}));
+            client.call_raw("checkpointBytes", Value::Null, None).1
+        };
+        let word = |i: usize| u32::from_le_bytes(bytes[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
+        let layers = word(3);
+        let rng_len = word(4);
+        let rng_at = if parent_format {
+            48 + 4 * (layers + word(6) + word(7))
+        } else {
+            28 + 4 * layers
+        };
+        let old_end = (rng_at + rng_len).next_multiple_of(8);
+        let mut rng: Value = serde_json::from_slice(&bytes[rng_at..rng_at + rng_len]).unwrap();
+        rng["state"] = json!([1]);
+        let rng = rng.to_string();
+        let mut bad = bytes[..rng_at].to_vec();
+        bad[24..28].copy_from_slice(&(rng.len() as u32).to_le_bytes());
+        bad.extend_from_slice(rng.as_bytes());
+        bad.resize(bad.len().next_multiple_of(8), 0);
+        bad.extend_from_slice(&bytes[old_end..]);
+        let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bad));
+        assert!(reply["error"].as_str().unwrap().contains("state"), "{reply}");
+        // A rejected restore did not destroy the existing population.
+        assert!(!client.call_raw("checkpointBytes", Value::Null, None).1.is_empty());
+    }
+    assert!(stop.0.try_wait().unwrap().is_none());
+    assert_eq!(Client::connect(address).hello["protocol"], 1);
+}

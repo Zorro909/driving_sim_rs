@@ -130,15 +130,73 @@ impl GameRandom {
         json!({"backend":"game","decisions":self.decision_json(),"normals":self.normal_state()})
     }
     pub fn from_json(v: &Value) -> Self {
+        Self::try_from_json(v).expect("valid game random state")
+    }
+    pub fn try_from_json(v: &Value) -> Result<Self, String> {
         let mut s = Self::new([1, 2, 3, 4], 0);
-        for (i, x) in v["decisions"]["state"].as_array().unwrap().iter().enumerate() {
-            s.decision_state[i] = x.as_u64().unwrap();
+        let decisions = v["decisions"]["state"]
+            .as_array()
+            .filter(|a| a.len() == 4)
+            .ok_or("invalid decision state length")?;
+        for (i, x) in decisions.iter().enumerate() {
+            s.decision_state[i] = x.as_u64().ok_or("invalid decision state word")?;
         }
-        for (i, x) in v["normals"]["seed_array"].as_array().unwrap().iter().enumerate() {
-            s.seed_array[i] = x.as_i64().unwrap() as i32;
+        if s.decision_state.iter().all(|n| *n == 0) {
+            return Err("decision state must not be all zero".into());
         }
-        s.inext = v["normals"]["inext"].as_u64().unwrap() as usize;
-        s.inextp = v["normals"]["inextp"].as_u64().unwrap() as usize;
-        s
+        let normals = v["normals"]["seed_array"]
+            .as_array()
+            .filter(|a| a.len() == 56)
+            .ok_or("invalid normal state length")?;
+        for (i, x) in normals.iter().enumerate() {
+            s.seed_array[i] = x
+                .as_i64()
+                .filter(|n| *n >= 0 && *n < i32::MAX as i64)
+                .ok_or("invalid normal state word")? as i32;
+        }
+        if s.seed_array[1..].iter().all(|n| *n == 0) {
+            return Err("normal state must not be all zero".into());
+        }
+        s.inext = v["normals"]["inext"]
+            .as_u64()
+            .filter(|n| *n < 56)
+            .ok_or("invalid normal index")? as usize;
+        s.inextp = v["normals"]["inextp"]
+            .as_u64()
+            .filter(|n| *n < 56)
+            .ok_or("invalid normal index")? as usize;
+        if (s.inextp + 55 - s.inext) % 55 != 21 {
+            return Err("invalid normal index separation".into());
+        }
+        Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn validated_game_states_round_trip_and_reject_bad_indices() {
+        let mut source = GameRandom::new([1, 2, 3, 4], 19);
+        for _ in 0..70 {
+            source.normal_uniform();
+        }
+        let valid = source.to_json();
+        let restored = GameRandom::try_from_json(&valid).unwrap();
+        assert_eq!(restored.to_json(), valid);
+        for field in ["inext", "inextp"] {
+            let mut bad = valid.clone();
+            bad["normals"][field] = serde_json::json!(56);
+            assert!(GameRandom::try_from_json(&bad).is_err());
+        }
+        let mut bad = valid.clone();
+        bad["decisions"]["state"] = serde_json::json!([0, 0, 0, 0]);
+        assert!(GameRandom::try_from_json(&bad).is_err());
+        bad = valid.clone();
+        bad["normals"]["inextp"] = bad["normals"]["inext"].clone();
+        assert!(GameRandom::try_from_json(&bad).is_err());
+        bad = valid;
+        bad["normals"]["seed_array"][1] = serde_json::json!(-1);
+        assert!(GameRandom::try_from_json(&bad).is_err());
     }
 }
