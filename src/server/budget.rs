@@ -161,7 +161,31 @@ fn box_items(a: [f64; 2], b: [f64; 2], cell: f64) -> usize {
     // already passed the finite magnitude check, so these casts cannot saturate.
     ((a[0] - b[0]).abs() / cell + 3.0).ceil() as usize * ((a[1] - b[1]).abs() / cell + 3.0).ceil() as usize
 }
-pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
+
+fn gpu_near_items(points: &[[f64; 2]], segments: usize) -> usize {
+    if segments == 0 {
+        return 0;
+    }
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in points {
+        for i in 0..2 {
+            lo[i] = lo[i].min(p[i]);
+            hi[i] = hi[i].max(p[i]);
+        }
+    }
+    // The loader stores float32 endpoints (and computes path end from
+    // start+delta). Two extra units conservatively cover that rounding for
+    // the admitted coordinate range, including curve control arithmetic.
+    let pad = crate::gpu::simulation::GRID_MARGIN + 2.0;
+    box_items(
+        [lo[0] - pad, lo[1] - pad],
+        [hi[0] + pad, hi[1] + pad],
+        crate::gpu::simulation::GRID_CELL,
+    )
+    .saturating_mul(segments)
+}
+pub(super) fn scene(v: &Value, gpu: bool) -> Result<(usize, usize), String> {
     let t = &v["track"];
     let path = array(t, "path", 16384)?;
     let walls = array(t, "walls", 2048)?;
@@ -175,7 +199,20 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
     let polygons = array(t, "polygons", 512)?;
     let mut polygon_points = 0;
     for polygon in polygons {
-        polygon_points += array(polygon, "points", 512)?.len();
+        let points = polygon
+            .get("points")
+            .and_then(Value::as_array)
+            .ok_or("polygon needs points array")?;
+        if points.len() > 512 {
+            return Err("polygon exceeds 512 points".into());
+        }
+        for p in points {
+            if !p.is_array() {
+                return Err("polygon point needs coordinate array".into());
+            }
+            vector(p)?;
+        }
+        polygon_points += points.len();
     }
     if polygon_points > 2048 {
         return Err("BSP polygons exceed server segment budget 2048".into());
@@ -193,6 +230,9 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
         include(p);
     }
     let mut items = 0usize;
+    if gpu {
+        items = gpu_near_items(&path, path.len().saturating_sub(1));
+    }
     for pair in path.windows(2) {
         items = items.saturating_add(box_items(pair[0], pair[1], 64.0));
     }
@@ -200,7 +240,7 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
         let (a, b) = (vector(&wall[0])?, vector(&wall[1])?);
         include(a);
         include(b);
-        items = items.saturating_add(box_items(a, b, 128.0));
+        items = items.saturating_add(box_items(a, b, crate::track::world::RAY_CELL));
     }
     let origin = t.get("tile_map_position").map(vector).transpose()?.unwrap_or([0.0; 2]);
     for s in shapes {
@@ -228,12 +268,14 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
     }
     if let Some(curve) = t.get("curve") {
         let controls = array(curve, "points", 64)?;
+        let mut hull = Vec::new();
         for pair in controls.windows(2) {
             let a = vector(&pair[0]["position"])?;
             let d = vector(&pair[1]["position"])?;
             let out = vector(&pair[0]["outgoing"])?;
             let inc = vector(&pair[1]["incoming"])?;
             let controls = [a, [a[0] + out[0], a[1] + out[1]], [d[0] + inc[0], d[1] + inc[1]], d];
+            hull.extend_from_slice(&controls);
             let mut min = a;
             let mut max = a;
             for p in controls {
@@ -244,6 +286,11 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
             }
             // Convex hull bounds all baked points; subdivision is capped at 10.
             items = items.saturating_add(box_items(min, max, 64.0).saturating_mul(1025));
+        }
+        if gpu {
+            // At most 1024 baked segments per control interval (depth 10).
+            // Every segment may be a candidate in every padded cell.
+            items = items.saturating_add(gpu_near_items(&hull, controls.len().saturating_sub(1) * 1024));
         }
     }
     if !tiles.is_empty() {
@@ -268,7 +315,9 @@ pub(super) fn scene(v: &Value) -> Result<(usize, usize), String> {
     if cells > 262144 {
         return Err("geometry spans too many server grid cells".into());
     }
-    if polygons.is_empty() && t.get("raycaster_present").is_none() {
+    if !crate::track::bsp::polygons_have_segments(polygons)
+        && t.get("raycaster_present").and_then(Value::as_bool).is_none()
+    {
         items = items.saturating_add(cells.saturating_mul(walls.len()));
     }
     if items > MAX_GRID_ITEMS {
@@ -305,6 +354,9 @@ pub(super) fn binary(bytes: &[u8]) -> Result<(usize, usize), String> {
             .ok_or("invalid checkpoint header")
     };
     let population = word(2)?;
+    if word(4)? > MAX_JSON {
+        return Err("checkpoint RNG JSON exceeds 16 MiB server limit".into());
+    }
     let layers = word(3)?;
     if !(2..=20).contains(&layers) {
         return Err("checkpoint layer count exceeds server limit".into());
@@ -329,6 +381,102 @@ pub(super) fn binary(bytes: &[u8]) -> Result<(usize, usize), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn null_and_degenerate_polygons_cannot_skip_nearest_wall_charge() {
+        let mut v = json!({"track":{"path":[[0,0],[4000,4000]],
+            "walls":vec![json!([[0,0],[1,1]]);2048]},"physics":{}});
+        assert!(scene(&v, false).is_err());
+        v["track"]["raycaster_present"] = Value::Null;
+        for polygons in [
+            json!([]),
+            json!([{"points":[]}]),
+            json!([{"points":[[1,1],[1,1]]}]),
+            json!([{"points":[[1,1],[1.000000001,1]]}]),
+        ] {
+            v["track"]["polygons"] = polygons;
+            assert!(scene(&v, false).is_err());
+        }
+        for flag in [true, false] {
+            v["track"]["raycaster_present"] = json!(flag);
+            assert!(scene(&v, false).is_ok());
+        }
+        v["track"]["raycaster_present"] = Value::Null;
+        v["track"]["polygons"] = json!([{"points":[[0,0],[1,0],[0,1]]}]);
+        assert!(scene(&v, false).is_ok());
+        for polygons in [json!([{}]), json!([{"points":[{"x":0,"y":0}]}])] {
+            v["track"]["polygons"] = polygons;
+            assert!(scene(&v, false).is_err());
+        }
+    }
+
+    #[test]
+    fn ray_grid_uses_actual_cell_size() {
+        let v = json!({"track":{"path":[[0,0],[6000,6000]],
+            "walls":vec![json!([[0,0],[6000,6000]]);2048],"raycaster_present":true},"physics":{}});
+        assert!(scene(&v, false).is_err());
+    }
+
+    #[test]
+    fn gpu_candidates_are_charged_without_device_allocation() {
+        let path: Vec<_> = (0..16384).map(|i| json!([i % 2, 0])).collect();
+        let v = json!({"track":{"path":path},"physics":{}});
+        assert!(scene(&v, false).is_ok());
+        assert!(scene(&v, true).is_err());
+        let points = [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [1.0, 0.0]];
+        let segments: Vec<_> = points.windows(2).map(|w| (w[0], w[1])).collect();
+        let grid = crate::gpu::simulation::near_grid(
+            &segments,
+            crate::gpu::simulation::GRID_CELL,
+            crate::gpu::simulation::GRID_MARGIN,
+        )
+        .unwrap();
+        assert_eq!(grid.items.len(), 33 * 32 * 3);
+        assert!(gpu_near_items(&points, 3) >= grid.items.len());
+        assert!(scene(&json!({"track":{"path":points},"physics":{}}), true).is_ok());
+        // A dense potential curve bake also needs the padded candidate budget.
+        let controls: Vec<_> = (0..20)
+            .map(|i| json!({"position":[i%2,0],"incoming":[0,0],"outgoing":[0,0]}))
+            .collect();
+        assert!(scene(
+            &json!({"track":{"path":points,"curve":{"points":controls}},"physics":{}}),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn binary_rng_document_limits_cover_both_formats() {
+        for (magic, first) in [(b"ALTDCKP1", 5), (b"ALTDCKP2", 10)] {
+            for size in [MAX_JSON, MAX_JSON + 1] {
+                let mut bytes = magic.to_vec();
+                let mut words = vec![0u32; first + 2];
+                words[2] = 1;
+                words[3] = 2;
+                words[4] = size as u32;
+                words[first] = 20;
+                words[first + 1] = 5;
+                bytes.extend(words.iter().flat_map(|n| n.to_le_bytes()));
+                assert_eq!(binary(&bytes).is_ok(), size == MAX_JSON);
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_window_bound_is_nonzero_and_overflow_safe() {
+        use crate::training::remaining_generation_ticks as remaining;
+        assert_eq!(remaining(0, 0), 12);
+        assert_eq!(remaining(3600, 0), 3612);
+        assert_eq!(remaining(3600, 12), 3600);
+        assert_eq!(remaining(u64::MAX, 0), u64::MAX);
+        let p = Plan {
+            population: 191,
+            parameters: 213,
+            solver: 16,
+            ..Plan::default()
+        };
+        assert!(p.ticks(3600).is_ok());
+        assert!(p.ticks(remaining(3600, 0)).is_err());
+    }
     #[test]
     fn parameter_population_and_work_products_are_bounded() {
         assert!(shape(&json!([20, 8, 5])).is_ok());
@@ -377,13 +525,13 @@ mod tests {
         let mut scene = json!({"track":{"path":[[0,0],[1,1]],"tiles":[
             {"coords":[0,0]},{"coords":[1000000,1000000]}
         ]},"vehicle":{},"physics":{}});
-        assert!(super::scene(&scene).is_err());
+        assert!(super::scene(&scene, false).is_err());
         scene["track"]["tiles"] = json!([]);
         scene["track"]["path"] = json!([[0, 0], [1000000, 1000000]]);
-        assert!(super::scene(&scene).is_err());
+        assert!(super::scene(&scene, false).is_err());
         scene["track"]["path"] = json!([[0, 0], [1, 1]]);
         scene["physics"]["solver_iterations"] = json!(u64::MAX);
-        assert!(super::scene(&scene).is_err());
+        assert!(super::scene(&scene, false).is_err());
     }
 }
 

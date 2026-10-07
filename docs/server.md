@@ -119,6 +119,22 @@ apply to `serve`; the native CLI's operator-selected runs retain their current l
 | Geometry coordinate magnitude | 1,000,000 |
 | One simulation window | 3,600 ticks and 500 million work units |
 
+Admission charges partial evolution-settings updates using the same population
+default as execution, retaining the live population's high-water reservation.
+Generation limits are absolute thresholds: the budget charges the remaining
+statistics-aligned execution bound, not the configured threshold itself. At tick
+zero a 3,600-tick threshold has a conservative 3,612-tick bound and requires
+shorter advance windows; at tick 12 its remaining bound is 3,600.
+
+Geometry estimates include effective BSP/raycaster presence, 64-unit ray-grid
+cells, and (when HIP is requested or active) padded nearest-path and baked-curve
+candidate grids. The GPU estimate conservatively charges every segment in every
+padded cell; it may reject tracks whose actual sparse lists would fit. Initial
+HIP requests are charged before device preparation even if execution later falls
+back to CPU. Both binary checkpoint formats enforce the separate embedded RNG
+JSON document limit before reconstruction. These remain admission estimates,
+not a measured allocator or RSS guarantee.
+
 A window's work units are `population × ticks × (parameters + 32 × solver_iterations + 1)`.
 Long generations can use repeated `advance` requests with shorter windows. These
 units are a policy proxy, not a prediction of elapsed time.

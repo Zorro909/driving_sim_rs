@@ -6,6 +6,32 @@ use crate::{
 };
 use serde_json::Value;
 
+// Keep preflight presence and actual construction on identical float32 edges,
+// including the closing edge. This iterator allocates neither a BSP nor a grid.
+fn polygon_segments(polygons: &[Value]) -> impl Iterator<Item = Wall> + '_ {
+    polygons.iter().flat_map(|polygon| {
+        let points = polygon["points"].as_array().unwrap();
+        let point = |p: &Value| {
+            V2::new(
+                p[0].as_f64().unwrap() as f32 as f64,
+                p[1].as_f64().unwrap() as f32 as f64,
+            )
+        };
+        (0..points.len()).filter_map(move |i| {
+            let wall = Wall {
+                start: point(&points[i]),
+                end: point(&points[(i + 1) % points.len()]),
+            };
+            (wall.start != wall.end).then_some(wall)
+        })
+    })
+}
+
+#[cfg(all(feature = "server", not(target_arch = "wasm32")))]
+pub(crate) fn polygons_have_segments(polygons: &[Value]) -> bool {
+    polygon_segments(polygons).next().is_some()
+}
+
 pub struct Node {
     partition: Wall,
     segments: Vec<Wall>,
@@ -29,30 +55,7 @@ fn sides(wall: Wall, partition: Wall) -> (i8, i8) {
 }
 impl Node {
     pub fn from_polygons(polygons: &[Value]) -> Option<Box<Node>> {
-        let mut segments = Vec::new();
-        for polygon in polygons {
-            let points: Vec<V2> = polygon["points"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|p| {
-                    V2::new(
-                        p[0].as_f64().unwrap() as f32 as f64,
-                        p[1].as_f64().unwrap() as f32 as f64,
-                    )
-                })
-                .collect();
-            for i in 0..points.len() {
-                let wall = Wall {
-                    start: points[i],
-                    end: points[(i + 1) % points.len()],
-                };
-                if wall.start != wall.end {
-                    segments.push(wall);
-                }
-            }
-        }
-        Self::build(segments)
+        Self::build(polygon_segments(polygons).collect())
     }
     fn build(walls: Vec<Wall>) -> Option<Box<Node>> {
         if walls.is_empty() {

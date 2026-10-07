@@ -119,7 +119,7 @@ impl Connection {
                 {
                     return Err("server sensor/output count exceeds 64".into());
                 }
-                (plan.grid_items, plan.solver) = budget::scene(&scene)?;
+                (plan.grid_items, plan.solver) = budget::scene(&scene, options["backend"] == "hip")?;
                 let summary = network.get("summary").unwrap_or(&network);
                 if let Some(shape) = summary.get("shape") {
                     plan.parameters = budget::shape(shape)?;
@@ -143,11 +143,18 @@ impl Connection {
             "setEvolutionSettings" => {
                 let settings = budget::parse(string_arg(args, "json")?, "settings")?;
                 // Existing populations remain live until the next generation.
-                plan.population = plan.population.max(budget::settings(&settings, plan.population)?);
+                // This operation uses serde defaults, not from_mcp's wrapper.
+                let parsed: crate::training::evolution::EvolutionSettings =
+                    serde_json::from_value(settings.clone()).map_err(|e| format!("invalid evolution settings: {e}"))?;
+                budget::settings(&settings, parsed.population)?;
+                plan.population = plan.population.max(parsed.population);
             }
             "replaceTrack" => {
                 let scene = budget::parse(string_arg(args, "scene")?, "scene")?;
-                (plan.grid_items, plan.solver) = budget::scene(&scene)?;
+                (plan.grid_items, plan.solver) = budget::scene(
+                    &scene,
+                    self.session.as_ref().is_some_and(|s| s.backend() == Backend::Hip),
+                )?;
             }
             "nextGeneration" => {}
             "advance" => {
@@ -155,7 +162,14 @@ impl Connection {
                 return Ok(None);
             }
             "advanceGeneration" => {
-                plan.ticks(u64_arg(args, "timeLimitTicks")?)?;
+                let session = self.session.as_ref().unwrap();
+                if session.runner.stats_phase != 0 {
+                    return Err("advance_generation needs statistics phase 0".into());
+                }
+                plan.ticks(crate::training::remaining_generation_ticks(
+                    u64_arg(args, "timeLimitTicks")?,
+                    session.runner.tick,
+                ))?;
                 return Ok(None);
             }
             _ => return Ok(None),
