@@ -6,7 +6,7 @@ use super::Turnover;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::physics::car::Sensor;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::training::evolution::{AgentResult, Generation};
+use crate::training::evolution::Generation;
 use crate::training::TrainingAgent;
 use rayon::prelude::*;
 
@@ -293,19 +293,13 @@ impl TrainingRunner {
         // The preceding upload is complete, so its host buffer can hold noise
         // until reproduction finishes. Refilling it then uploads the offspring.
         let mut scratch = sim.take_parameter_buffer();
-        let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
+        // Until the offspring are installed, the optimizer must still describe the old cars.
+        let saved = self.optimizer.boxed_clone();
         let Generation {
             networks,
             preserved_count,
             rewards,
-        } = match scores {
-            Some(scores) => self
-                .rng
-                .reproduce_scored(&results, scores, &self.settings, &mut scratch, self.world.math),
-            None => self
-                .rng
-                .reproduce_with_scratch(&results, &self.settings, &mut scratch, self.world.math),
-        };
+        } = self.turnover(scores, &mut scratch, false).generation;
         sim.return_parameter_buffer(scratch);
         profile.mark("reproduce");
         let src = std::array::from_fn(|c| {
@@ -314,9 +308,16 @@ impl TrainingRunner {
                 .rposition(|&slot| slot as usize == c)
                 .map_or(-1, |j| j as i32)
         });
-        sim.upload_networks(&networks, src)?;
-        profile.mark("networks");
-        let novelty = sim.try_novelty()?;
+        let novelty = match sim.upload_networks(&networks, src).and_then(|()| {
+            profile.mark("networks");
+            sim.try_novelty()
+        }) {
+            Ok(novelty) => novelty,
+            Err(e) => {
+                self.optimizer = saved;
+                return Err(e);
+            }
+        };
         profile.mark("novelty");
         self.install_with_novelty(networks, true, Some(&novelty));
         self.stats_phase = 0;

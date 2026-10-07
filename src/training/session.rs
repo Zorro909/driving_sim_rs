@@ -7,9 +7,11 @@ use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::nn::network::{parameter_count, Network};
 use crate::track::world::World;
+use crate::training::ars::{ArsRecord, Elite, Sampling};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use crate::training::evolution::METRIC_NAMES;
 use crate::training::evolution::{Breeding, EvolutionSettings, CROSSOVERS};
+use crate::training::optimizer::Record;
 use crate::training::pyrandom::PyRandom;
 use crate::training::{Lineage, Mode, SensorLayout, TrainingAgent, TrainingRandom, TrainingRunner, CAR_STATE_STRIDE};
 #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
@@ -131,6 +133,8 @@ enum Saved {
     },
     /// After a start or reproduction: what bred the cars. Saved as format 2.
     Lineage(Lineage),
+    /// After an ARS start or reproduction: the search state that sampled the cars. Saved as format 3.
+    Ars(ArsRecord),
 }
 
 /// Per-generation statistics hosts read instead of the full car states.
@@ -158,6 +162,8 @@ pub struct GenerationSummary {
 const CHECKPOINT_MAGIC: &[u8; 8] = b"ALTDCKP1";
 /// Format 2: the parents a generation was bred from (`Lineage`).
 const PARENTS_MAGIC: &[u8; 8] = b"ALTDCKP2";
+/// Format 3: the ARS search state a generation was sampled from (`ArsRecord`).
+const ARS_MAGIC: &[u8; 8] = b"ALTDCKP3";
 
 fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
     value
@@ -210,13 +216,14 @@ impl Session {
         let mut settings = options
             .settings
             .as_ref()
-            .map_or_else(EvolutionSettings::default, EvolutionSettings::from_mcp);
+            .map_or_else(|| Ok(EvolutionSettings::default()), EvolutionSettings::try_from_mcp)?;
         if let Some(population) = options.population {
             settings.population = population;
         }
         if settings.population == 0 {
             return Err("population must be positive".into());
         }
+        settings.validate_algorithm()?;
         let math = options.math_profile.unwrap_or_else(MathProfile::detect);
         let world = Arc::new(World::from_scene_with(scene, math));
         let layout = SensorLayout::from_exports(network, model, math);
@@ -277,8 +284,8 @@ impl Session {
         if self.network.get("weights").is_some() {
             let seed = Network::try_from_game_export(&self.network)?;
             self.check_shape(&seed.shape)?;
-            let lineage = self.runner_mut()?.start_traced(&seed);
-            self.record(lineage);
+            let record = self.runner_mut()?.start_traced(&seed);
+            self.record(record);
             self.networks_changed();
             Ok(())
         } else {
@@ -295,8 +302,8 @@ impl Session {
         self.check_shape(shape)?;
         let runner = self.runner_mut()?;
         let seed = runner.rng.xavier(shape, runner.world.math);
-        let lineage = runner.start_traced(&seed);
-        self.record(lineage);
+        let record = runner.start_traced(&seed);
+        self.record(record);
         self.networks_changed();
         Ok(())
     }
@@ -454,8 +461,8 @@ impl Session {
     /// parent count and every car's reward.
     pub fn next_generation(&mut self) -> Result<(usize, Vec<f64>), String> {
         self.require_started()?;
-        let (turnover, lineage) = self.runner_mut()?.next_generation_traced();
-        self.record(lineage);
+        let (turnover, record) = self.runner_mut()?.next_generation_traced();
+        self.record(record);
         Ok((turnover.preserved_count, turnover.rewards))
     }
 
@@ -466,6 +473,7 @@ impl Session {
     pub fn set_evolution_settings(&mut self, text: &str) -> Result<(), String> {
         let settings: EvolutionSettings =
             serde_json::from_str(text).map_err(|e| format!("invalid evolution settings: {e}"))?;
+        settings.validate_algorithm()?;
         if settings.population == 0 || settings.selection_size == 0 {
             return Err("population and selection_size must be positive".into());
         }
@@ -571,6 +579,8 @@ impl Session {
             ));
         }
         agent.network = network;
+        // The optimizer's directions describe the population it produced, not this car.
+        self.runner.optimizer.invalidate();
         self.networks_changed();
         Ok(())
     }
@@ -696,12 +706,29 @@ impl Session {
     }
 
     /// Records the reproduction that bred the generation that just began.
-    fn record(&mut self, lineage: Lineage) {
+    fn record(&mut self, record: Record) {
         self.boundary = Some(Boundary {
             generation: self.runner.generation,
             tick: self.runner.tick,
-            saved: Saved::Lineage(lineage),
+            saved: match record {
+                Record::Lineage(lineage) => Saved::Lineage(lineage),
+                Record::Ars(ars) => Saved::Ars(ars),
+            },
         });
+    }
+
+    fn restore_ars(&mut self, generation: u64, record: ArsRecord) -> Result<(), String> {
+        record.validate()?;
+        self.check_math(record.math)?;
+        self.check_shape(&record.shape)?;
+        let (networks, rng, ars) = record.rebuild();
+        let runner = self.runner_mut()?;
+        runner.rng = rng;
+        runner.resume_owned(networks, generation);
+        runner.optimizer = Box::new(ars);
+        self.record(Record::Ars(record));
+        self.networks_changed();
+        Ok(())
     }
 
     /// Refuses a checkpoint trained under other math: its cars would drive
@@ -725,7 +752,7 @@ impl Session {
         let runner = self.runner_mut()?;
         runner.rng = rng;
         runner.resume_owned(networks, generation);
-        self.record(lineage);
+        self.record(Record::Lineage(lineage));
         self.networks_changed();
         Ok(())
     }
@@ -736,8 +763,9 @@ impl Session {
         self.boundary.as_ref().map(|b| (b.generation, b.tick))
     }
 
-    /// The boundary of the current generation in binary: format 2 (see
-    /// `parent_bytes`) after a start or reproduction, format 1 (see
+    /// The boundary of the current generation in binary: format 3 (see
+    /// `ars_bytes`) after an ARS start or reproduction, format 2 (see
+    /// `parent_bytes`) after a GA start or reproduction, format 1 (see
     /// `population_bytes`) after restoring a full checkpoint.
     pub fn checkpoint_bytes(&self) -> Result<Vec<u8>, String> {
         let b = self.boundary.as_ref().ok_or("the session has not started")?;
@@ -746,10 +774,11 @@ impl Session {
                 population_bytes(b.generation, b.tick, shape, rng, self.math_profile(), params)
             }
             Saved::Lineage(lineage) => parent_bytes(b.generation, b.tick, lineage),
+            Saved::Ars(record) => ars_bytes(b.generation, b.tick, record),
         }
     }
 
-    /// Restores a `checkpoint_bytes` checkpoint of either format.
+    /// Restores a `checkpoint_bytes` checkpoint of any format.
     pub fn restore_checkpoint_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         match bytes.get(..8) {
             Some(m) if m == CHECKPOINT_MAGIC => {
@@ -760,6 +789,10 @@ impl Session {
             Some(m) if m == PARENTS_MAGIC => {
                 let (generation, lineage) = read_parents(bytes)?;
                 self.restore_lineage(generation, lineage)
+            }
+            Some(m) if m == ARS_MAGIC => {
+                let (generation, record) = read_ars(bytes)?;
+                self.restore_ars(generation, record)
             }
             _ => Err("invalid binary checkpoint".into()),
         }
@@ -1142,6 +1175,125 @@ fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
     Ok((generation, lineage))
 }
 
+/// Format 3, `ALTDCKP3`, little-endian: u32 words generation, tick,
+/// population, layer count L, RNG JSON length R, elite pool size E and elite
+/// count K; the u32 shape; the RNG JSON; zero padding to a multiple of 8
+/// bytes; f64 nu and max weight; the f64 parameters of the search point; then
+/// each of the E pool members' f64 parameters followed by its f64 score.
+/// Words 0 to 4 sit where formats 1 and 2 have them.
+fn ars_bytes(generation: u64, tick: u64, r: &ArsRecord) -> Result<Vec<u8>, String> {
+    let rng = rng_json(&r.rng, r.math).to_string();
+    let s = &r.sampling;
+    let header = [
+        generation,
+        tick,
+        s.population as u64,
+        r.shape.len() as u64,
+        rng.len() as u64,
+        r.pool.len() as u64,
+        s.elite_count as u64,
+    ];
+    let size = r.theta.len();
+    let mut out = Vec::with_capacity(
+        8 + 4 * (header.len() + r.shape.len()) + rng.len() + 24 + (r.pool.len() + 1) * (size + 1) * 8,
+    );
+    out.extend_from_slice(ARS_MAGIC);
+    for n in header.into_iter().chain(r.shape.iter().map(|&n| n as u64)) {
+        out.extend_from_slice(
+            &u32::try_from(n)
+                .map_err(|_| "checkpoint field exceeds u32")?
+                .to_le_bytes(),
+        );
+    }
+    out.extend_from_slice(rng.as_bytes());
+    out.resize(out.len().next_multiple_of(8), 0);
+    out.extend_from_slice(&s.nu.to_le_bytes());
+    out.extend_from_slice(&s.max_weight.to_le_bytes());
+    for p in &r.theta {
+        out.extend_from_slice(&p.to_le_bytes());
+    }
+    for e in &r.pool {
+        for p in &e.params {
+            out.extend_from_slice(&p.to_le_bytes());
+        }
+        out.extend_from_slice(&e.score.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Reads format 3 (see `ars_bytes`) and validates it: `(generation, record)`.
+fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
+    let invalid = || "invalid binary checkpoint".to_string();
+    let word = |i: usize| -> Result<usize, String> {
+        let at = i.checked_mul(4).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+        bytes
+            .get(at..at.checked_add(4).ok_or_else(invalid)?)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize)
+            .ok_or_else(invalid)
+    };
+    let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
+    let (pool_len, elite_count) = (word(5)?, word(6)?);
+    let rng_at = 7usize
+        .checked_add(layers)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_add(8))
+        .ok_or_else(invalid)?;
+    // Bound every count by the bytes present before allocating for it.
+    let rng_end = rng_at
+        .checked_add(rng_len)
+        .filter(|&end| end <= bytes.len())
+        .ok_or_else(invalid)?;
+    let shape: Vec<usize> = (0..layers).map(|i| word(7 + i)).collect::<Result<_, _>>()?;
+    if shape.len() < 2 || shape.contains(&0) {
+        return Err(invalid());
+    }
+    let rng: Value =
+        serde_json::from_slice(&bytes[rng_at..rng_end]).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
+    if rng.is_null() {
+        return Err("the checkpoint has no random state".into());
+    }
+    let floats_at = rng_end.next_multiple_of(8);
+    let size = checked_parameter_count(&shape).ok_or_else(invalid)?;
+    let data = bytes.get(floats_at..).ok_or_else(invalid)?;
+    // nu and max weight, the search point, then the pool members and their scores.
+    let expected = pool_len
+        .checked_mul(size.checked_add(1).ok_or_else(invalid)?)
+        .and_then(|n| n.checked_add(size))
+        .and_then(|n| n.checked_add(2))
+        .and_then(|n| n.checked_mul(8));
+    if expected != Some(data.len()) {
+        return Err(format!(
+            "the checkpoint holds {} bytes of search state, a shape of {shape:?} with {pool_len} elites needs a different amount",
+            data.len()
+        ));
+    }
+    let mut floats = data.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap()));
+    let mut take = |count: usize| -> Vec<f64> { floats.by_ref().take(count).collect() };
+    let (nu, max_weight) = (take(1)[0], take(1)[0]);
+    let theta = take(size);
+    let pool = (0..pool_len)
+        .map(|_| Elite {
+            params: take(size),
+            score: take(1)[0],
+        })
+        .collect();
+    let record = ArsRecord {
+        shape,
+        theta,
+        pool,
+        sampling: Sampling {
+            population,
+            elite_count,
+            nu,
+            max_weight,
+        },
+        rng: TrainingRandom::from_json(&rng),
+        math: rng_math(&rng)?,
+    };
+    record.validate()?;
+    Ok((generation, record))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1465,6 +1617,142 @@ mod tests {
                 assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
             }
         }
+    }
+
+    const ARS_OPTIONS: &str =
+        r#"{"population": 16, "seed": 4, "settings": {"algorithm": "ars", "ars": {"elite_count": 2}}}"#;
+
+    /// An ARS checkpoint restores every network, the generator and the search
+    /// state: both sessions then produce the same later generations.
+    #[test]
+    fn ars_checkpoints_rebuild_the_generation_exactly() {
+        let mut s = generated_session(ARS_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        let first = s.checkpoint_bytes().unwrap();
+        assert_eq!(&first[..8], b"ALTDCKP3");
+        let mut t = generated_session(ARS_OPTIONS);
+        t.restore_checkpoint_bytes(&first).unwrap();
+        assert_eq!(t.checkpoint().unwrap(), s.checkpoint().unwrap(), "generation 0");
+        assert_eq!(t.checkpoint_bytes().unwrap(), first);
+
+        for _ in 0..3 {
+            s.advance_generation(120).unwrap();
+            let (preserved, rewards) = s.next_generation().unwrap();
+            assert_eq!(rewards.len(), 16);
+            assert!(preserved <= 3);
+        }
+        let bytes = s.checkpoint_bytes().unwrap();
+        assert_eq!(&bytes[..8], b"ALTDCKP3");
+        let json = s.checkpoint().unwrap();
+        let mut u = generated_session(ARS_OPTIONS);
+        u.restore_checkpoint_bytes(&bytes).unwrap();
+        assert_eq!(u.runner.generation, 3);
+        assert_eq!(u.checkpoint().unwrap(), json, "every network and the generator");
+        assert_eq!(u.checkpoint_bytes().unwrap(), bytes);
+        for _ in 0..2 {
+            s.advance_generation(120).unwrap();
+            u.advance_generation(120).unwrap();
+            assert_eq!(state_bits(&mut u), state_bits(&mut s));
+            assert_eq!(u.next_generation().unwrap(), s.next_generation().unwrap());
+            assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
+        }
+    }
+
+    #[test]
+    fn malformed_ars_checkpoints_are_rejected() {
+        let mut s = generated_session(ARS_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        let good = s.checkpoint_bytes().unwrap();
+        let mut t = generated_session(ARS_OPTIONS);
+        for len in [0, 8, 20, 40, good.len() / 2, good.len() - 1] {
+            assert!(t.restore_checkpoint_bytes(&good[..len]).is_err(), "{len} bytes");
+        }
+        let mut extended = good.clone();
+        extended.extend_from_slice(&[0; 8]);
+        assert!(t.restore_checkpoint_bytes(&extended).is_err());
+        // A population too small for the elites it names (word 6 is the elite count).
+        let mut small = good.clone();
+        small[8 + 2 * 4..8 + 3 * 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(t.restore_checkpoint_bytes(&small).is_err());
+        t.restore_checkpoint_bytes(&good).unwrap();
+    }
+
+    /// The algorithm can change between generations; a new one continues from
+    /// the cars it is given.
+    #[test]
+    fn the_algorithm_can_change_between_generations() {
+        let mut s = generated_session(PARENT_OPTIONS[0]);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        assert_eq!(&s.checkpoint_bytes().unwrap()[..8], b"ALTDCKP2");
+        s.advance_generation(60).unwrap();
+        s.set_evolution_settings(r#"{"algorithm": "ars", "population": 10, "ars": {"elite_count": 1}}"#)
+            .unwrap();
+        s.next_generation().unwrap();
+        assert_eq!(s.runner.agents.len(), 10);
+        assert_eq!(&s.checkpoint_bytes().unwrap()[..8], b"ALTDCKP3");
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        s.set_evolution_settings(r#"{"algorithm": "ga", "population": 7}"#)
+            .unwrap();
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        assert_eq!(s.runner.agents.len(), 7);
+        assert_eq!(&s.checkpoint_bytes().unwrap()[..8], b"ALTDCKP2");
+    }
+
+    /// Restoring a full checkpoint drops the search state: ARS continues from
+    /// the best restored car.
+    #[test]
+    fn ars_continues_after_a_full_restore() {
+        let mut s = generated_session(ARS_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(60).unwrap();
+        let full = s.checkpoint().unwrap();
+        let mut t = generated_session(ARS_OPTIONS);
+        t.restore_checkpoint(&full).unwrap();
+        t.advance_generation(60).unwrap();
+        t.next_generation().unwrap();
+        assert_eq!(t.runner.agents.len(), 16);
+    }
+
+    #[test]
+    fn ars_settings_are_validated() {
+        let bad = |options: &str| {
+            Session::new(
+                &generated_scene(),
+                &load("assets/networks/formula.json"),
+                &load("assets/models/formula.json"),
+                SessionOptions::from_json(options).unwrap(),
+            )
+            .err()
+        };
+        assert!(bad(r#"{"population": 4, "settings": {"algorithm": "ars"}}"#)
+            .unwrap()
+            .contains("elite_count + 3"));
+        assert!(bad(r#"{"population": 16, "settings": {"algorithm": "cma"}}"#)
+            .unwrap()
+            .contains("unknown algorithm"));
+        assert!(bad(r#"{"population": 16, "settings": {"algorithm": "ars", "ars": {"nu": 0}}}"#).is_some());
+        for malformed in [
+            r#"{"algorithm": "ars", "ars": {"bogus": 1}}"#,
+            r#"{"algorithm": "ars", "ars": {"nu": "high"}}"#,
+            r#"{"algorithm": 3}"#,
+            r#"{"rewards": [{"metric": 1, "weight": 100}]}"#,
+        ] {
+            let options = format!(r#"{{"population": 16, "settings": {malformed}}}"#);
+            assert!(bad(&options).is_some(), "{malformed}");
+        }
+        let mut s = generated_session(ARS_OPTIONS);
+        assert!(s
+            .set_evolution_settings(r#"{"algorithm": "ars", "population": 3}"#)
+            .is_err());
+        assert!(s
+            .set_evolution_settings(r#"{"algorithm": "ars", "population": 20, "ars": {"bogus": 1}}"#)
+            .is_err());
+        s.set_evolution_settings(r#"{"algorithm": "ars", "population": 20}"#)
+            .unwrap();
     }
 
     /// The checkpoint grows with the parents, not the cars.

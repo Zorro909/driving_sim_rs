@@ -109,9 +109,40 @@ impl AgentResult<'_> {
     }
 }
 
+/// Parameters of the `"ars"` algorithm (see `training::ars`).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArsSettings {
+    /// Standard deviation of the probe noise: probes are `theta +- nu * delta`.
+    pub nu: f64,
+    /// Step size of the search point.
+    pub alpha: f64,
+    /// Fraction of the antithetic pairs, best first, that steer the step.
+    pub top_frac: f64,
+    /// Best distinct cars carried over verbatim and re-evaluated each generation.
+    pub elite_count: usize,
+    /// Parameters are clamped to `[-max_weight, max_weight]`; 0 turns it off.
+    pub max_weight: f64,
+}
+
+impl Default for ArsSettings {
+    fn default() -> Self {
+        ArsSettings {
+            nu: 0.05,
+            alpha: 0.05,
+            top_frac: 1.0,
+            elite_count: 3,
+            max_weight: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EvolutionSettings {
+    /// `"ga"` (selection, crossover and mutation) or `"ars"`.
+    pub algorithm: String,
+    pub ars: ArsSettings,
     pub population: usize,
     pub selection_algorithm: String,
     pub selection_size: usize,
@@ -127,6 +158,8 @@ pub struct EvolutionSettings {
 impl Default for EvolutionSettings {
     fn default() -> Self {
         EvolutionSettings {
+            algorithm: "ga".into(),
+            ars: ArsSettings::default(),
             population: 300,
             selection_algorithm: "best".into(),
             selection_size: 3,
@@ -147,54 +180,104 @@ impl Default for EvolutionSettings {
 
 impl EvolutionSettings {
     /// `EvolutionSettings.from_mcp`.
+    /// Panics on malformed settings; sessions use `try_from_mcp`.
     pub fn from_mcp(data: &Value) -> EvolutionSettings {
+        Self::try_from_mcp(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `from_mcp`, reporting malformed settings instead of panicking.
+    pub fn try_from_mcp(data: &Value) -> Result<EvolutionSettings, String> {
         let data = data.get("settings").unwrap_or(data);
         let mut s = EvolutionSettings::default();
-        let int = |key: &str| data.get(key).map(|v| v.as_f64().expect(key) as usize);
-        if let Some(v) = int("population") {
+        let bad = |key: &str| format!("invalid evolution settings: bad {key}");
+        let int = |key: &str| -> Result<Option<usize>, String> {
+            data.get(key)
+                .map(|v| v.as_f64().map(|x| x as usize).ok_or_else(|| bad(key)))
+                .transpose()
+        };
+        let text = |key: &str| -> Result<Option<String>, String> {
+            data.get(key)
+                .map(|v| v.as_str().map(String::from).ok_or_else(|| bad(key)))
+                .transpose()
+        };
+        if let Some(v) = text("algorithm")? {
+            s.algorithm = v;
+        }
+        if let Some(v) = data.get("ars") {
+            s.ars = serde_json::from_value(v.clone()).map_err(|e| format!("invalid evolution settings: ars: {e}"))?;
+        }
+        if let Some(v) = int("population")? {
             s.population = v;
         }
-        if let Some(v) = data.get("selection_algorithm") {
-            s.selection_algorithm = v.as_str().expect("selection_algorithm").into();
+        if let Some(v) = text("selection_algorithm")? {
+            s.selection_algorithm = v;
         }
-        if let Some(v) = int("selection_size") {
+        if let Some(v) = int("selection_size")? {
             s.selection_size = v;
         }
-        if let Some(v) = data.get("crossover") {
-            s.crossover = v.as_str().expect("crossover").into();
+        if let Some(v) = text("crossover")? {
+            s.crossover = v;
         }
         if let Some(v) = data.get("mutation_rate") {
-            s.mutation_rate = v.as_f64().expect("mutation_rate");
+            s.mutation_rate = v.as_f64().ok_or_else(|| bad("mutation_rate"))?;
         }
         if let Some(v) = data.get("adaptive_mutation") {
-            s.adaptive_mutation = v.as_bool().expect("adaptive_mutation");
+            s.adaptive_mutation = v.as_bool().ok_or_else(|| bad("adaptive_mutation"))?;
         }
         if let Some(v) = data.get("weight_decay") {
-            s.weight_decay = v.as_f64().expect("weight_decay");
+            s.weight_decay = v.as_f64().ok_or_else(|| bad("weight_decay"))?;
         }
-        if let Some(v) = data.get("preserve_parents") {
-            s.preserve_parents = v.as_str().expect("preserve_parents").into();
+        if let Some(v) = text("preserve_parents")? {
+            s.preserve_parents = v;
         }
-        if let Some(v) = int("preserve_parents_size") {
+        if let Some(v) = int("preserve_parents_size")? {
             s.preserve_parents_size = v;
         }
         if let Some(rewards) = data.get("rewards") {
             s.rewards = rewards
                 .as_array()
-                .expect("rewards")
+                .ok_or_else(|| bad("rewards"))?
                 .iter()
-                .map(|item| RewardSpec {
-                    metric: item["metric"].as_str().expect("reward metric").into(),
-                    weight: item["weight"].as_i64().expect("integer reward weight"),
-                    kind: item.get("type").and_then(Value::as_str).unwrap_or("default").into(),
+                .map(|item| {
+                    Ok(RewardSpec {
+                        metric: item["metric"].as_str().ok_or_else(|| bad("reward metric"))?.into(),
+                        weight: item["weight"].as_i64().ok_or_else(|| bad("reward weight"))?,
+                        kind: item.get("type").and_then(Value::as_str).unwrap_or("default").into(),
+                    })
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
         }
-        s
+        Ok(s)
     }
 
     /// `dataclasses.asdict(settings)`.
     pub fn to_json(&self) -> Value {
+        let mut value = self.base_json();
+        if self.algorithm != "ga" {
+            let ars = &self.ars;
+            value["algorithm"] = json!(self.algorithm);
+            value["ars"] = json!({
+                "nu": ars.nu,
+                "alpha": ars.alpha,
+                "top_frac": ars.top_frac,
+                "elite_count": ars.elite_count,
+                "max_weight": ars.max_weight,
+            });
+        }
+        value
+    }
+
+    /// Checks the fields of the chosen algorithm that the algorithms cannot
+    /// repair themselves. Anything is accepted for the GA, as before.
+    pub fn validate_algorithm(&self) -> Result<(), String> {
+        match self.algorithm.as_str() {
+            "ga" => Ok(()),
+            "ars" => crate::training::ars::validate(&self.ars, self.population),
+            other => Err(format!("unknown algorithm {other:?} (ga or ars)")),
+        }
+    }
+
+    fn base_json(&self) -> Value {
         json!({
             "population": self.population,
             "selection_algorithm": self.selection_algorithm,
