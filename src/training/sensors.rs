@@ -69,6 +69,15 @@ impl SensorLayout {
                     .map(|x| x as f32 as f64)
                     .ok_or_else(|| format!("missing sensor parameter {key}"))
             };
+            let positive_number = |key: &str| {
+                let value = number(key)?;
+                if value <= 0.0 {
+                    return Err(format!(
+                        "sensor parameter {key} must be positive after float32 conversion"
+                    ));
+                }
+                Ok(value)
+            };
             let kind = row["$type"].as_str().ok_or("missing sensor type")?;
             sensors.push(match kind {
                 "raycast" => Sensor::Raycast {
@@ -76,13 +85,13 @@ impl SensorLayout {
                     length: number("Length")?,
                 },
                 "accelerationFront" => Sensor::AccelerationFront {
-                    max_acceleration: number("MaxAcceleration")?,
+                    max_acceleration: positive_number("MaxAcceleration")?,
                 },
                 "accelerationSide" => Sensor::AccelerationSide {
-                    max_acceleration: number("MaxAcceleration")?,
+                    max_acceleration: positive_number("MaxAcceleration")?,
                 },
                 "distanceFromWall" => Sensor::DistanceFromWall {
-                    max_distance: number("MaxDistance")?,
+                    max_distance: positive_number("MaxDistance")?,
                 },
                 "trackCurvature" => {
                     let min = number("MinLookaheadDistance")?.max(0.0);
@@ -236,5 +245,67 @@ impl SensorLayout {
             }
             other => car.sensor(world, other, scratch),
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const NORMALIZED_SENSORS: [(&str, &str); 3] = [
+        ("accelerationFront", "MaxAcceleration"),
+        ("accelerationSide", "MaxAcceleration"),
+        ("distanceFromWall", "MaxDistance"),
+    ];
+
+    fn ordered(kind: &str, parameter: &str, value: Value) -> Value {
+        let mut sensor = json!({"$type": kind});
+        sensor[parameter] = value;
+        json!({"names": ["input"], "sensors": [sensor]})
+    }
+
+    #[test]
+    fn normalization_maxima_reject_zero_negative_and_float32_underflow() {
+        let network = json!({"inputs": ["input"]});
+        for (kind, parameter) in NORMALIZED_SENSORS {
+            for value in [
+                json!(0.0),
+                json!(-0.0),
+                json!(-1.0),
+                json!(1e-50),
+                json!(1e39),
+                Value::Null,
+            ] {
+                let layout = ordered(kind, parameter, value.clone());
+                let error = SensorLayout::from_ordered(&layout).unwrap_err();
+                assert!(error.contains(parameter), "{kind} {value}: {error}");
+                let error =
+                    SensorLayout::try_from_exports(&network, &json!({"sensor_layout": layout}), MathProfile::Proton)
+                        .unwrap_err();
+                assert!(error.contains(parameter), "{kind} {value}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn positive_normalization_maxima_keep_float32_rounding_and_trusted_exports() {
+        let network = json!({"inputs": ["input"]});
+        for (kind, parameter) in NORMALIZED_SENSORS {
+            for value in [f32::from_bits(1) as f64, 0.1, f32::MAX as f64] {
+                let ordered = ordered(kind, parameter, json!(value));
+                let layout =
+                    SensorLayout::from_exports(&network, &json!({"sensor_layout": ordered}), MathProfile::Proton);
+                let maximum = match layout.sensors[0] {
+                    Sensor::AccelerationFront { max_acceleration } | Sensor::AccelerationSide { max_acceleration } => {
+                        max_acceleration
+                    }
+                    Sensor::DistanceFromWall { max_distance } => max_distance,
+                    other => panic!("unexpected sensor {other:?}"),
+                };
+                assert_eq!(maximum.to_bits(), (value as f32 as f64).to_bits(), "{kind}: {value}");
+                assert!(maximum > 0.0);
+            }
+        }
     }
 }

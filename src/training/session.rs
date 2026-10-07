@@ -106,6 +106,9 @@ pub struct Session {
     pub(crate) options: SessionOptions,
     #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
     network: Value,
+    /// Vehicle export retained to reject changes during track replacement.
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
+    vehicle: Value,
     output_names: Vec<String>,
     boundary: Option<Boundary>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -219,8 +222,11 @@ impl Session {
                 return Err(format!("unknown control output: {name}"));
             }
         }
-        if !spawn.position.iter().all(|n| n.is_finite()) || !spawn.rotation.is_finite() {
-            return Err("spawn pose must be finite".into());
+        if !spawn.position.iter().all(|n| n.is_finite() && (*n as f32).is_finite())
+            || !spawn.rotation.is_finite()
+            || !(spawn.rotation as f32).is_finite()
+        {
+            return Err("spawn pose must be finite after float32 conversion".into());
         }
         strings(&network["inputs"], "network inputs")?;
         let mut settings = options.settings.as_ref().map_or_else(
@@ -276,6 +282,8 @@ impl Session {
             options,
             #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
             network: network.clone(),
+            #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
+            vehicle: scene["vehicle"].clone(),
             output_names,
             boundary: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -881,6 +889,9 @@ impl Session {
     #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub fn replace_track(&mut self, scene: &Value) -> Result<(), String> {
         input::scene(scene)?;
+        if scene["vehicle"] != self.vehicle {
+            return Err("a replacement track must keep the vehicle".into());
+        }
         let position = scene
             .get("reset_position")
             .map(crate::track::world::vector)
