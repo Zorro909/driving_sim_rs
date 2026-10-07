@@ -16,6 +16,7 @@
 #include "sensors.h"
 #include "step.h"
 #include "stats.h"
+#include "upload_validation.h"
 #ifdef _WIN32
 // For GetThreadTimes. After the other headers: windows.h defines `near` and `far`, which the
 // simulator headers use as variable names.
@@ -655,6 +656,18 @@ __global__ void refresh_ray_offsets(Sensors sensors, uint32_t math, RefreshedSen
     out->error = error;
 }
 
+// Cached shape/surface indices belong to the old track. Never carry them into
+// a smaller world; preserve motion and networks while rebuilding these caches.
+__global__ void invalidate_world_cache(Car* cars, uint32_t n, uint32_t surface) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    Car& c = cars[i];
+    c.pair_count = c.contact_count = 0;
+    c.flags &= ~(CAR_HAS_LEAF | CAR_PAIR_CHECK);
+    c.wheel_has_previous = 0;
+    for (uint32_t j = 0; j < MAX_WHEELS; ++j) c.wheel_surface[j] = surface;
+}
+
 // Graph kernels capture world pointers by value. Invalidate the graph before
 // releasing the old track, while retaining all population allocations.
 ALTD_API int altd_gpu_sim_set_world(Sim* s, const World* world) {
@@ -678,6 +691,11 @@ ALTD_API int altd_gpu_sim_set_world(Sim* s, const World* world) {
         CHECK(hipGraphExecDestroy(s->graph_exec));
         s->graph_exec = nullptr;
     }
+    if (s->n) {
+        invalidate_world_cache<<<blocks(s->n), 256, 0, s->stream>>>(s->cars, s->n, world->default_surface);
+        CHECK(hipGetLastError());
+        CHECK(hipStreamSynchronize(s->stream));
+    }
     s->sensors = sensors;
     s->world = *world;
     return 0;
@@ -700,6 +718,10 @@ ALTD_API void altd_gpu_sim_free(Sim* s) {
 // Uploads `n` cars and (if not null) agents.
 ALTD_API int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents) {
     if (n > s->capacity) return -1;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!valid_car_upload(cars[i], s->world.shape_count, s->world.surface_count, s->vehicle.wheel_count)
+            || (agents && !valid_agent_upload(agents[i]))) return -1;
+    }
     s->n = n;
     CHECK(hipMemcpy(s->cars, cars, sizeof(Car) * n, hipMemcpyHostToDevice));
     if (agents) CHECK(hipMemcpy(s->agents, agents, sizeof(Agent) * n, hipMemcpyHostToDevice));
@@ -708,6 +730,7 @@ ALTD_API int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agen
 
 ALTD_API int altd_gpu_sim_upload_agents(Sim* s, uint32_t n, const Agent* agents) {
     if (n != s->n) return -1;
+    for (uint32_t i = 0; i < n; ++i) if (!valid_agent_upload(agents[i])) return -1;
     CHECK(hipMemcpy(s->agents, agents, sizeof(Agent) * n, hipMemcpyHostToDevice));
     return 0;
 }

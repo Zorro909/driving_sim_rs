@@ -101,6 +101,46 @@ pub struct GpuCar {
     pub contacts: [GpuContact; MAX_CONTACTS],
 }
 
+fn validate_upload_state(
+    cars: &[GpuCar],
+    agents: Option<&[GpuAgent]>,
+    shape_count: usize,
+    surface_count: usize,
+    wheel_count: usize,
+) -> Result<(), String> {
+    for (i, c) in cars.iter().enumerate() {
+        if c.pair_count as usize > MAX_PAIRS || c.contact_count as usize > MAX_CONTACTS {
+            return Err(format!("car {i} has invalid pair/contact counts"));
+        }
+        if c.pairs[..c.pair_count as usize]
+            .iter()
+            .any(|&n| n as usize >= shape_count)
+            || c.contacts[..c.contact_count as usize]
+                .iter()
+                .any(|c| c.shape as usize >= shape_count)
+            || c.wheel_surface[..wheel_count]
+                .iter()
+                .any(|&n| n as usize >= surface_count)
+            || c.wheel_has_previous >> MAX_WHEELS != 0
+        {
+            return Err(format!("car {i} has invalid world indices"));
+        }
+    }
+    if let Some(agents) = agents {
+        validate_agent_state(agents)?;
+    }
+    Ok(())
+}
+
+fn validate_agent_state(agents: &[GpuAgent]) -> Result<(), String> {
+    for (i, a) in agents.iter().enumerate() {
+        if a.recent_len as usize > RECENT || a.recent_start as usize >= RECENT {
+            return Err(format!("agent {i} has invalid recent-score ring indices"));
+        }
+    }
+    Ok(())
+}
+
 impl GpuCar {
     pub(crate) fn zeroed() -> GpuCar {
         // SAFETY: plain old data; all-zero bits are a valid value.
@@ -1090,6 +1130,9 @@ pub struct GpuSim<'a> {
     handle: *mut c_void,
     free: unsafe extern "C" fn(*mut c_void),
     capacity: usize,
+    shape_count: usize,
+    surface_count: usize,
+    wheel_count: usize,
     pub(crate) sensor_count: usize,
     pub(crate) cars: usize,
     /// Caller-chosen tag of the uploaded networks (e.g. the generation), so
@@ -1245,6 +1288,9 @@ impl<'a> GpuSim<'a> {
             handle,
             free,
             capacity,
+            shape_count: world.arrays.shapes.len(),
+            surface_count: world.arrays.surfaces.values.len(),
+            wheel_count: vehicle.wheel_count as usize,
             sensor_count: sensors.len(),
             cars: 0,
             network_tag: None,
@@ -1268,7 +1314,10 @@ impl<'a> GpuSim<'a> {
         }
         let f: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 =
             self.gpu.required_symbol("altd_gpu_sim_set_world")?;
-        try_check(unsafe { f(self.handle, world.handle()) }, "set_world")
+        try_check(unsafe { f(self.handle, world.handle()) }, "set_world")?;
+        self.shape_count = world.arrays.shapes.len();
+        self.surface_count = world.arrays.surfaces.values.len();
+        Ok(())
     }
 
     /// The retained host state buffers (empty on first use); return them with
@@ -1293,6 +1342,7 @@ impl<'a> GpuSim<'a> {
         if cars.len() > self.capacity {
             return Err("car population exceeds the HIP simulator capacity".into());
         }
+        validate_upload_state(cars, agents, self.shape_count, self.surface_count, self.wheel_count)?;
         let count = u32::try_from(cars.len()).map_err(|_| "too many cars for the HIP simulator")?;
         let f: unsafe extern "C" fn(*mut c_void, u32, *const GpuCar, *const GpuAgent) -> i32 =
             self.gpu.required_symbol("altd_gpu_sim_upload")?;
@@ -1334,6 +1384,8 @@ impl<'a> GpuSim<'a> {
 
     /// Replaces the agents of the uploaded cars.
     pub fn upload_agents(&mut self, agents: &[GpuAgent]) {
+        assert_eq!(agents.len(), self.cars, "HIP car and agent counts differ");
+        validate_agent_state(agents).expect("valid GPU agent state");
         let f: unsafe extern "C" fn(*mut c_void, u32, *const GpuAgent) -> i32 =
             self.gpu.symbol("altd_gpu_sim_upload_agents");
         check(
@@ -1742,5 +1794,59 @@ mod native_validation_tests {
         assert!(error.contains("window") && error.contains("-2"), "{error}");
         let error = sim.try_networks(&[1, 32, 5], &[], [0, 1, 2, 3, 4]).unwrap_err();
         assert!(error.contains("width 32"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod upload_state_tests {
+    use super::*;
+    #[test]
+    fn upload_rejects_embedded_counts_and_world_indices() {
+        let c = GpuCar::zeroed();
+        assert!(validate_upload_state(&[c], None, 1, 1, 4).is_ok());
+        let mut bad = c;
+        bad.pair_count = MAX_PAIRS as u32 + 1;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        bad = c;
+        bad.contact_count = MAX_CONTACTS as u32 + 1;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        bad = c;
+        bad.pair_count = 1;
+        bad.pairs[0] = 1;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        bad = c;
+        bad.contact_count = 1;
+        bad.contacts[0].shape = 1;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        bad = c;
+        bad.wheel_surface[0] = 1;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        bad = c;
+        bad.wheel_has_previous = 1 << MAX_WHEELS;
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+        // Unused pair/contact slots do not influence a valid state.
+        bad = c;
+        bad.pairs[MAX_PAIRS - 1] = u32::MAX;
+        bad.contacts[MAX_CONTACTS - 1].shape = u32::MAX;
+        assert!(validate_upload_state(&[bad], None, 0, 1, 4).is_ok());
+        // Recheck against the current world, even if an old world accepted it.
+        bad = c;
+        bad.pair_count = 1;
+        bad.pairs[0] = 1;
+        assert!(validate_upload_state(&[bad], None, 2, 1, 4).is_ok());
+        assert!(validate_upload_state(&[bad], None, 1, 1, 4).is_err());
+    }
+    #[test]
+    fn agent_ring_bounds_are_checked() {
+        let mut a = GpuAgent::default();
+        assert!(validate_agent_state(&[a]).is_ok());
+        a.recent_len = RECENT as u32;
+        a.recent_start = RECENT as u32 - 1;
+        assert!(validate_agent_state(&[a]).is_ok());
+        a.recent_len += 1;
+        assert!(validate_agent_state(&[a]).is_err());
+        a.recent_len = 0;
+        a.recent_start = RECENT as u32;
+        assert!(validate_agent_state(&[a]).is_err());
     }
 }
