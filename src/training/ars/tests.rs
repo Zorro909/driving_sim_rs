@@ -296,9 +296,17 @@ fn fixed_scores(len: usize) -> Vec<f64> {
 fn next_with(ars: &mut Ars, cars: &[Network], s: &EvolutionSettings, seed: i64) -> Vec<Network> {
     let results = agents(cars, &|_| 0.0);
     let mut rng = TrainingRandom::from(PyRandom::new(seed));
-    ars.next(&results, Some(fixed_scores(cars.len())), s, &mut rng, &mut Vec::new(), MATH, false)
-        .generation
-        .networks
+    ars.next(
+        &results,
+        Some(fixed_scores(cars.len())),
+        s,
+        &mut rng,
+        &mut Vec::new(),
+        MATH,
+        false,
+    )
+    .generation
+    .networks
 }
 
 #[test]

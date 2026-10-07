@@ -408,7 +408,8 @@ fn a_failed_random_track_transition_leaves_ars_describing_the_installed_cars() {
         .next_generation_random_track(&template["scene"], &mut config, &mut state)
         .is_err());
     failed.rng = rng;
-    let params = |g: altd_sim::training::evolution::Generation| g.networks.into_iter().map(|n| n.params).collect::<Vec<_>>();
+    let params =
+        |g: altd_sim::training::evolution::Generation| g.networks.into_iter().map(|n| n.params).collect::<Vec<_>>();
     assert_eq!(params(failed.next_generation()), params(control.next_generation()));
 }
 

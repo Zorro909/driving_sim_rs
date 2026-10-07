@@ -59,6 +59,7 @@ pub(crate) trait Optimizer: Send + Sync {
     /// population order. `scores` are their rewards (`reward_values` when
     /// absent). `scratch` is reusable storage for random draws. With `trace`,
     /// the result carries the record a checkpoint rebuilds it from.
+    #[allow(clippy::too_many_arguments)] // the call mirrors `start`, plus the cars and scratch
     fn next(
         &mut self,
         agents: &[AgentResult],

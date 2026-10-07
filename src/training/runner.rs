@@ -194,8 +194,15 @@ impl TrainingRunner {
     fn turnover(&mut self, scores: Option<Vec<f64>>, scratch: &mut Vec<f64>, trace: bool) -> Produced {
         self.sync_optimizer();
         let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
-        self.optimizer
-            .next(&results, scores, &self.settings, &mut self.rng, scratch, self.world.math, trace)
+        self.optimizer.next(
+            &results,
+            scores,
+            &self.settings,
+            &mut self.rng,
+            scratch,
+            self.world.math,
+            trace,
+        )
     }
 
     pub fn start(&mut self, seed: &Network) -> Generation {
