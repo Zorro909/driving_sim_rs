@@ -622,3 +622,38 @@ fn unsupported_hip_scenes_and_networks_fall_back_without_losing_the_connection()
     assert!(reply["state"]["backendNote"].as_str().unwrap().contains("16"));
     assert!(!wide.call_raw("checkpointBytes", Value::Null, None).1.is_empty());
 }
+
+#[test]
+fn oversized_frame_is_rejected_before_its_payload_arrives() {
+    use std::io::{Read, Write};
+    let address = start();
+    let mut client = Client::connect(address);
+    // Masked binary frame with an oversized announced payload and no body.
+    // The server must reject its header rather than wait/allocate for the body.
+    let len = altd_sim::server::MAX_FRAME_BYTES as u64 + 1;
+    let mut header = vec![0x82, 0xff];
+    header.extend_from_slice(&len.to_be_bytes());
+    header.extend_from_slice(&[0; 4]);
+    client.socket.get_mut().write_all(&header).unwrap();
+    let mut byte = [0];
+    match client.socket.get_mut().read(&mut byte) {
+        Ok(0) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("oversized frame did not close: {other:?}"),
+    }
+    assert_eq!(Client::connect(address).hello["protocol"], 1);
+}
+
+#[test]
+fn fragmented_messages_obey_the_assembled_limit() {
+    use std::io::Cursor;
+    use tungstenite::protocol::{Role, WebSocketConfig};
+    // Two individually allowed masked fragments exceed the assembled limit.
+    let mut frames = vec![0x02, 0x83, 0, 0, 0, 0, 1, 2, 3];
+    frames.extend_from_slice(&[0x80, 0x83, 0, 0, 0, 0, 4, 5, 6]);
+    let config = WebSocketConfig::default()
+        .max_frame_size(Some(4))
+        .max_message_size(Some(5));
+    let mut socket = WebSocket::from_raw_socket(Cursor::new(frames), Role::Server, Some(config));
+    assert!(matches!(socket.read(), Err(tungstenite::Error::Capacity(_))));
+}
