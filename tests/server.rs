@@ -741,6 +741,11 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     assert!(client
         .error("create", request(&scene, &bad_network, &model, json!({})))
         .contains("sensor"));
+    let mut bad_outputs = network.clone();
+    bad_outputs["outputs"][0] = json!("invalid output");
+    assert!(client
+        .error("create", request(&scene, &bad_outputs, &model, json!({})))
+        .contains("control output"));
     assert!(client
         .error(
             "create",
