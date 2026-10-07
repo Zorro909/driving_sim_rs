@@ -138,7 +138,7 @@ impl Curve {
         let length = a2.sqrt();
         let result_length = length + (b2.sqrt() - length) * t;
         let angle = self.math.atan2(a.cross(b), a.dot(b)) * t;
-        let (s, c) = (native_math::engine_sin(angle), native_math::engine_cos(angle));
+        let (s, c) = native_math::engine_sin_cos(angle);
         (F2 {
             x: a.x * c - a.y * s,
             y: a.x * s + a.y * c,

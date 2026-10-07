@@ -88,7 +88,11 @@ impl F2 {
         }
     }
     pub(crate) fn rotated(self, angle: f32) -> Self {
-        let (s, c) = managed_sin_cos(angle);
+        self.rotated_sin_cos(managed_sin_cos(angle))
+    }
+    /// `rotated` by the angle whose `managed_sin_cos` is `(s, c)`.
+    #[inline]
+    pub(crate) fn rotated_sin_cos(self, (s, c): (f32, f32)) -> Self {
         Self {
             x: self.x * c - self.y * s,
             y: self.x * s + self.y * c,
@@ -140,11 +144,11 @@ pub fn managed_sin_cos(angle: f32) -> (f32, f32) {
     )
 }
 
+/// `managed_sin_cos(-PI / 2)`, the quarter turn from a body's right to its front.
+pub(crate) const QUARTER_TURN_BACK: (f32, f32) = (f32::from_bits(0xbf7f_ffff), f32::from_bits(0xb3bb_bd2e));
+
 pub fn basis(rotation: f64) -> (F2, F2) {
-    let (s, c) = (
-        crate::math::native_math::engine_sin(rotation as f32),
-        crate::math::native_math::engine_cos(rotation as f32),
-    );
+    let (s, c) = crate::math::native_math::engine_sin_cos(rotation as f32);
     (F2 { x: c, y: s }, F2 { x: -s, y: c })
 }
 
@@ -209,4 +213,19 @@ pub(crate) fn reset_basis(angle: f32) -> (F2, F2) {
     let x = F2 { x: c, y: s }.normalized();
     let y = F2 { x: -s, y: c };
     (x, (y - x * x.dot(y)).normalized())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarter_turn_back_is_managed_sin_cos() {
+        let (s, c) = managed_sin_cos(-std::f32::consts::FRAC_PI_2);
+        assert_eq!(
+            (s.to_bits(), c.to_bits()),
+            (QUARTER_TURN_BACK.0.to_bits(), QUARTER_TURN_BACK.1.to_bits())
+        );
+        assert_eq!(std::f32::consts::FRAC_PI_2, std::f32::consts::PI / 2.0);
+    }
 }

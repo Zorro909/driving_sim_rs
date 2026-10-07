@@ -35,10 +35,8 @@ pub(crate) fn transform_angle(world: &World, state: &Value, previous: Option<&Va
         return recorded;
     }
     let angle = f(&previous["rotation"]) as f32 + f(&state["angular_velocity"]) as f32 * DT as f32;
-    let extracted = world.math.atan2(
-        crate::math::native_math::engine_sin(angle),
-        crate::math::native_math::engine_cos(angle),
-    );
+    let (sine, cosine) = crate::math::native_math::engine_sin_cos(angle);
+    let extracted = world.math.atan2(sine, cosine);
     // Reject resets/discontinuities. Two float32 ULPs account for angle
     // extraction by the native engine versus the managed trace exporter.
     let ulp = f32::from_bits((recorded as f32).abs().to_bits() + 1) - (recorded as f32).abs();

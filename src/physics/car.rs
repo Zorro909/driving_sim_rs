@@ -1,7 +1,7 @@
 //! Experimental Godot body, contact, and sensor arithmetic.
 //! See docs/fidelity.md for the capture-based accuracy checks and their limits.
 
-use crate::math::godot_math::{self, F2};
+use crate::math::godot_math::{self, F2, QUARTER_TURN_BACK};
 use crate::math::profile::MathProfile;
 use crate::math::pymath::{clamp, f32r, py_max, py_mod};
 use crate::math::vec2::V2;
@@ -178,6 +178,9 @@ pub struct SensorScratch {
     pub(crate) stamps: RayStamps,
     /// `(sensor point, offset)` of the last path projection for this car pose.
     path_cache: Option<(V2, f64)>,
+    /// `(offset bits, normalized curve direction)` at the last path offset,
+    /// shared by the direction and curvature sensors.
+    tangent_cache: Option<(u64, F2)>,
     /// Fixed ray geometry survives pose changes. The cursor makes ordered
     /// training reads an indexed lookup instead of a search.
     ray_geometry: Vec<(u32, u32, MathProfile, F2)>,
@@ -188,6 +191,7 @@ impl SensorScratch {
     /// Forget cached path projections (call when the car moves).
     pub fn invalidate(&mut self) {
         self.path_cache = None;
+        self.tangent_cache = None;
         self.ray_cursor = 0;
     }
     fn ray_local(&mut self, degrees: f64, length: f64, math: MathProfile) -> F2 {
@@ -226,14 +230,13 @@ impl Car {
     /// `Simulator(config, track, position, rotation)`. The per-tick
     /// `Simulator.score` tracker does not affect training, so it is omitted.
     pub fn new(world: &World, position: V2, rotation: f64) -> Car {
+        let body_basis = godot_math::basis(rotation);
         Car {
             position,
-            rotation: world.math.atan2(
-                crate::math::native_math::engine_sin(rotation as f32),
-                crate::math::native_math::engine_cos(rotation as f32),
-            ) as f64,
+            // `basis` holds the engine sine and cosine of the float32 rotation.
+            rotation: world.math.atan2(body_basis.0.y, body_basis.0.x) as f64,
             transform_angle: rotation as f32 as f64,
-            body_basis: godot_math::basis(rotation),
+            body_basis,
             velocity: V2::ZERO,
             angular_velocity: 0.0,
             acceleration: V2::ZERO,
@@ -359,6 +362,11 @@ impl Car {
         }
     }
 
+    /// `cached_right().rotated(-PI / 2)`.
+    fn cached_front(&self) -> F2 {
+        self.cached_right().rotated_sin_cos(QUARTER_TURN_BACK)
+    }
+
     /// Vehicle.GetVelocity, used for display while physics is frozen.
     pub fn display_velocity(&self) -> V2 {
         if !self.active {
@@ -478,6 +486,10 @@ impl Car {
                     1.0
                 }) as f32;
             let steering_multiplier = 1.0 / (0.002 * F2::from(self.velocity).length() as f64 + 1.0);
+            // The eased lateral grip depends only on the handbrake input, which
+            // wheels without handbrake power read as zero.
+            let eased_grip = |handbrake: f64| 0.8 + (0.1 - 0.8) * godot_ease(handbrake, 0.3, world.math);
+            let (handbrake_grip, released_grip) = (eased_grip(control.handbrake), eased_grip(0.0));
             let (body_x, body_y) = self.body_basis;
             for ((spec, wheel), &local_position) in cfg
                 .wheels
@@ -517,13 +529,13 @@ impl Car {
                 torque += offset.cross(wheel_drive);
 
                 let lateral_speed = wheel_velocity.dot(right);
-                let handbrake = if spec.handbrake_power.abs() < 0.00001 {
-                    0.0
+                let eased_grip = if spec.handbrake_power.abs() < 0.00001 {
+                    released_grip
                 } else {
-                    control.handbrake
+                    handbrake_grip
                 };
                 let lateral_grip = 0.20000000298023224
-                    + (0.8 + (0.1 - 0.8) * godot_ease(handbrake, 0.3, world.math))
+                    + eased_grip
                         / (1.0
                             + world
                                 .math
@@ -665,8 +677,7 @@ impl Car {
     fn apply_center_of_mass_displacement(&mut self, cfg: &crate::track::world::VehicleConfig, angle_delta: f32) {
         let center = self.body_basis.0 * cfg.center_of_mass.x as f32 + self.body_basis.1 * cfg.center_of_mass.y as f32;
         if center.dot(center) as f64 > 1e-5f64 * 1e-5f64 {
-            let s = crate::math::native_math::engine_sin(angle_delta);
-            let c = crate::math::native_math::engine_cos(angle_delta);
+            let (s, c) = crate::math::native_math::engine_sin_cos(angle_delta);
             let rotated = F2 {
                 x: center.x * c - center.y * s,
                 y: center.x * s + center.y * c,
@@ -797,11 +808,10 @@ impl Car {
                 }
             }
             Sensor::Speed => (F2::from(self.velocity).length() / cfg.max_velocity as f32).clamp(0.0, 1.0) as f64,
-            Sensor::VelocityFront => {
-                let right = self.cached_right();
-                let front = right.rotated(-std::f32::consts::PI / 2.0);
-                godot_math::signed_sensor(F2::from(self.actual_velocity()).dot(front), cfg.max_velocity as f32)
-            }
+            Sensor::VelocityFront => godot_math::signed_sensor(
+                F2::from(self.actual_velocity()).dot(self.cached_front()),
+                cfg.max_velocity as f32,
+            ),
             Sensor::VelocitySide => {
                 let right = self.cached_right();
                 godot_math::signed_sensor(
@@ -809,10 +819,10 @@ impl Car {
                     cfg.max_velocity as f32 / 2.0,
                 )
             }
-            Sensor::AccelerationFront { max_acceleration } => {
-                let front = self.cached_right().rotated(-std::f32::consts::FRAC_PI_2);
-                godot_math::signed_sensor(F2::from(self.actual_acceleration()).dot(front), max_acceleration as f32)
-            }
+            Sensor::AccelerationFront { max_acceleration } => godot_math::signed_sensor(
+                F2::from(self.actual_acceleration()).dot(self.cached_front()),
+                max_acceleration as f32,
+            ),
             Sensor::AccelerationSide { max_acceleration } => godot_math::signed_sensor(
                 F2::from(self.actual_acceleration()).dot(self.cached_right()),
                 max_acceleration as f32,
@@ -844,13 +854,20 @@ impl Car {
                 }
                 let here = self.sensor_path_offset(track, scratch);
                 if let Some(curve) = &track.curve {
-                    let tangent = curve.direction(here as f32).normalized();
+                    let tangent = match scratch.tangent_cache {
+                        Some((bits, tangent)) if bits == here.to_bits() => tangent,
+                        _ => {
+                            let tangent = curve.direction(here as f32).normalized();
+                            scratch.tangent_cache = Some((here.to_bits(), tangent));
+                            tangent
+                        }
+                    };
                     let Sensor::TrackCurvature {
                         min_lookahead,
                         max_lookahead,
                     } = sensor
                     else {
-                        let forward = self.cached_right().rotated(-std::f32::consts::FRAC_PI_2).normalized();
+                        let forward = self.cached_front().normalized();
                         return forward.dot(tangent).clamp(-1.0, 1.0) as f64;
                     };
                     if curve.length() <= 0.0 {
