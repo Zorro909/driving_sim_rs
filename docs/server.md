@@ -32,7 +32,7 @@ Connect to `ws://127.0.0.1:47800/v1`, substituting the configured port. The hand
 - `Origin` is present and exactly matches an allowed origin. Different schemes or ports do not match; `null` is rejected.
 - `Host` names `127.0.0.1` or `localhost` with the listening port. Other hostnames are rejected to prevent DNS rebinding.
 
-There is no LAN binding, TLS or authentication token. These checks restrict browser callers; a local program can supply its own headers. Requests run in order on a dedicated connection thread, with no per-request timeout or configured WebSocket frame/message size ceiling. A generation may take minutes.
+There is no LAN binding, TLS or authentication token. These checks restrict browser callers; a local program can supply its own headers. At most 64 connections (including incomplete handshakes) may be active. Excess sockets are closed before spawning a worker. Handshake socket reads/writes time out after 5 seconds; established socket reads/writes after 10 minutes of blocked I/O. Long-running generation computation is not subject to those socket timeouts. Connection-worker spawn failures reject that connection while retaining the accept loop. Requests run in order on a dedicated connection thread, with no per-request timeout or configured WebSocket frame/message size ceiling. A generation may take minutes.
 
 ## Protocol 1
 

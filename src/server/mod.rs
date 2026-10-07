@@ -9,8 +9,11 @@ use crate::math::profile::MathProfile;
 use dispatch::{Connection, Reply};
 use protocol::{decode_binary, encode_binary, host_allowed, normalize_origin, origin_allowed, Request, PROTOCOL};
 use serde_json::{json, Value};
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Response as HttpResponse};
 use tungstenite::http::StatusCode;
 use tungstenite::protocol::WebSocketConfig;
@@ -22,6 +25,66 @@ pub const DEFAULT_PORT: u16 = 47800;
 pub const DEFAULT_ORIGIN: &str = "https://drivinglab.jectrum.de";
 /// The WebSocket endpoint.
 pub const PATH: &str = "/v1";
+/// Includes sockets that have not yet completed the handshake.
+pub const MAX_CONNECTIONS: usize = 64;
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Applies to socket I/O, not computation between requests.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl ConnectionPermit {
+    fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_CONNECTIONS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(active.clone()))
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+// A deadline across all handshake I/O prevents drip-fed bytes from resetting
+// a per-read timeout forever. Established sockets retain their idle timeout.
+struct ConnectionStream {
+    stream: TcpStream,
+    handshake_deadline: Option<Instant>,
+}
+
+impl ConnectionStream {
+    fn timeout(&self) -> std::io::Result<Duration> {
+        match self.handshake_deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake deadline")),
+            None => Ok(IDLE_TIMEOUT),
+        }
+    }
+}
+
+impl Read for ConnectionStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.timeout()?))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for ConnectionStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.timeout()?))?;
+        self.stream.write(buffer)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
 
 pub struct Config {
     /// TCP port on 127.0.0.1; 0 picks a free one.
@@ -116,6 +179,7 @@ impl Server {
     /// Accepts connections until the listener fails.
     pub fn run(self) -> std::io::Result<()> {
         let port = self.local_addr()?.port();
+        let active = Arc::new(AtomicUsize::new(0));
         for stream in self.listener.incoming() {
             let stream = match stream {
                 Ok(s) => s,
@@ -124,10 +188,21 @@ impl Server {
                     continue;
                 }
             };
+            let Some(permit) = ConnectionPermit::acquire(&active) else {
+                drop(stream);
+                continue;
+            };
             let (origins, math) = (self.origins.clone(), self.math);
-            std::thread::Builder::new()
+            if let Err(error) = std::thread::Builder::new()
                 .name("altd-sim-connection".into())
-                .spawn(move || serve_connection(stream, &origins, port, math))?;
+                .spawn(move || {
+                    let _permit = permit;
+                    serve_connection(stream, &origins, port, math);
+                })
+            {
+                // Dropping the failed spawn's closure releases its permit/socket.
+                eprintln!("altd-sim serve: connection spawn failed: {error}");
+            }
         }
         Ok(())
     }
@@ -136,6 +211,11 @@ impl Server {
 fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: MathProfile) {
     let peer = stream.peer_addr().map_or_else(|_| "?".into(), |a| a.to_string());
     let _ = stream.set_nodelay(true);
+    if stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)).is_err()
+    {
+        return;
+    }
     let mut origin = String::new();
     // tungstenite's handshake callback requires an unboxed HTTP response.
     #[allow(clippy::result_large_err)]
@@ -156,10 +236,15 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: Math
     };
     // Local native sessions are bounded by available memory, not message size.
     let config = WebSocketConfig::default().max_message_size(None).max_frame_size(None);
+    let stream = ConnectionStream {
+        stream,
+        handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
+    };
     let mut socket = match tungstenite::accept_hdr_with_config(stream, callback, Some(config)) {
         Ok(s) => s,
         Err(_) => return,
     };
+    socket.get_mut().handshake_deadline = None;
     eprintln!("altd-sim serve: connected {peer} (origin {origin})");
     match converse(&mut socket, math) {
         Ok(()) => eprintln!("altd-sim serve: {peer} disconnected"),
@@ -167,7 +252,7 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: Math
     }
 }
 
-fn send(socket: &mut WebSocket<TcpStream>, reply: Reply) -> tungstenite::Result<()> {
+fn send(socket: &mut WebSocket<ConnectionStream>, reply: Reply) -> tungstenite::Result<()> {
     match reply {
         Reply::Text(v) => socket.send(Message::text(v.to_string())),
         Reply::Binary(header, payload) => socket.send(Message::binary(encode_binary(&header, &payload))),
@@ -176,7 +261,7 @@ fn send(socket: &mut WebSocket<TcpStream>, reply: Reply) -> tungstenite::Result<
 
 /// Greets the client and answers its requests until it closes. The
 /// session drops with the connection.
-fn converse(socket: &mut WebSocket<TcpStream>, math: MathProfile) -> Result<(), String> {
+fn converse(socket: &mut WebSocket<ConnectionStream>, math: MathProfile) -> Result<(), String> {
     let mut connection = Connection::new(math);
     socket
         .send(Message::text(hello(math).to_string()))
@@ -217,5 +302,37 @@ fn converse(socket: &mut WebSocket<TcpStream>, math: MathProfile) -> Result<(), 
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
         };
         send(socket, reply).map_err(|e| e.to_string())?;
+    }
+}
+
+#[cfg(test)]
+mod connection_limit_tests {
+    use super::*;
+
+    #[test]
+    fn overload_does_not_consume_a_permit_and_drop_releases_it() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut permits: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| ConnectionPermit::acquire(&active).unwrap())
+            .collect();
+        assert!(ConnectionPermit::acquire(&active).is_none());
+        assert_eq!(active.load(Ordering::Acquire), MAX_CONNECTIONS);
+        permits.pop();
+        assert!(ConnectionPermit::acquire(&active).is_some());
+        drop(permits);
+        assert_eq!(active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn rejected_or_incomplete_handshake_drops_its_socket() {
+        use std::io::Read;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let stream = listener.accept().unwrap().0;
+        let worker = std::thread::spawn(move || serve_connection(stream, &[], 0, MathProfile::Proton));
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
+        worker.join().unwrap();
     }
 }
