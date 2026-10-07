@@ -57,6 +57,51 @@ pub enum MathOp {
     GameTanh = 8,
 }
 
+mod math_element {
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+    impl Sealed for [f32; 2] {}
+    impl Sealed for [f64; 2] {}
+}
+
+/// Native math buffer elements. Sealed to padding-free types for which every
+/// output bit pattern is valid; arbitrary `Copy` types are not FFI-safe.
+///
+/// ```compile_fail
+/// use altd_sim::gpu::hip::{Gpu, MathOp};
+/// fn invalid(gpu: &Gpu) {
+///     gpu.math(MathOp::NativeSin, &[0u8], &mut [false]);
+/// }
+/// ```
+pub trait MathElement: math_element::Sealed + Copy + 'static {}
+impl MathElement for f32 {}
+impl MathElement for f64 {}
+impl MathElement for [f32; 2] {}
+impl MathElement for [f64; 2] {}
+
+fn validate_math_buffers<I: MathElement, O: MathElement>(
+    op: MathOp,
+    inputs: usize,
+    outputs: usize,
+) -> Result<i32, &'static str> {
+    use std::any::TypeId;
+    let (input, output) = match op {
+        MathOp::NativeSin | MathOp::NativeCos => (TypeId::of::<f32>(), TypeId::of::<f32>()),
+        MathOp::NativeAtan2 => (TypeId::of::<[f32; 2]>(), TypeId::of::<f32>()),
+        MathOp::ManagedSinCos | MathOp::EngineSinCos => (TypeId::of::<f32>(), TypeId::of::<[f32; 2]>()),
+        MathOp::Exp | MathOp::GameTanh => (TypeId::of::<f64>(), TypeId::of::<f64>()),
+        MathOp::Pow => (TypeId::of::<[f64; 2]>(), TypeId::of::<f64>()),
+    };
+    if TypeId::of::<I>() != input || TypeId::of::<O>() != output {
+        return Err("math buffer types do not match the selected operation");
+    }
+    if inputs != outputs {
+        return Err("math input and output lengths differ");
+    }
+    i32::try_from(inputs).map_err(|_| "math batch too large")
+}
+
 pub struct Gpu {
     library: libloading::Library,
     path: PathBuf,
@@ -204,24 +249,27 @@ impl Gpu {
 
     /// Runs one math primitive. `input` and `output` hold `n` elements of the
     /// op's input and output layout (see gpu/sim/altd_gpu.hip); returns the error bits.
-    pub fn math<I: Copy, O: Copy>(&self, op: MathOp, input: &[I], output: &mut [O]) -> Vec<u32> {
+    pub fn math<I: MathElement, O: MathElement>(&self, op: MathOp, input: &[I], output: &mut [O]) -> Vec<u32> {
         self.profile_math(MathProfile::Proton, op, input, output)
     }
 
     /// [`Gpu::math`] in `profile`'s variant of the sin, cos, atan2, exp, pow
     /// and tanh ops.
-    pub fn profile_math<I: Copy, O: Copy>(
+    pub fn profile_math<I: MathElement, O: MathElement>(
         &self,
         profile: MathProfile,
         op: MathOp,
         input: &[I],
         output: &mut [O],
     ) -> Vec<u32> {
-        assert_eq!(input.len(), output.len());
+        // Validate before symbol resolution, allocation, or any native call.
+        let n = validate_math_buffers::<I, O>(op, input.len(), output.len()).expect("invalid math buffers");
+        if n == 0 {
+            return Vec::new();
+        }
         let f: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 =
             self.symbol("altd_gpu_math");
         let mut err = vec![0u32; input.len()];
-        let n = i32::try_from(input.len()).expect("batch too large");
         Self::check(
             unsafe {
                 f(
@@ -395,5 +443,37 @@ mod tests {
         let error = Gpu::open(Some(Path::new("/nonexistent/libaltd_gpu.so"))).err().unwrap();
         assert!(error.contains("/nonexistent/libaltd_gpu.so"), "{error}");
         assert!(error.contains("gpu/build.sh"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod math_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn all_operation_layouts_are_accepted_without_loading_gpu() {
+        for op in [MathOp::NativeSin, MathOp::NativeCos] {
+            assert_eq!(validate_math_buffers::<f32, f32>(op, 3, 3), Ok(3));
+        }
+        assert_eq!(validate_math_buffers::<[f32; 2], f32>(MathOp::NativeAtan2, 3, 3), Ok(3));
+        for op in [MathOp::ManagedSinCos, MathOp::EngineSinCos] {
+            assert_eq!(validate_math_buffers::<f32, [f32; 2]>(op, 3, 3), Ok(3));
+        }
+        for op in [MathOp::Exp, MathOp::GameTanh] {
+            assert_eq!(validate_math_buffers::<f64, f64>(op, 3, 3), Ok(3));
+        }
+        assert_eq!(validate_math_buffers::<[f64; 2], f64>(MathOp::Pow, 3, 3), Ok(3));
+    }
+
+    #[test]
+    fn undersized_and_same_width_wrong_types_are_rejected() {
+        assert!(validate_math_buffers::<f32, f32>(MathOp::Pow, 1, 1).is_err());
+        assert!(validate_math_buffers::<f64, f32>(MathOp::Exp, 1, 1).is_err());
+        assert!(validate_math_buffers::<f64, f64>(MathOp::NativeAtan2, 1, 1).is_err());
+        assert!(validate_math_buffers::<f32, f32>(MathOp::NativeSin, 1, 2).is_err());
+        assert!(
+            validate_math_buffers::<f32, f32>(MathOp::NativeSin, i32::MAX as usize + 1, i32::MAX as usize + 1).is_err()
+        );
+        assert_eq!(validate_math_buffers::<f32, f32>(MathOp::NativeSin, 0, 0), Ok(0));
     }
 }
