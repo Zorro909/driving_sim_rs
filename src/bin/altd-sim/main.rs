@@ -21,6 +21,7 @@ use io::{load, load_or, print_without, write_report, RALLY_MODEL};
 use scratch::{train_scratch, ScratchConfig, StopRules};
 use train::train;
 
+use altd_sim::math::profile::MathProfile;
 use altd_sim::track::world::World;
 use altd_sim::training::Mode;
 use clap::Parser;
@@ -36,6 +37,7 @@ fn main() {
     pool.build_global().expect("thread pool");
     let threads = rayon::current_num_threads();
     let mode: Mode = cli.mode.into();
+    let math = cli.math_profile.unwrap_or_else(MathProfile::detect);
     match cli.command {
         Command::Bench {
             scene,
@@ -65,6 +67,7 @@ fn main() {
                 mode,
                 threads,
                 dump_state.as_deref(),
+                math,
             );
             if let Some(report) = report {
                 write_report(&report, &result);
@@ -120,6 +123,7 @@ fn main() {
                 threads,
                 game_rng_state.as_deref().map(load).as_ref(),
                 &tracks,
+                math,
             );
             write_report(&output, &result);
             let history = result["history"].as_array().unwrap();
@@ -204,6 +208,7 @@ fn main() {
                 eliminate_on_wall: flag(eliminate_on_wall, no_eliminate_on_wall),
                 idle_eliminate: flag(idle_eliminate, no_idle_eliminate),
                 gpu,
+                math_profile: cli.math_profile,
             };
             train_scratch(&config, mode, threads);
         }
@@ -212,7 +217,7 @@ fn main() {
             model,
             suite,
             report,
-        } => match altd_sim::training::evaluation::evaluate(&network, &model, &suite, &report) {
+        } => match altd_sim::training::evaluation::evaluate(&network, &model, &suite, &report, cli.math_profile) {
             Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
             Err(error) => {
                 eprintln!("evaluation: {error}");
@@ -226,13 +231,13 @@ fn main() {
             start_index,
             end_index,
         } => {
-            let world = World::from_scene(&load(&scene));
+            let world = World::from_scene_with(&load(&scene), math);
             let result = compare_trace(&world, &load(&trace), start_index, end_index);
             write_report(&report, &result);
             print_without(&result, "frames");
         }
         Command::CompareOneStep { scene, trace, report } => {
-            let world = World::from_scene(&load(&scene));
+            let world = World::from_scene_with(&load(&scene), math);
             let result = compare_one_step(&world, &load(&trace));
             write_report(&report, &result);
             print_without(&result, "rows");
@@ -246,7 +251,7 @@ fn main() {
             batch_count,
             new_vehicle,
         } => {
-            let world = Arc::new(World::from_scene(&load(&scene)));
+            let world = Arc::new(World::from_scene_with(&load(&scene), math));
             let result = compare_closed_loop(
                 &world,
                 &load(&trace),
@@ -265,7 +270,7 @@ fn main() {
             report,
             first_tick,
         } => {
-            let result = compare_network(&load(&network), &load(&trace), first_tick);
+            let result = compare_network(&load(&network), &load(&trace), first_tick, math);
             write_report(&report, &result);
             print_without(&result, "outputs");
         }
@@ -277,7 +282,7 @@ fn main() {
             sensor_report,
             all_frames,
         } => {
-            let world = World::from_scene(&load(&scene));
+            let world = World::from_scene_with(&load(&scene), math);
             let result = compare_sensors(
                 &world,
                 &load(&trace),
@@ -289,27 +294,50 @@ fn main() {
             print_without(&result, "sensors");
         }
         Command::CompareScore { scene, trace, report } => {
-            let world = World::from_scene(&load(&scene));
+            let world = World::from_scene_with(&load(&scene), math);
             let result = compare_score(&world, &load(&trace));
             write_report(&report, &result);
             print_without(&result, "rows");
         }
         #[cfg(feature = "server")]
-        Command::Serve { port, allow_origin } => serve(port, allow_origin, threads),
+        Command::Serve { port, allow_origin } => serve(port, allow_origin, threads, cli.math_profile),
         Command::GpuInfo { library } => {
             let gpu = altd_sim::gpu::hip::Gpu::open(library.as_deref()).unwrap_or_else(|error| {
                 eprintln!("gpu-info: {error}");
                 std::process::exit(1);
             });
             gpu.check_layout();
-            let info = json!({"version": platform::VERSION, "library": gpu.path(), "layout": "ok"});
+            let mut info = json!({
+                "version": platform::VERSION,
+                "library": gpu.path(),
+                "platform": gpu.platform(),
+                "layout": "ok",
+            });
+            // Without a device only the layout is checked. With one, a library
+            // that has no kernels for it fails here.
+            let mut usable = true;
+            match gpu.device_name() {
+                Ok(name) => {
+                    info["device"] = json!(name);
+                    let kernels = gpu.probe_kernels();
+                    usable = kernels.is_ok();
+                    info["kernels"] = json!(kernels.err().unwrap_or_else(|| "ok".to_string()));
+                }
+                Err(reason) => {
+                    info["device"] = Value::Null;
+                    info["reason"] = json!(reason);
+                }
+            }
             println!("{}", serde_json::to_string_pretty(&info).unwrap());
+            if !usable {
+                std::process::exit(1);
+            }
         }
     }
 }
 
 #[cfg(feature = "server")]
-fn serve(port: u16, allow_origin: Vec<String>, threads: usize) {
+fn serve(port: u16, allow_origin: Vec<String>, threads: usize, math_profile: Option<MathProfile>) {
     use altd_sim::server::{Config, Server, DEFAULT_ORIGIN, PATH};
     let origins = if allow_origin.is_empty() {
         vec![DEFAULT_ORIGIN.to_string()]
@@ -319,6 +347,7 @@ fn serve(port: u16, allow_origin: Vec<String>, threads: usize) {
     let server = Server::bind(Config {
         port,
         origins: origins.clone(),
+        math_profile,
     })
     .unwrap_or_else(|e| {
         eprintln!("altd-sim serve: cannot listen on 127.0.0.1:{port}: {e}");
@@ -334,6 +363,7 @@ fn serve(port: u16, allow_origin: Vec<String>, threads: usize) {
     eprintln!("  allowed origins: {}", origins.join(", "));
     eprintln!("  CPU threads: {threads}");
     eprintln!("  HIP: {hip}");
+    eprintln!("  default math profile: {}", server.math_profile());
     if let Err(e) = server.run() {
         eprintln!("altd-sim serve: {e}");
         std::process::exit(1);

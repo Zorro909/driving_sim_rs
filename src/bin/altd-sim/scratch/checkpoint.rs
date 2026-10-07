@@ -80,6 +80,7 @@ pub(super) fn write_checkpoint(dir: &Path, runner: &TrainingRunner, state: Value
     meta["shape"] = json!(runner.agents[0].network.shape);
     meta["population"] = json!(runner.agents.len());
     meta["rng"] = runner.rng.to_json();
+    meta["math_profile"] = json!(runner.world.math);
     let previous = load_optional(&dir.join("checkpoint.json"));
     write_atomic_report(&dir.join("checkpoint.json"), &meta);
     if let Some(old) = previous.as_ref().and_then(|p| p["population_file"].as_str()) {

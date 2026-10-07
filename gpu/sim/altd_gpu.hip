@@ -7,7 +7,7 @@
 // libaltd_gpu.so: GPU parts of the fidelity simulator behind a C ABI.
 // Rust loads it with dlopen (src/gpu/hip.rs); examples/gpu_check/main.rs compares
 // every part bit for bit with the CPU code.
-#include <hip/hip_runtime.h>
+#include "compat.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstddef>
@@ -16,6 +16,17 @@
 #include "sensors.h"
 #include "step.h"
 #include "stats.h"
+#ifdef _WIN32
+// For GetThreadTimes. After the other headers: windows.h defines `near` and `far`, which the
+// simulator headers use as variable names.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef near
+#undef far
+#endif
 
 using namespace altd;
 
@@ -35,25 +46,28 @@ enum MathOp : int {
     OP_ENGINE_RAW = 7,     // f32 -> (f32, f32), without exceptions
     OP_GAME_TANH = 8,      // f64 -> f64
 };
+// altd_gpu_math's op carries a math profile above these bits; it selects the
+// variant of the sin, cos, atan2, exp, pow and tanh ops.
+constexpr int OP_MASK = 0xff, OP_PROFILE_SHIFT = 8;
 
 __global__ void math_kernel(int op, int n, const void* in, void* out, uint32_t* err) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    uint32_t e = 0;
+    uint32_t e = 0, math = (uint32_t)op >> OP_PROFILE_SHIFT;
     const float* fi = (const float*)in;
     const double* di = (const double*)in;
     float* fo = (float*)out;
     double* dout = (double*)out;
-    switch (op) {
-        case OP_NATIVE_SIN: fo[i] = native_sin(fi[i], e); break;
-        case OP_NATIVE_COS: fo[i] = native_cos(fi[i], e); break;
-        case OP_NATIVE_ATAN2: fo[i] = native_atan2(fi[2 * i], fi[2 * i + 1]); break;
+    switch (op & OP_MASK) {
+        case OP_NATIVE_SIN: fo[i] = profile_sin(math, fi[i], e); break;
+        case OP_NATIVE_COS: fo[i] = profile_cos(math, fi[i], e); break;
+        case OP_NATIVE_ATAN2: fo[i] = profile_atan2(math, fi[2 * i], fi[2 * i + 1]); break;
         case OP_MANAGED_SINCOS: managed_sin_cos(fi[i], fo[2 * i], fo[2 * i + 1], e); break;
-        case OP_DEXP: dout[i] = dexp(di[i]); break;
-        case OP_DPOW: dout[i] = dpow(di[2 * i], di[2 * i + 1]); break;
+        case OP_DEXP: dout[i] = profile_exp(math, di[i]); break;
+        case OP_DPOW: dout[i] = profile_pow(math, di[2 * i], di[2 * i + 1]); break;
         case OP_ENGINE_SINCOS: engine_sin_cos(fi[i], fo[2 * i], fo[2 * i + 1], e); break;
         case OP_ENGINE_RAW: engine_sin_cos_raw(fi[i], fo[2 * i], fo[2 * i + 1]); break;
-        case OP_GAME_TANH: dout[i] = game_tanh(di[i]); break;
+        case OP_GAME_TANH: dout[i] = profile_tanh(math, di[i]); break;
     }
     err[i] = e;
 }
@@ -70,7 +84,7 @@ __global__ void engine_scan_kernel(uint32_t first, uint32_t n, uint32_t* out) {
 }
 
 size_t in_size(int op) {
-    switch (op) {
+    switch (op & OP_MASK) {
         case OP_NATIVE_ATAN2: return 8;
         case OP_DEXP: case OP_GAME_TANH: return 8;
         case OP_DPOW: return 16;
@@ -78,7 +92,7 @@ size_t in_size(int op) {
     }
 }
 size_t out_size(int op) {
-    switch (op) {
+    switch (op & OP_MASK) {
         case OP_MANAGED_SINCOS: case OP_ENGINE_SINCOS: case OP_ENGINE_RAW: return 8;
         case OP_DEXP: case OP_DPOW: case OP_GAME_TANH: return 8;
         default: return 4;
@@ -131,12 +145,18 @@ struct NetShape {
     int32_t control_src[5];
 };
 
+}  // namespace
+
+// Sim and WindowArgs stay outside the anonymous namespace: g++ (nvcc's host compiler) gives the
+// extern "C" functions that take them internal linkage otherwise, and leaves them out of the library.
 struct WindowArgs {
     uint64_t start_tick, ticks;
     uint32_t start_batch, batches_per_tick, stats_phase, stop_when_inactive;
     uint32_t eliminate_on_wall, eliminate_when_idle, has_time_limit, pad;
     double time_limit;
 };
+
+namespace {
 
 struct WindowState {
     uint32_t live_count[2][8], step_count[2];
@@ -151,6 +171,8 @@ uint32_t live_total(const WindowState& st, uint32_t p) {
     for (uint32_t b = 0; b < 8; b++) count += st.live_count[p][b];
     return count;
 }
+
+}  // namespace
 
 struct Sim {
     World world;  // device pointers, owned by the world handle
@@ -185,6 +207,8 @@ struct Sim {
     WindowArgs graph_args;
     uint32_t graph_n;
 };
+
+namespace {
 
 // Kernel arguments captured by the period graph. The requested window length
 // only affects the host's replay count and is not part of the captured graph.
@@ -259,8 +283,8 @@ __device__ inline void load_rows(double (&w)[ROW_CHUNK], const double* __restric
 
 // Every thread of the block must call it (barriers); `car` and `live` are the
 // caller's slot (threadIdx.x / LANES).
-__device__ inline void forward_car(const NetShape& shape, const double* __restrict__ params, size_t stride, bool live, uint32_t car,
-                                   const double* __restrict__ inputs, Agent* agents) {
+__device__ inline void forward_car(uint32_t math, const NetShape& shape, const double* __restrict__ params, size_t stride, bool live,
+                                   uint32_t car, const double* __restrict__ inputs, Agent* agents) {
     // Two activation buffers: a layer reads one and writes the other, so one
     // barrier per layer orders the writes before the next layer's reads (the
     // previous barrier already ordered this layer's reads before those writes).
@@ -318,7 +342,7 @@ __device__ inline void forward_car(const NetShape& shape, const double* __restri
 #if ALTD_FORWARD_DIAG == 1 || ALTD_FORWARD_DIAG >= 4
             out = acc + bias;
 #else
-            out = game_tanh(acc + bias);
+            out = profile_tanh(math, acc + bias);
 #endif
         }
         if (active) buffers[current ^ 1][s][j] = out;
@@ -333,11 +357,11 @@ __device__ inline void forward_car(const NetShape& shape, const double* __restri
 }
 
 __global__ void __launch_bounds__(LANES * CARS_PER_BLOCK)
-    forward_kernel(NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars, uint32_t n,
-                   const double* __restrict__ inputs, Agent* agents) {
+    forward_kernel(uint32_t math, NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
+                   uint32_t n, const double* __restrict__ inputs, Agent* agents) {
     uint32_t car = blockIdx.x * CARS_PER_BLOCK + threadIdx.x / LANES;
     bool live = car < n && reads(m, cars[car], car);
-    forward_car(shape, params, stride, live, car, inputs, agents);
+    forward_car(math, shape, params, stride, live, car, inputs, agents);
 }
 
 // The agent's side of a step of car i: a reported wall contact sets
@@ -383,14 +407,14 @@ __global__ void __launch_bounds__(STEP_THREADS) step_kernel(World w, VehicleDesc
 // Reserves `count` consecutive slots of `*total` per lane, one atomic per
 // wave; returns the lane's first slot. Every lane must call it.
 __device__ inline uint32_t reserve(uint32_t count, uint32_t* total) {
-    uint32_t lane = __lane_id(), prefix = count;  // inclusive scan over the wave
+    uint32_t lane = altd_lane_id(), prefix = count;  // inclusive scan over the wave
     for (uint32_t o = 1; o < (uint32_t)warpSize; o <<= 1) {
-        uint32_t x = (uint32_t)__shfl_up((int)prefix, o);
+        uint32_t x = altd_shfl_up(prefix, o);
         prefix += lane >= o ? x : 0u;
     }
-    uint32_t sum = (uint32_t)__shfl((int)prefix, warpSize - 1), base = 0;
+    uint32_t sum = altd_shfl(prefix, warpSize - 1), base = 0;
     if (lane == 0 && sum) base = atomicAdd(total, sum);
-    return (uint32_t)__shfl((int)base, 0) + prefix - count;
+    return altd_shfl(base, 0) + prefix - count;
 }
 
 // Every lane must call it.
@@ -442,8 +466,8 @@ __global__ void __launch_bounds__(STEP_THREADS) step_end_kernel(World w, Vehicle
 // Counts the cars with CAR_ACTIVE, one atomic per wave.
 __global__ void active_count_kernel(const Car* cars, uint32_t n, uint32_t* count) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t mask = __ballot(i < n && (cars[i].flags & CAR_ACTIVE));
-    if (mask && __lane_id() == (uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
+    uint64_t mask = altd_ballot(i < n && (cars[i].flags & CAR_ACTIVE));
+    if (mask && altd_lane_id() == (uint32_t)__ffsll((unsigned long long)mask) - 1) atomicAdd(count, (uint32_t)__popcll(mask));
 }
 
 uint32_t blocks(size_t n, uint32_t size = 256) { return (uint32_t)((n + size - 1) / size); }
@@ -455,22 +479,41 @@ bool split_step() {
     return split;
 }
 
+// Host clocks of ALTD_GPU_PROFILE, in seconds. A negative thread CPU time is not printed.
+double wall_seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+double thread_cpu_seconds() {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;  // 100 ns units
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return -1.0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime, k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime, u.HighPart = user.dwHighDateTime;
+    return 1e-7 * (double)(k.QuadPart + u.QuadPart);
+#else
+    timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+#endif
+}
+
 // The step kernels need ~300 MB of scratch at full occupancy, over the HSA
 // runtime's single-dispatch limit, so by default every launch allocates and
 // frees it (0.2-1.7 ms per launch). Keeping the scratch avoids that. Runs at
 // load, before the first HIP call initialises HSA; an explicit setting wins.
+#if !defined(__CUDACC__)
 __attribute__((constructor)) void keep_scratch() { setenv("HSA_NO_SCRATCH_RECLAIM", "1", 0); }
+#endif
 
 }  // namespace
 
 extern "C" {
 
-void altd_gpu_world_free(World* w);
-void altd_gpu_sim_free(Sim* s);
+ALTD_API void altd_gpu_world_free(World* w);
+ALTD_API void altd_gpu_sim_free(Sim* s);
 
 // Copies the track data to the device; returns an opaque handle or null.
 // `desc` holds host pointers and has the layout of World.
-World* altd_gpu_world_create(const World* desc) {
+ALTD_API World* altd_gpu_world_create(const World* desc) {
     if (desc->ray_depth > (uint32_t)MAX_RAY_DEPTH) {
         fprintf(stderr, "altd_gpu: BSP depth %u exceeds MAX_RAY_DEPTH %d\n", desc->ray_depth, MAX_RAY_DEPTH);
         return nullptr;
@@ -522,7 +565,7 @@ World* altd_gpu_world_create(const World* desc) {
     return w;
 }
 
-void altd_gpu_world_free(World* w) {
+ALTD_API void altd_gpu_world_free(World* w) {
     if (!w) return;
     for (const void* p : {(const void*)w->ray_nodes, (const void*)w->ray_walls, (const void*)w->surfaces,
                           (const void*)w->tiles, (const void*)w->path_segments, (const void*)w->path_offsets,
@@ -536,7 +579,7 @@ void altd_gpu_world_free(World* w) {
 }
 
 // Runs `n` BSP queries (see QueryOp) on host arrays.
-int altd_gpu_query(const World* w, int op, int n, const float4* in, float4* out) {
+ALTD_API int altd_gpu_query(const World* w, int op, int n, const float4* in, float4* out) {
     float4 *d_in, *d_out;
     CHECK(hipMalloc(&d_in, sizeof(float4) * n));
     CHECK(hipMalloc(&d_out, sizeof(float4) * n));
@@ -551,18 +594,18 @@ int altd_gpu_query(const World* w, int op, int n, const float4* in, float4* out)
 
 
 // Struct sizes and a few offsets, for the Rust layout check.
-int altd_gpu_layout(uint64_t* out, int n) {
+ALTD_API int altd_gpu_layout(uint64_t* out, int n) {
     uint64_t v[] = {sizeof(World), sizeof(Car), sizeof(Contact), sizeof(Agent), sizeof(VehicleDesc), sizeof(SensorDesc),
                     sizeof(WheelDesc), sizeof(ShapeDev), sizeof(TileCell), sizeof(PathSeg), sizeof(NearGrid),
                     offsetof(World, tiles), offsetof(World, curve_grid), offsetof(World, shape_grid),
                     offsetof(Car, tick), offsetof(Car, pairs), offsetof(Car, contacts), offsetof(Agent, recent),
-                    offsetof(VehicleDesc, steering_speed), offsetof(VehicleDesc, gravity)};
+                    offsetof(VehicleDesc, steering_speed), offsetof(VehicleDesc, gravity), offsetof(World, math_profile)};
     int count = (int)(sizeof(v) / sizeof(v[0]));
     for (int i = 0; i < n && i < count; i++) out[i] = v[i];
     return count;
 }
 
-Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const SensorDesc* sensors, uint32_t sensor_count,
+ALTD_API Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const SensorDesc* sensors, uint32_t sensor_count,
                          uint32_t capacity) {
     if (sensor_count > (uint32_t)MAX_SENSORS || vehicle->wheel_count > (uint32_t)MAX_WHEELS) return nullptr;
     Sim* s = new (std::nothrow) Sim{};
@@ -597,7 +640,7 @@ Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle, const S
 
 // Graph kernels capture world pointers by value. Invalidate the graph before
 // releasing the old track, while retaining all population allocations.
-int altd_gpu_sim_set_world(Sim* s, const World* world) {
+ALTD_API int altd_gpu_sim_set_world(Sim* s, const World* world) {
     CHECK(hipStreamSynchronize(s->stream));
     if (s->graph_exec) {
         CHECK(hipGraphExecDestroy(s->graph_exec));
@@ -607,7 +650,7 @@ int altd_gpu_sim_set_world(Sim* s, const World* world) {
     return 0;
 }
 
-void altd_gpu_sim_free(Sim* s) {
+ALTD_API void altd_gpu_sim_free(Sim* s) {
     if (!s) return;
     if (s->graph_exec) (void)hipGraphExecDestroy(s->graph_exec);
     for (void* p : {(void*)s->cars, (void*)s->agents, (void*)s->here, (void*)s->inputs, (void*)s->params, (void*)s->live[0],
@@ -622,7 +665,7 @@ void altd_gpu_sim_free(Sim* s) {
 }
 
 // Uploads `n` cars and (if not null) agents.
-int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents) {
+ALTD_API int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents) {
     if (n > s->capacity) return -1;
     s->n = n;
     CHECK(hipMemcpy(s->cars, cars, sizeof(Car) * n, hipMemcpyHostToDevice));
@@ -630,14 +673,14 @@ int altd_gpu_sim_upload(Sim* s, uint32_t n, const Car* cars, const Agent* agents
     return 0;
 }
 
-int altd_gpu_sim_upload_agents(Sim* s, uint32_t n, const Agent* agents) {
+ALTD_API int altd_gpu_sim_upload_agents(Sim* s, uint32_t n, const Agent* agents) {
     if (n != s->n) return -1;
     CHECK(hipMemcpy(s->agents, agents, sizeof(Agent) * n, hipMemcpyHostToDevice));
     return 0;
 }
 
 // The number of uploaded cars that are active, without reading them back.
-int altd_gpu_sim_active_count(Sim* s, uint32_t* out) {
+ALTD_API int altd_gpu_sim_active_count(Sim* s, uint32_t* out) {
     CHECK(hipMemsetAsync(s->active, 0, sizeof(uint32_t), s->stream));
     if (s->n) active_count_kernel<<<blocks(s->n), 256, 0, s->stream>>>(s->cars, s->n, s->active);
     CHECK(hipGetLastError());
@@ -646,7 +689,7 @@ int altd_gpu_sim_active_count(Sim* s, uint32_t* out) {
     return 0;
 }
 
-int altd_gpu_sim_download(Sim* s, Car* cars, Agent* agents) {
+ALTD_API int altd_gpu_sim_download(Sim* s, Car* cars, Agent* agents) {
     CHECK(hipDeviceSynchronize());
     if (cars) CHECK(hipMemcpy(cars, s->cars, sizeof(Car) * s->n, hipMemcpyDeviceToHost));
     if (agents) CHECK(hipMemcpy(agents, s->agents, sizeof(Agent) * s->n, hipMemcpyDeviceToHost));
@@ -655,7 +698,7 @@ int altd_gpu_sim_download(Sim* s, Car* cars, Agent* agents) {
 
 // Reads the sensors of the cars selected by `mask`; if `inputs` is not null,
 // copies all n * sensor_count values back (unread cars keep stale values).
-int altd_gpu_sim_sensors(Sim* s, ReadMask mask, double* inputs) {
+ALTD_API int altd_gpu_sim_sensors(Sim* s, ReadMask mask, double* inputs) {
     if (s->n == 0) return 0;
     if (s->sensors.needs_path) path_offset_kernel<<<blocks(s->n, 64), 64>>>(s->world, mask, s->cars, s->n, s->here);
     sensor_kernel<<<blocks((size_t)s->n * s->sensors.count, 64), 64>>>(s->world, s->vehicle, s->sensors, mask, s->cars, s->n,
@@ -668,7 +711,7 @@ int altd_gpu_sim_sensors(Sim* s, ReadMask mask, double* inputs) {
 
 // Installs one network per car: `layers` widths, then n * parameter_count(widths)
 // f64 parameters (Network::params, car-major). `control_src` as in NetShape.
-int altd_gpu_sim_networks(Sim* s, uint32_t layers, const uint32_t* width, uint32_t n, const double* params,
+ALTD_API int altd_gpu_sim_networks(Sim* s, uint32_t layers, const uint32_t* width, uint32_t n, const double* params,
                           const int32_t* control_src) {
     if (layers < 2 || layers > (uint32_t)MAX_LAYERS || n > s->capacity || width[0] != s->sensors.count) return -1;
     NetShape shape{};
@@ -738,14 +781,14 @@ population_mean_kernel(const double* params, size_t stride, uint32_t n, double* 
 // parameter order used by TrainingRunner::install. pow(x, 2) is the game's
 // routine and must not be replaced by x*x or a parallel sum.
 __global__ void __launch_bounds__(64)
-population_novelty_kernel(const double* params, size_t stride, const double* mean, double* novelty) {
+population_novelty_kernel(uint32_t math, const double* params, size_t stride, const double* mean, double* novelty) {
     __shared__ double terms[64];
     size_t car = blockIdx.x;
     uint32_t lane = threadIdx.x;
     double sum = 0.0;
     for (size_t base = 0; base < stride; base += 64) {
         size_t j = base + lane;
-        if (j < stride) terms[lane] = dpow(params[car * stride + j] - mean[j], 2.0);
+        if (j < stride) terms[lane] = profile_pow(math, params[car * stride + j] - mean[j], 2.0);
         __syncthreads();
         if (lane == 0)
             for (uint32_t k = 0; k < 64 && base + k < stride; k++) sum += terms[k];
@@ -754,11 +797,11 @@ population_novelty_kernel(const double* params, size_t stride, const double* mea
     if (lane == 0) novelty[car] = sqrt(sum);
 }
 
-int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
+ALTD_API int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
     if (n != s->network_count || !s->params) return -1;
     if (n == 0) return 0;
     population_mean_kernel<<<blocks(s->stride, MEAN_COLS), MEAN_THREADS, 0, s->stream>>>(s->params, s->stride, n, s->mean);
-    population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->params, s->stride, s->mean, s->novelty);
+    population_novelty_kernel<<<n, 64, 0, s->stream>>>(s->world.math_profile, s->params, s->stride, s->mean, s->novelty);
     CHECK(hipGetLastError());
     CHECK(hipMemcpyAsync(novelty, s->novelty, sizeof(double) * n, hipMemcpyDeviceToHost, s->stream));
     CHECK(hipStreamSynchronize(s->stream));
@@ -766,12 +809,12 @@ int altd_gpu_sim_novelty(Sim* s, uint32_t n, double* novelty) {
 }
 
 // Sensors and network for the cars in `mask`: sets their Agent::controls.
-int altd_gpu_sim_infer(Sim* s, ReadMask mask) {
+ALTD_API int altd_gpu_sim_infer(Sim* s, ReadMask mask) {
     if (!s->params) return -1;
     if (s->n == 0) return 0;
     int status = altd_gpu_sim_sensors(s, mask, nullptr);
     if (status) return status;
-    forward_kernel<<<blocks(s->n, CARS_PER_BLOCK), LANES * CARS_PER_BLOCK>>>(s->shape, s->params, s->stride, mask, s->cars, s->n,
+    forward_kernel<<<blocks(s->n, CARS_PER_BLOCK), LANES * CARS_PER_BLOCK>>>(s->world.math_profile, s->shape, s->params, s->stride, mask, s->cars, s->n,
                                                                             s->inputs, s->agents);
     CHECK(hipGetLastError());
     return 0;
@@ -790,7 +833,7 @@ __global__ void stats_kernel(World w, Car* cars, Agent* agents, uint32_t n, uint
 
 // One physics tick for all cars (see step_kernel). Needs physics shapes
 // (the shapeless resolve_walls path is not ported).
-int altd_gpu_sim_step(Sim* s, uint32_t drive, uint32_t eliminate_on_wall, uint64_t tick) {
+ALTD_API int altd_gpu_sim_step(Sim* s, uint32_t drive, uint32_t eliminate_on_wall, uint64_t tick) {
     if (s->world.shape_count == 0) return -2;
     if (s->n == 0) return 0;
     if (!split_step()) {
@@ -808,7 +851,7 @@ int altd_gpu_sim_step(Sim* s, uint32_t drive, uint32_t eliminate_on_wall, uint64
 }
 
 // Schedule::update_stats for all cars on a statistics tick.
-int altd_gpu_sim_stats(Sim* s, uint64_t tick, uint64_t stats_tick, uint32_t eliminate_when_idle) {
+ALTD_API int altd_gpu_sim_stats(Sim* s, uint64_t tick, uint64_t stats_tick, uint32_t eliminate_when_idle) {
     if (s->world.path_points < 2) return -2;  // Track::closest_path needs a path
     if (s->n == 0) return 0;
     stats_kernel<<<blocks(s->n, 64), 64>>>(s->world, s->cars, s->agents, s->n, tick, stats_tick, eliminate_when_idle, nullptr);
@@ -839,30 +882,30 @@ constexpr uint32_t NOT_SETTLED = 0xffffffffu;
 
 // Appends `value` where `take`, one atomic per wave; every lane must call it.
 __device__ inline void append(bool take, uint32_t value, uint32_t* list, uint32_t* count) {
-    uint64_t mask = __ballot(take);
+    uint64_t mask = altd_ballot(take);
     if (!mask) return;
-    uint32_t lane = __lane_id();
+    uint32_t lane = altd_lane_id();
     uint32_t leader = (uint32_t)__ffsll((unsigned long long)mask) - 1;
     uint32_t base = 0;
     if (lane == leader) base = atomicAdd(count, (uint32_t)__popcll(mask));
-    base = (uint32_t)__shfl((int)base, (int)leader);
+    base = altd_shfl(base, leader);
     if (take) list[base + (uint32_t)__popcll(mask & ((1ull << lane) - 1))] = value;
 }
 
 // The Car state `car_step` reads: everything but `tick`, and the used pairs and contacts.
 __device__ inline void snapshot(const Car& c, Car& s) {
-    __builtin_memcpy(&s, &c, offsetof(Car, pairs));
-    __builtin_memcpy(s.pairs, c.pairs, sizeof(uint32_t) * c.pair_count);
-    __builtin_memcpy(s.axes, c.axes, sizeof(Vec2) * c.pair_count);
-    __builtin_memcpy(s.contacts, c.contacts, sizeof(Contact) * c.contact_count);
+    altd_memcpy(&s, &c, offsetof(Car, pairs));
+    altd_memcpy(s.pairs, c.pairs, sizeof(uint32_t) * c.pair_count);
+    altd_memcpy(s.axes, c.axes, sizeof(Vec2) * c.pair_count);
+    altd_memcpy(s.contacts, c.contacts, sizeof(Contact) * c.contact_count);
 }
 
 __device__ inline bool same_words(const void* a, const void* b, size_t bytes) {
     uint32_t differ = 0;
     for (size_t k = 0; k < bytes; k += 4) {
         uint32_t x, y;
-        __builtin_memcpy(&x, (const char*)a + k, 4);
-        __builtin_memcpy(&y, (const char*)b + k, 4);
+        altd_memcpy(&x, (const char*)a + k, 4);
+        altd_memcpy(&y, (const char*)b + k, 4);
         differ |= x ^ y;
     }
     return differ == 0;
@@ -955,7 +998,7 @@ __global__ void w_sensor_kernel(World w, VehicleDesc v, Sensors s, ReadMask m, C
 }
 
 __global__ void __launch_bounds__(LANES * CARS_PER_BLOCK)
-w_forward_kernel(NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
+w_forward_kernel(uint32_t math, NetShape shape, const double* __restrict__ params, size_t stride, ReadMask m, const Car* cars,
                  const uint32_t* list, const WindowState* st, uint32_t p, const double* __restrict__ inputs, Agent* agents) {
     uint32_t batch = (m.batch_index + blockIdx.y) % 8;
     uint32_t count = st->live_count[p][batch];
@@ -963,7 +1006,7 @@ w_forward_kernel(NetShape shape, const double* __restrict__ params, size_t strid
     uint32_t j = blockIdx.x * CARS_PER_BLOCK + threadIdx.x / LANES;
     uint32_t car = j < count ? list[batch * m.batch_size + j] : 0;
     bool live = j < count && (cars[car].flags & CAR_ACTIVE);
-    forward_car(shape, params, stride, live, car, inputs, agents);
+    forward_car(math, shape, params, stride, live, car, inputs, agents);
 }
 
 // Steps the cars of step list q. With `out`, inactive cars are checked for
@@ -1031,7 +1074,7 @@ __global__ void w_finish_kernel(Car* cars, uint32_t n, const uint32_t* settled_a
     cars[i].tick += steps - settled_at[i];
 }
 
-int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_t* transition_without_drive) {
+ALTD_API int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_t* transition_without_drive) {
     *executed = 0;
     *transition_without_drive = 0;
     if (a->ticks == 0) return 0;
@@ -1045,9 +1088,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     static const bool profile = profile_env && strcmp(profile_env, "host") != 0;
     static const char* graph_env = getenv("ALTD_GPU_GRAPH");
     static const bool use_graph = !profile && !(graph_env && strcmp(graph_env, "0") == 0);
-    timespec cpu0, wall0;
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
-    clock_gettime(CLOCK_MONOTONIC, &wall0);
+    const double cpu0 = profile_env ? thread_cpu_seconds() : 0, wall0 = profile_env ? wall_seconds() : 0;
     double spent[4] = {0, 0, 0, 0};  // stats, sensors, forward, step
     struct Timed { int slot; uint64_t k; hipEvent_t start, stop; };
     std::vector<Timed> timed;
@@ -1114,7 +1155,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
             });
             phase(2, [&] {
                 w_forward_kernel<<<dim3(blocks(mask.batch_size, CARS_PER_BLOCK), mask.batches_per_tick), LANES * CARS_PER_BLOCK, 0, stream>>>(
-                    s->shape, s->params, s->stride, mask, s->cars, s->live[p], st, p, s->inputs, s->agents);
+                    s->world.math_profile, s->shape, s->params, s->stride, mask, s->cars, s->live[p], st, p, s->inputs, s->agents);
             });
             phase(3, [&] {
                 // On statistics ticks list 1 - p is read and list p rebuilt.
@@ -1166,12 +1207,11 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     int polls = 0;
     bool host_stop = false;
     double launch_wall = 0, wait_wall = 0;  // host profile: time in launches and in polls
-    auto now = [] { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec; };
     for (uint64_t m = 0; m < periods && !host_stop; m++) {
-        double t0 = profile_env ? now() : 0;
+        double t0 = profile_env ? wall_seconds() : 0;
         if (exec) CHECK(hipGraphLaunch(exec, stream));
         else enqueue_period();
-        if (profile_env) launch_wall += now() - t0;
+        if (profile_env) launch_wall += wall_seconds() - t0;
         CHECK(hipGetLastError());
         if (a->stop_when_inactive && (m + 1) % POLL == 0) {
             int slot = polls % DEPTH;
@@ -1180,9 +1220,9 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
             polls++;
             if (polls >= DEPTH) {  // wait for the oldest queued poll
                 int oldest = polls % DEPTH;
-                double t1 = profile_env ? now() : 0;
+                double t1 = profile_env ? wall_seconds() : 0;
                 CHECK(hipEventSynchronize(s->chunk_done[oldest]));
-                if (profile_env) wait_wall += now() - t1;
+                if (profile_env) wait_wall += wall_seconds() - t1;
                 host_stop = seen[oldest] != 0;
             }
         }
@@ -1220,7 +1260,7 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
         unsigned long long c[16];
         int rate_khz = 0;
         CHECK(hipMemcpyFromSymbol(c, HIP_SYMBOL(g_step_cycles), sizeof c));
-        CHECK(hipDeviceGetAttribute(&rate_khz, hipDeviceAttributeWallClockRate, 0));
+        CHECK(altd_wall_clock_khz(&rate_khz));
         const char* names[6] = {"drive", "validate", "contacts+merge", "active", "solver", "finish"};
         double us = 1e3 / (double)rate_khz, steps = (double)(c[8] ? c[8] : 1);
         fprintf(stderr, "altd_gpu step sections (%llu car steps, %llu solving, %llu pair updates, %llu full scans), us per car step:",
@@ -1236,21 +1276,22 @@ int altd_gpu_sim_window(Sim* s, const WindowArgs* a, uint64_t* executed, uint32_
     }
 #endif
     if (profile_env) {
-        timespec cpu1, wall1;
-        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu1);
-        clock_gettime(CLOCK_MONOTONIC, &wall1);
-        auto seconds = [](timespec a, timespec b) { return (double)(b.tv_sec - a.tv_sec) + 1e-9 * (double)(b.tv_nsec - a.tv_nsec); };
-        fprintf(stderr, "altd_gpu window: host thread cpu %.3f s of %.3f s wall (%s): launches %.3f s, polls %.3f s\n",
-                seconds(cpu0, cpu1), seconds(wall0, wall1), exec ? "graph" : "direct", launch_wall, wait_wall);
+        double cpu = cpu0 >= 0 ? thread_cpu_seconds() - cpu0 : -1.0, wall = wall_seconds() - wall0;
+        if (cpu >= 0) fprintf(stderr, "altd_gpu window: host thread cpu %.3f s of %.3f s wall", cpu, wall);
+        else fprintf(stderr, "altd_gpu window: %.3f s wall", wall);
+        fprintf(stderr, " (%s): launches %.3f s, polls %.3f s\n", exec ? "graph" : "direct", launch_wall, wait_wall);
     }
     return 0;
 }
 
-int altd_gpu_version() { return 9; }
+ALTD_API int altd_gpu_version() { return 10; }
+
+// The runtime the library was built for: "HIP" (AMD) or "CUDA" (NVIDIA).
+ALTD_API const char* altd_gpu_platform() { return ALTD_PLATFORM; }
 
 // Writes the current device's name, NUL-terminated and truncated to `len`
 // bytes; returns the HIP error, so it also tells whether a device is usable.
-int altd_gpu_device_name(char* out, int len) {
+ALTD_API int altd_gpu_device_name(char* out, int len) {
     if (len <= 0) return (int)hipErrorInvalidValue;
     int device = 0;
     hipError_t e = hipGetDevice(&device);
@@ -1262,8 +1303,20 @@ int altd_gpu_device_name(char* out, int len) {
     return 0;
 }
 
+// Whether the library has kernels for the current device, without launching one: ROCm 7.1 crashes
+// in the launch instead of returning an error when the library was built for another GPU_ARCH.
+// Returns the HIP error, hipErrorNoBinaryForGpu when the kernels are missing.
+ALTD_API int altd_gpu_probe() {
+    hipFuncAttributes attributes;
+    hipError_t e = hipFuncGetAttributes(&attributes, (const void*)math_kernel);
+#if !defined(__CUDACC__)
+    if (e == hipErrorInvalidKernelFile) return (int)hipErrorNoBinaryForGpu;  // HIP's answer for a missing code object
+#endif
+    return (int)e;
+}
+
 // Runs one math primitive over `n` host inputs; `err` gets the per-element error bits.
-int altd_gpu_math(int op, int n, const void* in, void* out, uint32_t* err) {
+ALTD_API int altd_gpu_math(int op, int n, const void* in, void* out, uint32_t* err) {
     void *d_in, *d_out;
     uint32_t* d_err;
     CHECK(hipMalloc(&d_in, in_size(op) * n));
@@ -1281,7 +1334,7 @@ int altd_gpu_math(int op, int n, const void* in, void* out, uint32_t* err) {
 }
 
 // Raw engine sin/cos for floats with bits first .. first + n - 1.
-int altd_gpu_engine_scan(uint32_t first, uint32_t n, uint32_t* out) {
+ALTD_API int altd_gpu_engine_scan(uint32_t first, uint32_t n, uint32_t* out) {
     static uint32_t* d_out = nullptr;
     static uint32_t capacity = 0;
     if (n > capacity) {

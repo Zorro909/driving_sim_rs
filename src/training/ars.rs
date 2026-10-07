@@ -21,6 +21,7 @@
 
 use super::optimizer::{Optimizer, Produced, Record};
 use super::TrainingRandom;
+use crate::math::profile::MathProfile;
 use crate::nn::network::{parameter_count, Network};
 use crate::training::evolution::{reward_values, AgentResult, ArsSettings, EvolutionSettings, Generation};
 use rayon::prelude::*;
@@ -105,6 +106,8 @@ pub(crate) struct ArsRecord {
     pub(crate) sampling: Sampling,
     /// The generator before the directions were drawn.
     pub(crate) rng: TrainingRandom,
+    /// The math the game's streams draw the directions with.
+    pub(crate) math: MathProfile,
 }
 
 impl ArsRecord {
@@ -140,14 +143,14 @@ impl ArsRecord {
             ..Ars::default()
         };
         let mut rng = self.rng.clone();
-        let networks = ars.sample(&self.sampling, &mut rng);
+        let networks = ars.sample(&self.sampling, &mut rng, self.math);
         (networks, rng, ars)
     }
 }
 
 impl Ars {
     /// Draws the directions and builds the population around `theta`.
-    fn sample(&mut self, sampling: &Sampling, rng: &mut TrainingRandom) -> Vec<Network> {
+    fn sample(&mut self, sampling: &Sampling, rng: &mut TrainingRandom, math: MathProfile) -> Vec<Network> {
         let n = self.theta.len();
         let elites = sampling.elite_count.min(self.pool.len());
         assert!(
@@ -162,7 +165,7 @@ impl Ars {
             self.pool.iter_mut().for_each(|e| clamp_all(&mut e.params));
         }
         self.nu = sampling.nu;
-        rng.standard_normals_into(pairs * n, &mut self.deltas);
+        rng.standard_normals_into(pairs * n, &mut self.deltas, math);
         let (theta, deltas, nu, limit) = (&self.theta, &self.deltas, sampling.nu, sampling.max_weight);
         let clamp = move |v: f64| if limit > 0.0 { v.clamp(-limit, limit) } else { v };
         let probes: Vec<[Vec<f64>; 2]> = (0..pairs)
@@ -263,6 +266,7 @@ impl Ars {
         scores: Vec<f64>,
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         let sampling = Sampling::of(settings);
@@ -272,8 +276,9 @@ impl Ars {
             pool: self.pool.clone(),
             sampling: sampling.clone(),
             rng: rng.clone(),
+            math,
         });
-        let networks = self.sample(&sampling, rng);
+        let networks = self.sample(&sampling, rng, math);
         Produced {
             generation: Generation {
                 networks,
@@ -305,6 +310,7 @@ impl Optimizer for Ars {
         seed: &Network,
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         let seed_result = [AgentResult {
@@ -319,7 +325,7 @@ impl Optimizer for Ars {
             ..Ars::default()
         };
         debug_assert_eq!(self.theta.len(), parameter_count(&self.shape));
-        self.produce(scores, settings, rng, trace)
+        self.produce(scores, settings, rng, math, trace)
     }
 
     fn next(
@@ -329,6 +335,7 @@ impl Optimizer for Ars {
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
         _scratch: &mut Vec<f64>,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         let scores = scores.unwrap_or_else(|| reward_values(agents, &settings.rewards));
@@ -346,7 +353,7 @@ impl Optimizer for Ars {
                 ..Ars::default()
             };
         }
-        self.produce(scores, settings, rng, trace)
+        self.produce(scores, settings, rng, math, trace)
     }
 }
 

@@ -173,7 +173,7 @@ impl TrainingStats {
         let velocity = crate::math::godot_math::F2::from(car.velocity);
         let front = velocity.dot(right.rotated(-std::f32::consts::FRAC_PI_2));
         let side = velocity.dot(right);
-        self.current_slip_angle_degrees = (crate::math::native_math::atan2(side, front) * 57.29578f32) as f64;
+        self.current_slip_angle_degrees = (car.math.atan2(side, front) * 57.29578f32) as f64;
         let slip_degrees = self.current_slip_angle_degrees.abs();
         self.drift_ticks = if speed > 50.0 && (15.0..=60.0).contains(&slip_degrees) {
             self.drift_ticks + 1

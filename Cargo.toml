@@ -1,6 +1,6 @@
 [package]
 name = "altd_sim"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "CPU game-fidelity simulator and trainer for AI Learns To Drive"
 license = "MIT"
@@ -60,7 +60,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-rayon = { version = "=1.3.0", optional = true, features = ["no-bundler"] }

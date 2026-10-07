@@ -1,5 +1,6 @@
 //! Runtime loader for the HIP simulator parts in gpu/ (libaltd_gpu.so).
 //! Loaded at runtime so the crate builds and runs without ROCm.
+use crate::math::profile::MathProfile;
 use std::ffi::{c_void, CStr};
 use std::path::{Path, PathBuf};
 
@@ -31,11 +32,11 @@ pub fn library_candidates(explicit: Option<&Path>, env: Option<PathBuf>, exe_dir
 /// Explains a HIP status returned by the library.
 pub(crate) fn status_message(status: i32) -> String {
     let hint = match status {
-        35 => " (hipErrorInsufficientDriver: the installed AMD driver is older than the ROCm runtime)",
-        100 => " (hipErrorNoDevice: ROCm sees no AMD GPU; check `rocminfo` and /dev/kfd permissions)",
+        35 => " (hipErrorInsufficientDriver: the GPU driver is missing or older than the runtime)",
+        100 => " (hipErrorNoDevice: no supported GPU; check `rocminfo` and /dev/kfd permissions on AMD, `nvidia-smi` on NVIDIA)",
         209 => {
             " (hipErrorNoBinaryForGpu: the library has no kernels for this GPU; \
-             rebuild it with GPU_ARCH set to the gfx name `rocminfo` reports)"
+             rebuild it with GPU_ARCH set to the gfx name `rocminfo` reports, or CUDA_ARCH set to your sm_ target on NVIDIA)"
         }
         _ => "",
     };
@@ -94,7 +95,7 @@ impl Gpu {
             }
         }
         Err(format!(
-            "cannot load the HIP simulator library; build it with gpu/build.sh or set ALTD_GPU_LIB\n  {}",
+            "cannot load the GPU simulator library; build it with gpu/build.sh (AMD) or gpu/build-cuda.ps1 / gpu/build-cuda.sh (NVIDIA), or set ALTD_GPU_LIB\n  {}",
             errors.join("\n  ")
         ))
     }
@@ -106,8 +107,12 @@ impl Gpu {
 
     /// Function pointer `name` of type `F` (an `unsafe extern "C" fn`).
     pub(crate) fn symbol<F: Copy>(&self, name: &str) -> F {
-        self.try_symbol(name)
-            .unwrap_or_else(|| panic!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+        self.try_symbol(name).unwrap_or_else(|| {
+            panic!(
+                "{} lacks {name}; rebuild it with gpu/build.sh or gpu/build-cuda.*",
+                self.path.display()
+            )
+        })
     }
 
     /// `symbol`, or `None` when the library lacks `name`.
@@ -118,8 +123,22 @@ impl Gpu {
 
     /// A required function pointer, reporting incompatible libraries without panicking.
     pub(crate) fn required_symbol<F: Copy>(&self, name: &str) -> Result<F, String> {
-        self.try_symbol(name)
-            .ok_or_else(|| format!("{} lacks {name}; rebuild it with gpu/build.sh", self.path.display()))
+        self.try_symbol(name).ok_or_else(|| {
+            format!(
+                "{} lacks {name}; rebuild it with gpu/build.sh or gpu/build-cuda.*",
+                self.path.display()
+            )
+        })
+    }
+
+    /// The runtime the library was built for: "HIP" (AMD) or "CUDA" (NVIDIA).
+    /// Libraries without `altd_gpu_platform` predate the CUDA build and are HIP.
+    pub fn platform(&self) -> String {
+        let f: Option<unsafe extern "C" fn() -> *const std::ffi::c_char> = self.try_symbol("altd_gpu_platform");
+        f.map_or_else(
+            || "HIP".to_string(),
+            |f| unsafe { CStr::from_ptr(f()) }.to_string_lossy().into_owned(),
+        )
     }
 
     /// The device name, or the library path for older libraries. The legacy
@@ -128,24 +147,7 @@ impl Gpu {
         let f: Option<unsafe extern "C" fn(*mut std::ffi::c_char, i32) -> i32> =
             self.try_symbol("altd_gpu_device_name");
         let Some(f) = f else {
-            let probe: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 = self
-                .try_symbol("altd_gpu_math")
-                .ok_or("the HIP library lacks the device probe entry points")?;
-            let input = 0.0f32;
-            let mut output = 0.0f32;
-            let mut error = 0u32;
-            let status = unsafe {
-                probe(
-                    MathOp::NativeSin as i32,
-                    1,
-                    std::ptr::from_ref(&input).cast(),
-                    std::ptr::from_mut(&mut output).cast(),
-                    &mut error,
-                )
-            };
-            if status != 0 {
-                return Err(format!("no usable HIP device ({})", status_message(status)));
-            }
+            self.probe_kernels()?;
             return Ok(self.path.display().to_string());
         };
         let mut name = [0 as std::ffi::c_char; 256];
@@ -154,6 +156,40 @@ impl Gpu {
             return Err(format!("no usable HIP device ({})", status_message(status)));
         }
         Ok(unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    /// Runs one small kernel. A device can be present while the library has no
+    /// code for it (built for another GPU_ARCH or CUDA_ARCH); this reports that
+    /// before a simulation needs the device.
+    pub fn probe_kernels(&self) -> Result<(), String> {
+        // Asks before launching where the library can: a ROCm 7.1 launch without
+        // kernels for the device crashes the process.
+        let check: Option<unsafe extern "C" fn() -> i32> = self.try_symbol("altd_gpu_probe");
+        if let Some(check) = check {
+            let status = unsafe { check() };
+            if status != 0 {
+                return Err(format!("no usable HIP device ({})", status_message(status)));
+            }
+        }
+        let probe: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 = self
+            .try_symbol("altd_gpu_math")
+            .ok_or("the HIP library lacks the device probe entry points")?;
+        let input = 0.0f32;
+        let mut output = 0.0f32;
+        let mut error = 0u32;
+        let status = unsafe {
+            probe(
+                MathOp::NativeSin as i32,
+                1,
+                std::ptr::from_ref(&input).cast(),
+                std::ptr::from_mut(&mut output).cast(),
+                &mut error,
+            )
+        };
+        if status != 0 {
+            return Err(format!("no usable HIP device ({})", status_message(status)));
+        }
+        Ok(())
     }
 
     pub(crate) fn check(status: i32, what: &str) {
@@ -169,6 +205,18 @@ impl Gpu {
     /// Runs one math primitive. `input` and `output` hold `n` elements of the
     /// op's input and output layout (see gpu/sim/altd_gpu.hip); returns the error bits.
     pub fn math<I: Copy, O: Copy>(&self, op: MathOp, input: &[I], output: &mut [O]) -> Vec<u32> {
+        self.profile_math(MathProfile::Proton, op, input, output)
+    }
+
+    /// [`Gpu::math`] in `profile`'s variant of the sin, cos, atan2, exp, pow
+    /// and tanh ops.
+    pub fn profile_math<I: Copy, O: Copy>(
+        &self,
+        profile: MathProfile,
+        op: MathOp,
+        input: &[I],
+        output: &mut [O],
+    ) -> Vec<u32> {
         assert_eq!(input.len(), output.len());
         let f: unsafe extern "C" fn(i32, i32, *const c_void, *mut c_void, *mut u32) -> i32 =
             self.symbol("altd_gpu_math");
@@ -177,7 +225,7 @@ impl Gpu {
         Self::check(
             unsafe {
                 f(
-                    op as i32,
+                    op as i32 | (profile.index() as i32) << 8,
                     n,
                     input.as_ptr().cast(),
                     output.as_mut_ptr().cast(),

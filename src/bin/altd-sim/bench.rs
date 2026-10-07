@@ -3,6 +3,7 @@
 use super::inputs::{car_from_frame, frames, num, output_names, recorded_controls};
 use super::io::write_report;
 use super::platform::{peak_rss_kib, platform_json, process_cpu_seconds};
+use altd_sim::math::profile::MathProfile;
 use altd_sim::nn::network::Network;
 use altd_sim::track::world::{vector, World};
 use altd_sim::training::evolution::{EvolutionSettings, METRIC_NAMES};
@@ -48,6 +49,7 @@ pub(super) fn bench(
     mode: Mode,
     threads: usize,
     dump_state: Option<&Path>,
+    math: MathProfile,
 ) -> Value {
     assert!(population >= 1 && ticks >= 1, "population and ticks must be positive");
     let spawn_frames = frames(spawn_trace);
@@ -63,14 +65,14 @@ pub(super) fn bench(
         ..EvolutionSettings::default()
     };
     let load_started = Instant::now();
-    let world = Arc::new(World::from_scene(scene));
+    let world = Arc::new(World::from_scene_with(scene, math));
     let world_seconds = load_started.elapsed().as_secs_f64();
     let spawn = &spawn_frames[spawn_index];
     let mut runner = TrainingRunner::new(
         world.clone(),
         vector(&spawn["position"]),
         num(&spawn["rotation"]),
-        SensorLayout::from_exports(network_data, model),
+        SensorLayout::from_exports(network_data, model, math),
         &output_names(network_data),
         settings.clone(),
         PyRandom::new(seed),

@@ -9,6 +9,7 @@
 use super::ars::{Ars, ArsRecord};
 use super::lineage::reproduce_traced;
 use super::{Lineage, TrainingRandom};
+use crate::math::profile::MathProfile;
 use crate::nn::network::Network;
 use crate::training::evolution::{reward_values, AgentResult, EvolutionSettings, Generation};
 
@@ -44,11 +45,13 @@ pub(crate) trait Optimizer: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// The first population, built from `seed`. Forgets any earlier state.
+    /// `math` is the session's profile, which the game's random streams draw with.
     fn start(
         &mut self,
         seed: &Network,
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
+        math: MathProfile,
         trace: bool,
     ) -> Produced;
 
@@ -63,6 +66,7 @@ pub(crate) trait Optimizer: Send + Sync {
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
         scratch: &mut Vec<f64>,
+        math: MathProfile,
         trace: bool,
     ) -> Produced;
 
@@ -95,17 +99,18 @@ impl Ga {
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
         scratch: &mut Vec<f64>,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         if trace {
-            let (generation, lineage) = reproduce_traced(rng, agents, scores, settings);
+            let (generation, lineage) = reproduce_traced(rng, agents, scores, settings, math);
             Produced {
                 generation,
                 record: Some(Record::Lineage(lineage)),
             }
         } else {
             Produced {
-                generation: rng.reproduce_scored(agents, scores, settings, scratch),
+                generation: rng.reproduce_scored(agents, scores, settings, scratch, math),
                 record: None,
             }
         }
@@ -126,6 +131,7 @@ impl Optimizer for Ga {
         seed: &Network,
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         let seed_result = [AgentResult {
@@ -134,7 +140,7 @@ impl Optimizer for Ga {
             update_count: 0,
         }];
         let scores = reward_values(&seed_result, &settings.rewards);
-        Self::produce(&seed_result, scores, settings, rng, &mut Vec::new(), trace)
+        Self::produce(&seed_result, scores, settings, rng, &mut Vec::new(), math, trace)
     }
 
     fn next(
@@ -144,9 +150,10 @@ impl Optimizer for Ga {
         settings: &EvolutionSettings,
         rng: &mut TrainingRandom,
         scratch: &mut Vec<f64>,
+        math: MathProfile,
         trace: bool,
     ) -> Produced {
         let scores = scores.unwrap_or_else(|| reward_values(agents, &settings.rewards));
-        Self::produce(agents, scores, settings, rng, scratch, trace)
+        Self::produce(agents, scores, settings, rng, scratch, math, trace)
     }
 }

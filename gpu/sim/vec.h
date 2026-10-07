@@ -1,7 +1,7 @@
 // godot_math::F2 and the scalar helpers with the CPU's exact semantics.
 // Build with -ffp-contract=off: every operation rounds on its own.
 #pragma once
-#include <hip/hip_runtime.h>
+#include "compat.h"
 #include "math.h"
 #include "state.h"
 

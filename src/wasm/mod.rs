@@ -17,6 +17,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 pub mod gpu;
+pub mod math_profile;
 pub mod sim;
 
 #[cfg(feature = "wasm-threads")]
@@ -71,6 +72,10 @@ pub fn test_thread_indices() -> Vec<u32> {
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
+    // initSync and non-web targets cannot wait for the Windows version hint;
+    // start it automatically. The web package's async initializer awaits the
+    // same cached promise before users can construct their first session.
+    let _ = math_profile::detect_math_profile();
 }
 
 /// The crate version.
@@ -97,25 +102,36 @@ fn vehicle_template(text: &str) -> Result<serde_json::Value, JsError> {
 
 /// Converts a track the game saved (the JSON inside a `.track` file) into a
 /// training scene for independent cars, with the vehicle and physics of
-/// `templateJson`. Malformed or open tracks are reported as errors.
+/// `templateJson`. Malformed or open tracks are reported as errors. The
+/// optional `mathProfile` names the math the scene is built with (the
+/// session's, which `detectMathProfile` defaults).
 #[wasm_bindgen(js_name = trackScene)]
-pub fn track_scene(track_json: &str, name: &str, template_json: &str) -> Result<String, JsError> {
+pub fn track_scene(
+    track_json: &str,
+    name: &str,
+    template_json: &str,
+    math_profile: Option<String>,
+) -> Result<String, JsError> {
+    let math = math_profile::math_profile_arg(math_profile)?;
     let saved = parse(track_json, "track file")?;
     let template = vehicle_template(template_json)?;
-    let scene = crate::track::random_track::saved_track_scene(&saved, name, &template).map_err(js_error)?;
+    let scene = crate::track::random_track::saved_track_scene(&saved, name, &template, math).map_err(js_error)?;
     Ok(scene.to_string())
 }
 
 /// The random training track of `generation` (0 for the first) in a run with
 /// `seed`: `settingsJson` holds `RandomTrainingTrackSettings`. The scene uses
-/// the game's TileMap position and independent cars.
+/// the game's TileMap position and independent cars, and the optional
+/// `mathProfile` as `trackScene` does.
 #[wasm_bindgen(js_name = randomTrackScene)]
 pub fn random_track_scene(
     template_json: &str,
     settings_json: &str,
     seed: f64,
     generation: u32,
+    math_profile: Option<String>,
 ) -> Result<String, JsError> {
+    let math = math_profile::math_profile_arg(math_profile)?;
     use crate::track::training_tracks::{training_scene, RandomTrainingTrackSettings};
     let template = vehicle_template(template_json)?;
     let settings: RandomTrainingTrackSettings =
@@ -130,8 +146,15 @@ pub fn random_track_scene(
         )),
         None => None,
     };
-    let (_, mut scene) =
-        training_scene(&template, &settings, generator.as_ref(), seed as i64, generation as u64).map_err(js_error)?;
+    let (_, mut scene) = training_scene(
+        &template,
+        &settings,
+        generator.as_ref(),
+        seed as i64,
+        generation as u64,
+        math,
+    )
+    .map_err(js_error)?;
     crate::track::random_track::place_tile_map(&mut scene, crate::track::random_track::GAME_TILE_MAP_POSITION);
     Ok(scene.to_string())
 }

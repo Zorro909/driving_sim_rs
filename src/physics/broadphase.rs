@@ -806,6 +806,7 @@ mod tests {
                 recipe["seed"].as_i64().unwrap(),
                 recipe["generation"].as_u64().unwrap(),
                 recipe["slot"].as_u64().unwrap() as usize,
+                crate::math::profile::MathProfile::Proton,
             )
             .unwrap();
             let world = crate::track::world::World::from_scene(&scene);

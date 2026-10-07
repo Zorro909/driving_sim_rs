@@ -4,7 +4,7 @@
 // bit equality. Arguments outside the ported domains set an `err` bit instead
 // of taking the rare large-argument paths of the CPU code.
 #pragma once
-#include <hip/hip_runtime.h>
+#include "compat.h"
 #include <cstdint>
 #include "double_tables.h"
 #include "engine_exceptions.h"
@@ -65,7 +65,7 @@ __device__ inline float native_sin(float x, uint32_t& err) {
         if (bits <= 0x40afeddfu) return negative ? cos_kernel(a + 3.0 * p) : -cos_kernel(a - 3.0 * p);
         return sin_kernel(negative ? a + 4.0 * p : a - 4.0 * p);
     }
-    if (!isfinite(x)) return x - x;
+    if (!isfinite(x)) return altd_invalid(x);
     double y;
     int n = reduce_medium(x, y, err);
     switch (n & 3) { case 0: return sin_kernel(y); case 1: return cos_kernel(y); case 2: return sin_kernel(-y); default: return -cos_kernel(y); }
@@ -84,7 +84,7 @@ __device__ inline float native_cos(float x, uint32_t& err) {
         if (bits > 0x40afeddfu) return cos_kernel(negative ? a + 4.0 * p : a - 4.0 * p);
         return sin_kernel(negative ? -a - 3.0 * p : a - 3.0 * p);
     }
-    if (!isfinite(x)) return x - x;
+    if (!isfinite(x)) return altd_invalid(x);
     double y;
     int n = reduce_medium(x, y, err);
     switch (n & 3) { case 0: return cos_kernel(y); case 1: return sin_kernel(-y); case 2: return -cos_kernel(y); default: return sin_kernel(y); }
@@ -119,7 +119,7 @@ __device__ inline float native_atan(float x) {
 __device__ inline float native_atan2(float y, float x) {
     const float pi = 3.14159274101257324f;
     const float pi_lo = ffrom(0xb3bbbd2eu);
-    if (isnan(x) || isnan(y)) return x + y;
+    if (isnan(x) || isnan(y)) return altd_nan_operand(y, x);  // the CPU's `x + y` returns y when both are NaN
     uint32_t ix = fbits(x), iy = fbits(y);
     if (ix == 0x3f800000u) return native_atan(y);
     uint32_t m = ((iy >> 31) & 1u) | ((ix >> 30) & 2u);
@@ -312,15 +312,15 @@ __device__ inline double dpow(double x, double y) {
         if (y == 0.0 || !isfinite(y)) {
             if (y == 0.0) return 1.0;
             if (x == 1.0) return 1.0;
-            if (isnan(x) || isnan(y)) return x + y;
+            if (isnan(x) || isnan(y)) return altd_nan_operand(x, y);
             if (fabs(x) == 1.0) return 1.0;
             if ((fabs(x) < 1.0) == !signbit(y)) return 0.0;
             return y * y;
         }
         if (x == 0.0 || !isfinite(x)) {
-            double x2 = x * x;
-            if (signbit(x) && integer_kind(iy) == 1) x2 = -x2;
-            return signbit(y) ? 1.0 / x2 : x2;
+            double x2 = isnan(x) ? altd_nan_operand(x, x) : x * x;
+            if (signbit(x) && integer_kind(iy) == 1) x2 = dfrom(dbits(x2) ^ (1ull << 63));  // -x2, NaN included
+            return signbit(y) && !isnan(x2) ? 1.0 / x2 : x2;
         }
         if (signbit(x)) {
             uint32_t kind = integer_kind(iy);
@@ -491,6 +491,50 @@ __device__ inline double game_tanh(double value) {
     double result = big ? 1.0 - q : (mid ? q : (normal ? -q : x));
     return signbit(value) ? -result : result;
 #endif
+}
+
+// ---- math profiles (crate::math::profile) ----------------------------------
+// The Windows UCRT functions of math/kernels/ucrt.h. World::math_profile picks a
+// profile for the whole simulation, so the branches below never diverge.
+
+#define ALTD_MATH_FN __device__ inline
+#define ALTD_MATH_TABLE __device__ constexpr
+#define ALTD_MATH_CONST constexpr
+#include "../../math/kernels/ucrt.h"
+
+// MathProfile::index.
+enum : uint32_t { MATH_PROTON = 0, MATH_WIN10_FMA3 = 1, MATH_WIN11_FMA3 = 2 };
+
+// sinf and cosf are musl's with the Windows exceptions. Inputs beyond
+// WIN_TRIG_LIMIT are flagged by the musl reduction already.
+__device__ inline float profile_sin(uint32_t math, float x, uint32_t& err) {
+    float musl = native_sin(x, err);
+    return math == MATH_PROTON ? musl : win_sinf_fix(x, musl);
+}
+__device__ inline float profile_cos(uint32_t math, float x, uint32_t& err) {
+    float musl = native_cos(x, err);
+    return math == MATH_PROTON ? musl : win_cosf_fix(x, musl);
+}
+// The profile is uniform, so these branch rather than select (WGSL's select
+// evaluates both operands).
+__device__ inline float profile_atan2(uint32_t math, float y, float x) {
+    if (math == MATH_PROTON) return native_atan2(y, x);
+    return win_atan2f(y, x);
+}
+__device__ inline double profile_exp(uint32_t math, double x) {
+    if (math == MATH_PROTON) return dexp(x);
+    if (math == MATH_WIN10_FMA3) return win10_exp(x);
+    return win11_exp(x);
+}
+__device__ inline double profile_pow(uint32_t math, double x, double y) {
+    if (math == MATH_PROTON) return dpow(x, y);
+    if (math == MATH_WIN10_FMA3) return win10_pow(x, y);
+    return win11_pow(x, y);
+}
+__device__ inline double profile_tanh(uint32_t math, double x) {
+    if (math == MATH_PROTON) return game_tanh(x);
+    if (math == MATH_WIN10_FMA3) return win10_tanh(x);
+    return win11_tanh(x);
 }
 
 }  // namespace altd

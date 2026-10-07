@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { shaderForEntry, specializeMath } from '../../src/wasm/sim/runtime.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const read = (...names) => Promise.all(names.map(name => readFile(path.join(root, 'src/wasm', name), 'utf8')));
@@ -15,6 +16,11 @@ const shaders = {
     Ray: (await read('float.wgsl', 'rays.wgsl')).join('\n'),
     Simulation: (await read('sim/f64.wgsl', 'sim/helpers.wgsl', 'float.wgsl', 'sim/generated.wgsl', 'sim/window.wgsl')).join('\n'),
 };
+for (const profile of [0, 1, 2]) {
+    for (const entry of ['sensors_kernel', 'forward_kernel', 'stats_kernel', 'stop_kernel', 'step_kernel', 'drive_kernel', 'reset_kernel']) {
+        shaders[`Simulation-${profile}-${entry}`] = shaderForEntry(specializeMath(shaders.Simulation, profile), entry);
+    }
+}
 const scratch = await mkdtemp(path.join(tmpdir(), 'altd-shader-'));
 try {
     for (const [name, code] of Object.entries(shaders)) {

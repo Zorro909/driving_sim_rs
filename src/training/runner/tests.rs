@@ -11,9 +11,17 @@ fn generated_runner(population: usize) -> TrainingRunner {
     let root = env!("CARGO_MANIFEST_DIR");
     let template_scene = load(&format!("{root}/assets/scenes/formula_template.json"));
     let track_settings = serde_json::from_value(load(&format!("{root}/assets/random_track_settings.json"))).unwrap();
-    let scene = crate::track::training_tracks::training_scene_at(&template_scene, &track_settings, None, 1729, 0, 0)
-        .unwrap()
-        .1;
+    let scene = crate::track::training_tracks::training_scene_at(
+        &template_scene,
+        &track_settings,
+        None,
+        1729,
+        0,
+        0,
+        crate::math::profile::MathProfile::Proton,
+    )
+    .unwrap()
+    .1;
     let template = load(&format!("{root}/assets/networks/formula.json"));
     let model = load(&format!("{root}/assets/models/formula.json"));
     let spawn = serde_json::json!({"position":scene["reset_position"],"rotation":scene["reset_rotation"]});
@@ -35,7 +43,7 @@ fn generated_runner(population: usize) -> TrainingRunner {
         Arc::new(World::from_scene(&scene)),
         crate::track::world::vector(&spawn["position"]),
         spawn["rotation"].as_f64().unwrap(),
-        SensorLayout::from_exports(&template, &model),
+        SensorLayout::from_exports(&template, &model, crate::math::profile::MathProfile::Proton),
         &outputs,
         settings,
         PyRandom::new(5),
@@ -225,7 +233,10 @@ fn owned_install_matches_cloning_install() {
     a.advance(90, false);
     b.advance(90, false);
     let results: Vec<AgentResult> = a.agents.iter().map(TrainingAgent::result).collect();
-    let generation = a.rng.clone().reproduce(&results, &a.settings);
+    let generation = a
+        .rng
+        .clone()
+        .reproduce(&results, &a.settings, crate::math::profile::MathProfile::Proton);
     a.install(&generation.networks, true);
     b.install_with_novelty(generation.networks.clone(), true, None);
     assert_eq!(a.agents.len(), b.agents.len());

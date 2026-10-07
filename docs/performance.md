@@ -48,3 +48,25 @@ Ryzen 9 7950X, Chromium 153.0.8010.12 on Linux, RX 7900 XTX with RADV 26.2.2. A 
 | 4,096 | 1,657.3 | 263.8 | 647.7 |
 
 At 4,096 cars, eight-worker CPU advancement took 228.9 ms versus 1,577.7 ms serial. Module/pool startup was 14.1 ms serial and 94.5 ms with eight workers. Peak observed linear memory in the largest case was 97.6 MiB serial and 113.7 MiB with eight workers, excluding JavaScript workers, GPU allocations and any separate preview module. These inputs are historical; rerun the [public browser harness](../wasm/README.md) to establish results for the generated scenarios and another browser/device.
+
+## Firefox completion waits — 2026-10-06
+
+Firefox 157 on the local Linux/RX 7900 XTX system reproduced the 30 ticks/s limit. In the public Formula benchmark, six-tick calls took about 200 ms at both 32 and 1,024 cars. At 32 cars, the 120 measured ticks spent 3,975 ms in advancement while GPU timestamps covered only 192 ms. Setting GPU load to 1 retained the same limit, ruling out the configured idle budget as its cause.
+
+The runtime now prompts completion delivery with empty queue submissions every 4 ms while awaiting queued work or mapped readback. It retains the original promises and command order, cancelling the timer after completion, device loss or a submission exception. The earlier workaround was absent from this source tree. The Windows/Proton kernel sources are unchanged by this fix.
+
+| Workload | Cars | Before ticks/s | After ticks/s |
+| --- | ---: | ---: | ---: |
+| Formula, fixed six-tick windows | 32 | 30.19 | 688.07 |
+| Formula, fixed six-tick windows | 1,024 | 30.27 | 259.63 |
+| Normally served app, Rally, adaptive windows | 512 | 29.98 | 249.53 |
+
+Formula used the public default scenario, shape `20,16,5`, Proton, disabled elimination and 120 warmup ticks, with 120 measured ticks at 32 cars and 60 at 1,024 cars. The benchmark records per-pass GPU timestamps. The app used its Test Loop fixture, default shape `20,16,16,12,8,5`, one inference batch, eight CPU workers, Proton, load 0.85 and disabled elimination. App values are medians of the reported rates during a four-second observation; whole-observation rates were 29.88 and 258.92 ticks/s. The final served run used the rebuilt assets without package or runtime overrides. Compilation and startup are excluded. These are diagnostic before/after observations, not repeated benchmark medians.
+
+A separate app comparison completed three generations and 558 ticks with each runtime, using identical rebuilt WASM packages and changing only the JavaScript completion waits. Checkpoint bytes, every population network, terminal car states, summaries and stable generation logs matched exactly. The completed outcome SHA-256 was `7086f0ce5b7f555d7bc2d7a4ef5c2db321d71ebb3c21dd93eaa9324ffa02eedc`. Time through the third turnover changed from 18,688 ms to 1,405 ms; the adaptive pump used 90 calls before and 37 after.
+
+Two additional runs through normally served assets completed the same 558 ticks in 2,339 and 2,385 ms, with identical outcomes and stable logs. A prior diagnostic run with package routing reported 1,143 ticks/s; the normal served measurements above provide the conservative result. One initial instrumented run stalled while waiting for its generation outcome. Its detailed phase was not captured, and the stall did not recur in the three subsequent completed comparisons; its cause remains unresolved.
+
+Three alternating Chromium 153 comparisons kept the WASM, shader, Win11 profile, 1,024 active cars and 120-tick bulk windows identical, changing only the completion-wait runtime. Median wall time was 355.4 ms before and 355.0 ms after. Background GPU activity was present before browser launches, so these observations do not measure isolated peak throughput.
+
+Both serial and threaded production packages were rebuilt. Full Firefox simulation comparisons passed for all three profiles: 184,558 checks, zero mismatches. The Node completion-wait regression suite passes 16 tests against the fixed runtime; the frozen original runtime fails nine of them. See [the browser commands](../wasm/README.md) to repeat the Formula workload or run the regression suite without a GPU.

@@ -6,6 +6,13 @@ fn fp_round(value: f32) -> f32 {
 fn fp_add(a: f32, b: f32) -> f32 { return fp_round(a + b); }
 fn fp_sub(a: f32, b: f32) -> f32 { return fp_round(a - b); }
 fn fp_mul(a: f32, b: f32) -> f32 { return fp_round(a * b); }
+// Sign and selection operations preserve subnormal and signed-zero bits.
+// Hardware float operations may flush subnormals or identify +0 and -0.
+fn fp_abs(a: f32) -> f32 { return bitcast<f32>(bitcast<u32>(a) & 0x7fffffffu); }
+fn fp_neg(a: f32) -> f32 { return bitcast<f32>(bitcast<u32>(a) ^ 0x80000000u); }
+fn fp_select(a: f32, b: f32, condition: bool) -> f32 {
+    return bitcast<f32>(select(bitcast<u32>(a), bitcast<u32>(b), condition));
+}
 // WGSL division permits 2.5 ULP error. Divide binary32 significands exactly
 // with integers instead, then round once to nearest, ties to even. Normal
 // operands whose quotient is normal take this branch-free path; zeros,

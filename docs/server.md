@@ -20,8 +20,9 @@ target/release/altd-sim serve --port 47800 \
 | `--port N` | `47800`; binds only `127.0.0.1:N` |
 | `--allow-origin ORIGIN` | `https://drivinglab.jectrum.de`; repeat to allow several origins, replacing the default list |
 | `--threads N` | Global flag; sizes the Rayon pool shared by all CPU sessions, with CPU affinity as the default |
+| `--math-profile PROFILE` | Global flag; the math profile of sessions whose options name none. Without it, the server detects the profile of its own machine |
 
-Allowed origins use `http://host[:port]` or `https://host[:port]`, with an ASCII hostname or IP address. Startup normalizes scheme and host case, compresses IPv6 addresses, removes a trailing slash and omits default ports. Paths, credentials, query strings and fragments are rejected. Startup prints the listening URL, allowed origins, CPU thread count and HIP availability.
+Allowed origins use `http://host[:port]` or `https://host[:port]`, with an ASCII hostname or IP address. Startup normalizes scheme and host case, compresses IPv6 addresses, removes a trailing slash and omits default ports. Paths, credentials, query strings and fragments are rejected. Startup prints the listening URL, allowed origins, CPU thread count, HIP availability and the default math profile.
 
 ## Connection checks
 
@@ -38,10 +39,10 @@ There is no LAN binding, TLS or authentication token. These checks restrict brow
 The first frame is a JSON text greeting:
 
 ```json
-{"type":"hello","protocol":1,"version":"1.0.0","threads":8,"carStateStride":14,"carStateFields":["x","y","..."],"hip":{"available":true,"device":"AMD Radeon RX 7900 XTX"}}
+{"type":"hello","protocol":1,"version":"1.1.0","threads":8,"carStateStride":14,"carStateFields":["x","y","..."],"hip":{"available":true,"device":"AMD Radeon RX 7900 XTX","platform":"HIP"},"mathProfile":"proton","mathProfiles":["proton","win10-fma3","win11-fma3"]}
 ```
 
-Read `carStateStride` and `carStateFields` from the greeting rather than hard-coding them. The example's fields are abbreviated. When HIP is unavailable, `hip` instead contains `{"available":false,"reason":"..."}`. Availability means the process opened the library and device; a particular session can still fall back to CPU.
+Read `carStateStride` and `carStateFields` from the greeting rather than hard-coding them. The example's fields are abbreviated. `platform` is `"HIP"` for the AMD library and `"CUDA"` for the NVIDIA one. When HIP is unavailable, `hip` instead contains `{"available":false,"reason":"..."}`. Availability means the process opened the library and device; a particular session can still fall back to CPU. `mathProfile` is the default math profile and `mathProfiles` lists every profile a session can choose; [math profiles](../math/README.md) documents their runtime variants.
 
 Requests use an unsigned integer `id`, an operation name and optional `args`:
 
@@ -52,16 +53,16 @@ Requests use an unsigned integer `id`, an operation name and optional `args`:
 A successful reply contains the same `id`, its result in `ok` and the current `state`. An error reply contains `id` and `error`, without `state`.
 
 ```json
-{"id":7,"ok":180,"state":{"started":true,"generation":0,"tick":180,"population":256,"activeCount":256,"checkpointGeneration":0,"backend":"cpu","backendNote":null}}
+{"id":7,"ok":180,"state":{"started":true,"generation":0,"tick":180,"population":256,"activeCount":256,"checkpointGeneration":0,"backend":"cpu","backendNote":null,"mathProfile":"proton"}}
 ```
 
-`checkpointGeneration` identifies the restorable generation boundary, or is `null` before starting. It need not describe the current tick. `backend` reports what actually runs; `backendNote` explains a CPU fallback. Clients can queue requests and match replies by `id`.
+`checkpointGeneration` identifies the restorable generation boundary, or is `null` before starting. It need not describe the current tick. `backend` reports what actually runs; `backendNote` explains a CPU fallback. `mathProfile` is the session's math profile. Clients can queue requests and match replies by `id`.
 
 ### Operations
 
 | Operation | `args` | `ok` |
 | --- | --- | --- |
-| `create` | `scene`, `network`, `model` as JSON strings; optional `options` as a SessionOptions object | `{backend, backendNote}` |
+| `create` | `scene`, `network`, `model` as JSON strings; optional `options` as a SessionOptions object | `{backend, backendNote, mathProfile}` |
 | `startWithShape` | `shape` as an array of unsigned 32-bit integers | `null` |
 | `restoreCheckpointBytes` | Binary payload, no arguments required | `null` |
 | `restoreCheckpointJson` | `json` as a checkpoint JSON string | `null` |
@@ -75,7 +76,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | `carStates` | None | Number of `f64` values, with a binary payload |
 | `checkpointBytes` | None | `null`, with a binary payload |
 
-Call `create` once, then start or restore before advancing. `options.backend` accepts `"cpu"`, the default, or `"hip"`; other SessionOptions fields retain their regular defaults and unknown fields are rejected. A second successful `create` on the same connection is an error. Unknown operations and malformed JSON return errors while leaving the connection usable.
+Call `create` once, then start or restore before advancing. `options.backend` accepts `"cpu"`, the default, or `"hip"`. `options.mathProfile` accepts `"proton"`, `"win10-fma3"` or `"win11-fma3"` and defaults to the server's profile; checkpoints restore only into sessions of the profile they were made with. Other SessionOptions fields retain their regular defaults and unknown fields are rejected. A second successful `create` on the same connection is an error. Unknown operations and malformed JSON return errors while leaving the connection usable.
 
 ### Binary frames
 

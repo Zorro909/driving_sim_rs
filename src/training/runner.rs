@@ -186,7 +186,8 @@ impl TrainingRunner {
 
     fn start_produced(&mut self, seed: &Network, trace: bool) -> Produced {
         self.sync_optimizer();
-        self.optimizer.start(seed, &self.settings, &mut self.rng, trace)
+        self.optimizer
+            .start(seed, &self.settings, &mut self.rng, self.world.math, trace)
     }
 
     /// The population after the current agents, by the configured algorithm.
@@ -194,7 +195,7 @@ impl TrainingRunner {
         self.sync_optimizer();
         let results: Vec<AgentResult> = self.agents.iter().map(TrainingAgent::result).collect();
         self.optimizer
-            .next(&results, scores, &self.settings, &mut self.rng, scratch, trace)
+            .next(&results, scores, &self.settings, &mut self.rng, scratch, self.world.math, trace)
     }
 
     pub fn start(&mut self, seed: &Network) -> Generation {
@@ -287,6 +288,7 @@ impl TrainingRunner {
         };
         profile.mark("mean");
         let world = &*self.world;
+        let math = world.math;
         let (position, rotation) = (self.position, self.rotation);
         let retained = if reused {
             self.agents.len().min(networks.len())
@@ -322,7 +324,7 @@ impl TrainingRunner {
                             .params
                             .iter()
                             .zip(&mean)
-                            .map(|(&a, &b)| crate::math::double_math::pow(a - b, 2.0))
+                            .map(|(&a, &b)| math.pow(a - b, 2.0))
                             .fold(0.0, |a, b| a + b)
                             .sqrt()
                     },
@@ -493,10 +495,11 @@ impl TrainingRunner {
         } else {
             crate::track::random_track::generate(config, track_state)?
         };
-        let scene = track.to_scene(template);
+        let math = self.world.math;
+        let scene = track.to_scene(template, math);
         let position = crate::track::curve::json_vector(&scene["reset_position"]).into();
         let rotation = scene["reset_rotation"].as_f64().unwrap();
-        self.replace_track(Arc::new(World::from_scene(&scene)), position, rotation);
+        self.replace_track(Arc::new(World::from_scene_with(&scene, math)), position, rotation);
         *config = track.config.clone();
         Ok(track)
     }

@@ -58,6 +58,7 @@ Each browser connection gets its own session. Only one session at a time can use
 | Option | Use it to |
 | --- | --- |
 | `--threads N` | Limit the CPU threads, for example to keep the computer responsive. The default is every logical CPU the process may use. |
+| `--math-profile PROFILE` | Reproduce `proton`, `win10-fma3` or `win11-fma3` arithmetic. The default follows the server's operating system; clients can select a profile for each session. |
 | `--port N` | Listen on another port when 47800 is taken. Set the same port in Drive Lab. |
 | `--allow-origin ORIGIN` | Allow another Drive Lab address, such as a development copy: `--allow-origin http://127.0.0.1:5173`. It replaces the default; repeat the option to allow several. |
 
@@ -65,11 +66,15 @@ Each browser connection gets its own session. Only one session at a time can use
 ./altd-sim serve --threads 8 --port 47801
 ```
 
+All builds include all three math profiles. Windows 11 24H2 and newer default to `win11-fma3`; earlier Windows releases use `win10-fma3`; Linux and macOS use `proton`. To train on Linux for a game running on current Windows, for example, pass `--math-profile win11-fma3`. Checkpoints retain their profile. [Math profiles](math/README.md) describes the kernels and captured reference data.
+
 ### Training on an AMD GPU
 
-The Linux archive contains `libaltd_gpu.so` next to `altd-sim`. It needs a ROCm 7.x runtime and one of the [covered GPU architectures](gpu/README.md). `./altd-sim gpu-info` checks that the library loads and prints `"layout": "ok"`; the server's `HIP:` line shows the device or why HIP is unavailable.
+The Linux archive contains `libaltd_gpu.so` next to `altd-sim`. It needs a ROCm 7.x runtime and one of the [covered GPU architectures](gpu/README.md). `./altd-sim gpu-info` checks that the library loads and prints `"layout": "ok"`; with a GPU present it also runs one kernel and prints the device, and fails if the library has no code for that GPU; the server's `HIP:` line shows the device or why HIP is unavailable.
 
 A HIP session drives its first 12 ticks on both the GPU and the CPU and compares them. If they differ, or the network or track needs something HIP does not support, the session trains on CPU and Drive Lab shows the reason. Native CPU and HIP produce the same results. Browser training can differ from both in the last digits of a few values ([issue #3](https://github.com/Zorro909/driving_sim_rs/issues/3)), so a run moved between the browser and the server can develop differently from then on.
+
+NVIDIA GPUs use the same backend: build the library with `gpu/build-cuda.sh` (Linux) or `gpu/build-cuda.ps1` (Windows) as described in the [GPU guide](gpu/README.md#nvidia-cuda). The release archives do not include it.
 
 ### Troubleshooting
 

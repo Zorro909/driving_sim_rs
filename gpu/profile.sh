@@ -103,8 +103,8 @@ echo "  checkpoint: ${ALTD_GPU_CKPT:-generated Xavier population}"
 { rocminfo | grep -E "^\s*(Name|Marketing Name|Compute Unit|Max Clock Freq|Wavefront Size):" ; } > "$OUT/device.txt" 2>&1
 { hipcc --version; echo; rocminfo | grep -m1 -i "ROCk\|version"; [ $HAVE_ROCPROF = 1 ] && rocprofv3 --version; } > "$OUT/toolchain.txt" 2>&1
 grep -m1 "Marketing Name" "$OUT/device.txt" | sed 's/^\s*/  /'
-if [ ! -f "$LIB" ] || [ "$(find gpu/sim -newer "$LIB" | wc -l)" -gt 0 ]; then
-  if ask "GPU library missing or older than gpu/sim sources. Build it now with gpu/build.sh?" y; then run_logged build_library gpu/build.sh || exit 1; fi
+if [ ! -f "$LIB" ] || [ "$(find gpu/sim math/kernels gpu/build.sh -type f -newer "$LIB" | wc -l)" -gt 0 ]; then
+  if ask "GPU library missing or older than its sources or math kernels. Build it now with gpu/build.sh?" y; then run_logged build_library gpu/build.sh || exit 1; fi
 fi
 sha256sum "$LIB" >> "$LOG"
 if [ ! -x "$CHECK" ] || [ "$(find src examples -newer "$CHECK" -name '*.rs' | wc -l)" -gt 0 ]; then

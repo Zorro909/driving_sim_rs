@@ -1,4 +1,5 @@
 //! Generated-track session state and checkpoint regression checks.
+use altd_sim::math::profile::MathProfile;
 use altd_sim::training::session::{Session, SessionOptions};
 use serde_json::{json, Value};
 #[path = "../examples/support/generated.rs"]
@@ -16,6 +17,14 @@ fn checkpoint(mode: &str, generation: u64) -> &'static [u8] {
     }
 }
 
+/// The options of a case on the math the reference runner and the
+/// snapshots use, whatever the host's default.
+fn proton(options: &str) -> SessionOptions {
+    let mut options = SessionOptions::from_json(options).unwrap();
+    options.math_profile = Some(MathProfile::Proton);
+    options
+}
+
 #[test]
 fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
     let scene = generated::scene("rally", 0);
@@ -29,11 +38,10 @@ fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
     for mode in ["independent", "lockstep"] {
         let case = &golden[mode];
         let options = case["options"].to_string();
-        let mut session = Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
+        let mut session = Session::new(&scene, &network, &model, proton(&options)).unwrap();
         // Use Session only to expose the runner's state through the same views.
         // Its runner follows the public, untraced pre-Session lifecycle below.
-        let mut reference =
-            Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
+        let mut reference = Session::new(&scene, &network, &model, proton(&options)).unwrap();
         let mut replay: Option<Session> = None;
         let shape: Vec<_> = case["shape"]
             .as_array()
@@ -45,7 +53,10 @@ fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
             match row["operation"].as_str().unwrap() {
                 "start" => {
                     session.start_with_shape(&shape).unwrap();
-                    let seed = reference.runner.rng.xavier(&shape);
+                    let seed = reference
+                        .runner
+                        .rng
+                        .xavier(&shape, altd_sim::math::profile::MathProfile::Proton);
                     reference.runner.start(&seed);
                 }
                 "advance" => {
@@ -77,8 +88,7 @@ fn both_session_modes_match_pre_change_generations_and_checkpoint_bytes() {
                         assert_eq!(regression::bits(replay_rewards), reward_bits);
                         assert_eq!(replay.checkpoint_bytes().unwrap(), bytes, "{mode} replay checkpoint");
                     }
-                    let mut restored =
-                        Session::new(&scene, &network, &model, SessionOptions::from_json(&options).unwrap()).unwrap();
+                    let mut restored = Session::new(&scene, &network, &model, proton(&options)).unwrap();
                     restored.restore_checkpoint_bytes(&bytes).unwrap();
                     assert_eq!(
                         regression::session_snapshot(&restored),

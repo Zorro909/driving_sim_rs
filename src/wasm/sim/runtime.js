@@ -12,6 +12,7 @@ const QUEUED_SUBMISSIONS = 3;
 // `progress(done, total, kernel)` reports each pipeline before it compiles,
 // then once more when all have.
 export async function createSimulator(device, source, world, base, progress) {
+  source = specializeMath(source, world[15]);
   source = specializeSensors(source, world, base);
   device.pushErrorScope("out-of-memory");
   device.pushErrorScope("validation");
@@ -102,6 +103,7 @@ class Simulator {
     this.layout = layout;
     this.pipelines = pipelines;
     this.base = base;
+    this.mathProfile = world[15];
     this.buffers = [];
     this.world = this.buffer(
       world.byteLength,
@@ -122,6 +124,8 @@ class Simulator {
   // A replaced track: the next upload binds the new world buffer.
   setWorld(world) {
     if (this.busy) throw new Error("WebGPU window is in flight");
+    if (world[15] !== this.mathProfile)
+      throw new Error("Math profile changed; recreate the GPU simulator");
     const old = this.world;
     this.world = this.buffer(
       world.byteLength,
@@ -136,6 +140,29 @@ class Simulator {
     if (!(load > 0 && load <= 1))
       throw new Error("GPU load must be in (0, 1]");
     this.load = load;
+  }
+  async waitForGpu(completion) {
+    // Firefox can defer completion callbacks to its next maintenance poll.
+    // Empty submissions prompt polling without dispatching simulation work.
+    // Only pending waits need the timer; fast completions cancel it first.
+    const timer = setInterval(() => {
+      if (this.lost) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        this.device.queue.submit([]);
+      } catch {
+        // Retain the original operation: a pending map must settle before
+        // the window releases its busy flag or reuses the readback buffer.
+        clearInterval(timer);
+      }
+    }, MIN_IDLE_MS);
+    try {
+      return await completion;
+    } finally {
+      clearInterval(timer);
+    }
   }
   buffer(size, usage) {
     if (
@@ -310,20 +337,21 @@ class Simulator {
         if (last === ticks) break;
         // Bound the queued submissions.
         queued.push(this.device.queue.onSubmittedWorkDone());
-        if (queued.length > QUEUED_SUBMISSIONS) await queued.shift();
+        if (queued.length > QUEUED_SUBMISSIONS)
+          await this.waitForGpu(queued.shift());
         const owed =
           ((performance.now() - started - idle) * (1 - this.load)) /
             this.load -
           idle;
         if (owed >= MIN_IDLE_MS) {
-          await queued.at(-1);
+          await this.waitForGpu(queued.at(-1));
           queued.length = 0;
           const t = performance.now();
           await new Promise((resolve) => setTimeout(resolve, owed));
           idle += performance.now() - t;
         }
       }
-      await this.readback.mapAsync(GPUMapMode.READ);
+      await this.waitForGpu(this.readback.mapAsync(GPUMapMode.READ));
       const busy = performance.now() - started - idle;
       this.tickMs =
         (this.tickMs + Math.min(50, Math.max(0.05, busy / ticks))) / 2;
@@ -349,7 +377,7 @@ class Simulator {
 
 // Remove unreachable functions before handing each pipeline to a driver.
 // Large soft-float modules otherwise consume several GB during compilation.
-function shaderForEntry(source, entry) {
+export function shaderForEntry(source, entry) {
   const functions = new Map();
   const regex = /(@compute\s+@workgroup_size\([^)]*\)\s*)?\bfn\s+(\w+)\s*\(/g;
   let match;
@@ -382,6 +410,66 @@ function shaderForEntry(source, entry) {
   for (const [name, fn] of [...functions].reverse())
     if (!needed.has(name))
       source = source.slice(0, fn.start) + source.slice(fn.end);
+  // Tables for other profiles are large. Remove their declarations as well
+  // as their functions, retaining constants referenced by other constants.
+  const constants = [...source.matchAll(/\bconst\s+(\w+)\s*:[^;]*;/g)];
+  let reachable = source.replace(/\bconst\s+(\w+)\s*:[^;]*;/g, "");
+  const pending = new Set(constants);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const constant of pending) {
+      if (new RegExp(`\\b${constant[1]}\\b`).test(reachable)) {
+        reachable += constant[0];
+        pending.delete(constant);
+        changed = true;
+      }
+    }
+  }
+  for (const constant of [...pending].reverse())
+    source =
+      source.slice(0, constant.index) +
+      source.slice(constant.index + constant[0].length);
+  return source;
+}
+// All profiles ship in the WASM package. Compile just the chosen session's
+// dispatch targets, so the driver need not inline three soft-float kernels
+// at every call site. The shared generated kernel source stays intact.
+export function specializeMath(source, profile) {
+  if (![0, 1, 2].includes(profile))
+    throw new Error(`Unknown GPU math profile ${profile}`);
+  const targets =
+    profile === 0
+      ? { atan2: "native_atan2", exp: "dexp", pow: "dpow", tanh: "game_tanh" }
+      : {
+          atan2: "win_atan2f",
+          exp: `win${profile === 1 ? 10 : 11}_exp`,
+          pow: `win${profile === 1 ? 10 : 11}_pow`,
+          tanh: `win${profile === 1 ? 10 : 11}_tanh`,
+        };
+  for (const [operation, target] of Object.entries(targets)) {
+    const signature = new RegExp(
+      `\\bfn profile_${operation}\\([^)]*\\)\\s*->\\s*\\w+\\s*\\{`,
+    );
+    const match = signature.exec(source);
+    if (!match) throw new Error(`Missing shader profile_${operation}`);
+    const body = match.index + match[0].length;
+    let end = body,
+      depth = 1;
+    while (depth && end < source.length) {
+      if (source[end] === "{") depth++;
+      else if (source[end] === "}") depth--;
+      end++;
+    }
+    if (depth) throw new Error(`Incomplete shader profile_${operation}`);
+    const args =
+      operation === "atan2"
+        ? "y_arg, x_arg"
+        : operation === "pow"
+          ? "x_arg, y_arg"
+          : "x_arg";
+    source = source.slice(0, body) + ` return ${target}(${args}); }` + source.slice(end);
+  }
   return source;
 }
 function specializeSensors(source, world, base) {

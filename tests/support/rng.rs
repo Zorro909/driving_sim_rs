@@ -7,7 +7,7 @@ pub(crate) fn verify(d: &Value) -> Value {
     let mut checked = 0;
     for r in d["rows"].as_array().unwrap() {
         let n = r["length"].as_u64().unwrap() as usize;
-        let actual = rng.normal_array(n, 1.0);
+        let actual = rng.normal_array(n, 1.0, altd_sim::math::profile::MathProfile::Proton);
         for (i, (a, e)) in actual.iter().zip(r["bits"].as_array().unwrap()).enumerate() {
             checked += 1;
             if a.to_bits() != e.as_u64().unwrap() {
@@ -25,9 +25,13 @@ pub(crate) fn verify(d: &Value) -> Value {
     for key in ["initialization", "mutation"] {
         let mut rng = GameRandom::new([1, 2, 3, 4], 12345);
         let n = if key == "initialization" {
-            Network::xavier_game(&[2, 3, 2], &mut rng)
+            Network::xavier_game(&[2, 3, 2], &mut rng, altd_sim::math::profile::MathProfile::Proton)
         } else {
-            Network::from_vector(&[2, 3, 2], vec![0.0; 17]).mutate_xavier_game(0.2, &mut rng)
+            Network::from_vector(&[2, 3, 2], vec![0.0; 17]).mutate_xavier_game(
+                0.2,
+                &mut rng,
+                altd_sim::math::profile::MathProfile::Proton,
+            )
         };
         for (i, (a, e)) in n.params.iter().zip(d[key]["bits"].as_array().unwrap()).enumerate() {
             checked += 1;
@@ -73,7 +77,12 @@ pub(crate) fn verify(d: &Value) -> Value {
                 ..Default::default()
             };
             let mut rng = GameRandom::new([1, 2, 3, 4], 12345);
-            let result = reproduce_game(&agents, &settings, &mut rng);
+            let result = reproduce_game(
+                &agents,
+                &settings,
+                &mut rng,
+                altd_sim::math::profile::MathProfile::Proton,
+            );
             assert_eq!(result.preserved_count, case["preserved"].as_u64().unwrap() as usize);
             for (i, (n, e)) in result
                 .networks
@@ -106,7 +115,7 @@ pub(crate) fn verify(d: &Value) -> Value {
             let mut rng = GameRandom::new([1, 2, 3, 4], seed);
             assert_eq!(rng.normal_state(), r["initial"], "initial state seed {seed}");
             for (i, (a, e)) in rng
-                .normal_array(33, 1.0)
+                .normal_array(33, 1.0, altd_sim::math::profile::MathProfile::Proton)
                 .iter()
                 .zip(r["bits"].as_array().unwrap())
                 .enumerate()

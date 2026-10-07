@@ -1,6 +1,6 @@
-# AMD HIP backend
+# GPU backends (AMD HIP, NVIDIA CUDA)
 
-The HIP library runs whole driving generations on an AMD GPU. Captured CPU/HIP checks compare simulation values, population parameters, RNG state and checkpoint bytes exactly. Rust owns evolution and checkpoint I/O; both backends can resume the same generation-boundary checkpoints. See [fidelity](../docs/fidelity.md) for the scope of that evidence.
+The GPU library runs whole driving generations on an AMD GPU (HIP) or an NVIDIA GPU (CUDA, see below). Captured CPU/HIP checks compare simulation values, population parameters, RNG state and checkpoint bytes exactly. Rust owns evolution and checkpoint I/O; both backends can resume the same generation-boundary checkpoints. See [fidelity](../docs/fidelity.md) for the scope of that evidence.
 
 ## Build and use
 
@@ -31,7 +31,30 @@ target/release/altd-sim --threads 8 train-scratch --gpu \
 
 The ROCm 7.1 runtime officially supports fewer consumer GPUs than this list; the remaining targets are best effort. The captured CPU/HIP equivalence checks have run on gfx1100 only. The script verifies the checked-in double tables against their Rust bit patterns without rewriting tracked files. `python3 gpu/gen_tables.py --output PATH` writes a header explicitly; `--check` validates it.
 
-The compiler flags `-ffp-contract=off` and `-fhip-fp32-correctly-rounded-divide-sqrt` preserve separate multiply/add rounding and correctly rounded float32 division/square root. Keep them when changing architecture. The native crate loads the library at runtime, so CPU-only builds do not require ROCm.
+The compiler flags `-ffp-contract=off` and `-fhip-fp32-correctly-rounded-divide-sqrt` preserve separate multiply/add rounding and correctly rounded float32 division/square root. Explicit `fma` calls in Windows kernels still fuse and round once. Keep these flags when changing architecture. The native crate loads the library at runtime, so CPU-only builds do not require ROCm.
+
+## Math profiles
+
+Each library contains `proton`, `win10-fma3` and `win11-fma3`; a build selects GPU architectures, while each simulation selects its math profile. `--math-profile win11-fma3` works with `--gpu` on Linux, for example. Without that flag the CLI detects its host profile; resumed scratch runs retain the saved profile. Server sessions use `options.mathProfile`, defaulting to the server's profile. [Math profiles](../math/README.md) documents the shared Windows kernels and the existing musl implementations.
+
+## NVIDIA (CUDA)
+
+The same sources build for NVIDIA GPUs with `nvcc`; `sim/compat.h` maps the HIP runtime calls and warp helpers to CUDA. HIP and CUDA use the same library ABI and checkpoint formats: `--gpu`, `gpu-info` and `backend: "hip"` use whichever library is loaded. Math profiles require simulator ABI 10, so rebuild older libraries. Install the CUDA toolkit (13.x tested) and a host compiler (Visual Studio Build Tools on Windows, gcc or clang on Linux), then build from the repository root:
+
+```sh
+gpu/build-cuda.sh                  # Linux, writes target/gpu/libaltd_gpu.so
+gpu/build-cuda.ps1                 # Windows, writes target/gpu/altd_gpu.dll
+```
+
+`OUT` overrides the output directory. `CUDA_ARCH` defaults to `native`, which builds for the GPUs of the build machine. Without a GPU, nvcc 13.4 warns and builds `sm_75` code and PTX instead, which newer GPUs compile at load time. To build for other GPUs, or several, list `sm_` targets separated by commas or spaces; `nvidia-smi --query-gpu=compute_cap --format=csv` reports the number, so 8.6 is `sm_86`. A list also embeds PTX for its newest target, which the driver compiles at load time for a newer GPU. CUDA 13 builds for Turing (`sm_75`, RTX 20 series) and newer only; older GPUs need a CUDA 12 toolkit, which is untested. Both scripts check the double tables with `gpu/gen_tables.py --check` (`python3` on Linux, the `py` launcher or `python` on Windows). The binary loads `ALTD_GPU_LIB`, then the library beside the executable, then `target/gpu`, as on AMD. `altd-sim gpu-info` runs one kernel when a GPU is present, so a library built for another GPU fails there with HIP error 209.
+
+nvcc rejects a Visual Studio newer than the toolkit supports. `gpu/build-cuda.ps1 -AllowUnsupportedCompiler` (or `CUDA_ALLOW_UNSUPPORTED_COMPILER=1`) builds anyway with a warning; NVIDIA has not validated that combination, so run the checks below before trusting the library.
+
+`-fmad=false` is the CUDA counterpart of `-ffp-contract=off`; keep it, and keep nvcc's default correctly rounded float32 division and square root (no `-use_fast_math`, no `-ftz=true`). NVIDIA arithmetic also replaces every NaN result with its canonical NaN, so the places where the CPU returns a NaN operand or the x86 default NaN call `altd_nan_operand` and `altd_invalid` from `sim/compat.h`, which build those bits explicitly on both vendors.
+
+All three math profiles passed primitive and simulation checks on an RTX 3060 Ti (sm_86, Linux, CUDA 13.0); see the [verification report](../math/verification.md). Earlier Proton baseline checks passed on an RTX 4070 Laptop (sm_89, Windows, CUDA 13.4), and on Linux on an RTX 2070 (sm_75, driver 580) and an RTX 3060 (sm_86, driver 595) with `build-cuda.sh` libraries from CUDA 13.4: `native`, and `sm_75,sm_86`. They also passed with a CUDA 13.0 `sm_75` library run through its PTX (`CUDA_FORCE_PTX_JIT=1`). On those three GPUs the baseline `train-scratch --gpu` checkpoints were byte-identical to the CPU's. The driver compiles PTX only from a toolkit no newer than itself, so PTX for newer GPUs needs a driver at least as new as the CUDA toolkit that built the library. Consumer NVIDIA GPUs run float64 at 1/64 of their float32 rate, which bounds the network forward pass. A Windows GPU that drives a display kills kernels that run for more than a couple of seconds; the windowed launches stay well below that in the checks above.
+
+## Execution model
 
 GPU driving uses tick-major execution for independent cars. Native shared broadphase and paused windows are unsupported. Generated CLI tracks disable shared broadphase. Track preparation runs on a CPU producer with a bounded queue; `--track-buffer-size` sets its depth, default eight. Population/network buffers stay allocated while each fresh track replaces geometry.
 
@@ -44,6 +67,16 @@ target/release/examples/gpu_check schedules
 ```
 
 The default check fixture is a fixed generated Rally track and seeded Xavier networks. `ALTD_GPU_SCENE`, `ALTD_GPU_SPAWN`, `ALTD_GPU_NETWORK`, `ALTD_GPU_MODEL` and `ALTD_GPU_CKPT` select explicit inputs or a saved population. No captured campaign scene is required. `gpu_check --help` lists primitive, query, sensing, inference, physics and generation checks. Exhaustive parts can take minutes.
+
+`gpu_check math` compares primitives under all three profiles with the CPU. `ALTD_GPU_MATH` selects the simulation fixture's profile, default `proton`. Run complete simulation checks for each profile on the library's actual GPU:
+
+```sh
+for profile in proton win10-fma3 win11-fma3; do
+  ALTD_GPU_MATH="$profile" ALTD_GPU_LIB=target/gpu/libaltd_gpu.so \
+    target/release/examples/gpu_check \
+      rays sensors infer step stats window schedules reuse novelty turnover
+done
+```
 
 Run benchmarks on an otherwise idle GPU:
 
@@ -63,6 +96,7 @@ The runner keeps every sample and validates result digests. `--checkpoint DIR` s
 | Variable | Effect |
 | --- | --- |
 | `ALTD_GPU_LIB` | Runtime shared-library path |
+| `ALTD_GPU_MATH` | Math profile of `gpu_check` simulation fixtures |
 | `ALTD_GPU_GRAPH=0` | Direct launches instead of HIP graph replay |
 | `ALTD_GPU_SPLIT=0` | Fused instead of split physics |
 | `ALTD_GPU_PROFILE=1` | Device phase timings; `host` reports host/wall time only |

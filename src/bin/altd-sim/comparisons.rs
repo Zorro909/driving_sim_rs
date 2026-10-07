@@ -1,6 +1,7 @@
 //! Recorded trajectory, controller, sensor, and score comparisons.
 
 use super::inputs::{car_from_frame, frames, num, output_names, recorded_controls};
+use altd_sim::math::profile::MathProfile;
 use altd_sim::math::pymath::{py_max, py_min, py_pow, py_remainder, py_sum};
 use altd_sim::nn::network::Network;
 use altd_sim::physics::car::{Sensor, SensorScratch, DT};
@@ -244,7 +245,7 @@ fn closed_loop_runner(
         world.clone(),
         vector(&first["position"]),
         num(&first["rotation"]),
-        SensorLayout::from_exports(network_data, model),
+        SensorLayout::from_exports(network_data, model, world.math),
         &output_names(network_data),
         settings,
         PyRandom::new(0),
@@ -371,7 +372,7 @@ pub(super) fn compare_closed_loop(
     })
 }
 
-pub(super) fn compare_network(network_data: &Value, trace: &Value, first_tick: usize) -> Value {
+pub(super) fn compare_network(network_data: &Value, trace: &Value, first_tick: usize, math: MathProfile) -> Value {
     let network = Network::from_game_export(network_data);
     let frames = frames(trace);
     let input_names: Vec<&str> = network_data["inputs"]
@@ -401,7 +402,7 @@ pub(super) fn compare_network(network_data: &Value, trace: &Value, first_tick: u
             "trace output order differs from live network"
         );
         let inputs: Vec<f64> = sensors.iter().map(|s| num(&s["value"])).collect();
-        let predicted = network.forward(&inputs);
+        let predicted = network.forward(&inputs, math);
         for (j, (value, actual)) in predicted.iter().zip(outputs).enumerate() {
             let error = (value - num(&actual["value"])).abs();
             per_output[j].push(error);
@@ -512,7 +513,7 @@ pub(super) fn compare_sensors(
                 vision.push((
                     label.to_string(),
                     degrees,
-                    altd_sim::training::vision_length(degrees as f32) as f64,
+                    altd_sim::training::vision_length(degrees as f32, world.math) as f64,
                 ));
             }
         }

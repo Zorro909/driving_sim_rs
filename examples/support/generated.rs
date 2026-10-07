@@ -28,7 +28,16 @@ pub(crate) fn settings() -> RandomTrainingTrackSettings {
 fn input(vehicle: &str, slot: usize) -> (GeneratedTrack, Value) {
     let settings = settings();
     settings.validate().unwrap();
-    training_scene_at(&template(vehicle), &settings, None, 1729, 0, slot).unwrap()
+    training_scene_at(
+        &template(vehicle),
+        &settings,
+        None,
+        1729,
+        0,
+        slot,
+        altd_sim::math::profile::MathProfile::Proton,
+    )
+    .unwrap()
 }
 
 pub(crate) fn scene(vehicle: &str, slot: usize) -> Value {

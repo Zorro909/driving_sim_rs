@@ -26,6 +26,7 @@ pub fn device() -> Result<(&'static Gpu, &'static str), String> {
         let gpu = Gpu::open(None)?;
         crate::gpu::simulation::layout_matches(&gpu)?;
         let name = gpu.device_name()?;
+        gpu.probe_kernels()?;
         Ok((gpu, name))
     });
     match opened {

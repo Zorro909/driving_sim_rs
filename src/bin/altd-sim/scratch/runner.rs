@@ -8,6 +8,7 @@ use crate::inputs::{elimination_options, frames, num, output_names};
 use crate::io::{
     describe_input, load, load_optional, load_or, write_atomic, write_atomic_report, RALLY_MODEL, RALLY_NETWORK,
 };
+use altd_sim::math::profile::MathProfile;
 use altd_sim::math::pymath::py_sum;
 use altd_sim::nn::network::Network;
 use altd_sim::track::training_tracks::TrainingTrackBuffer;
@@ -160,14 +161,33 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
     let track_count = config
         .tracks
         .count(if config.resume { checkpoint.as_ref() } else { None });
-    run["tracks_per_generation"] = json!(track_count);
-    run["track_seed_version"] = json!(2);
-    let started = Instant::now();
     let restored_meta = if config.resume {
         checkpoint.as_ref()
     } else {
         initial_population_meta.as_ref()
     };
+    // Resumes and population imports keep the checkpoint's math; checkpoints
+    // from before profiles were Proton's.
+    let math = match restored_meta {
+        Some(meta) => {
+            let saved = match meta.get("math_profile") {
+                None => MathProfile::Proton,
+                Some(name) => name
+                    .as_str()
+                    .and_then(MathProfile::parse)
+                    .expect("checkpoint math profile"),
+            };
+            if let Some(asked) = config.math_profile {
+                assert_eq!(asked, saved, "--math-profile {asked} differs from the run's {saved}");
+            }
+            saved
+        }
+        None => config.math_profile.unwrap_or_else(MathProfile::detect),
+    };
+    run["math_profile"] = json!(math);
+    run["tracks_per_generation"] = json!(track_count);
+    run["track_seed_version"] = json!(2);
+    let started = Instant::now();
     let starting_generation = restored_meta.and_then(|m| m["generation"].as_u64()).unwrap_or(0);
     let track_seed = if config.resume {
         checkpoint
@@ -187,6 +207,7 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
             config.tracks.track_buffer_size,
             config.gpu,
             track_count,
+            math,
         )
         .unwrap_or_else(|e| panic!("random tracks: {e}"))
     });
@@ -203,7 +224,7 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
             let spawn_trace = load(path);
             let spawn = &frames(&spawn_trace)[0];
             (
-                Arc::new(World::from_scene(&scene)),
+                Arc::new(World::from_scene_with(&scene, math)),
                 vector(&spawn["position"]),
                 num(&spawn["rotation"]),
             )
@@ -219,7 +240,7 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
     } else {
         let network = match &config.init_network {
             Some(path) => Network::from_game_export(&load(path)),
-            None => rng.xavier(shape),
+            None => rng.xavier(shape, math),
         };
         assert_eq!(&network.shape, shape, "--init-network shape differs from --shape");
         Some(network)
@@ -228,7 +249,7 @@ pub(crate) fn train_scratch(config: &ScratchConfig, mode: Mode, threads: usize) 
         world,
         position,
         rotation,
-        SensorLayout::from_exports(&network_data, &model),
+        SensorLayout::from_exports(&network_data, &model, math),
         &outputs,
         settings,
         rng,

@@ -4,6 +4,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu::hip::{Gpu, GpuWorld};
 use crate::math::godot_math::F2;
+use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::physics::car::{Sensor, DT};
 use crate::track::world::{Surface, VehicleConfig, World, ASPHALT};
@@ -274,7 +275,8 @@ pub(crate) struct WorldDesc {
     pub(crate) tile_ny: i64,
     pub(crate) tiles: *const TileCell,
     pub(crate) path_points: u32,
-    pub(crate) pad0: u32,
+    /// `MathProfile::index`.
+    pub(crate) math_profile: u32,
     pub(crate) path_segments: *const [f32; 8],
     pub(crate) path_offsets: *const f64,
     pub(crate) path_grid: NearGridDesc,
@@ -319,7 +321,7 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
     use std::mem::{offset_of, size_of};
     let f: unsafe extern "C" fn(*mut u64, i32) -> i32 = gpu
         .try_symbol("altd_gpu_layout")
-        .ok_or("libaltd_gpu.so lacks altd_gpu_layout; rebuild it with gpu/build.sh")?;
+        .ok_or("libaltd_gpu.so lacks altd_gpu_layout; rebuild it with gpu/build.sh or gpu/build-cuda.*")?;
     let mut got = [0u64; 32];
     let count = unsafe { f(got.as_mut_ptr(), got.len() as i32) } as usize;
     let want = [
@@ -343,17 +345,43 @@ pub(crate) fn layout_matches(gpu: &Gpu) -> Result<(), String> {
         offset_of!(GpuAgent, recent),
         offset_of!(VehicleDesc, steering_speed),
         offset_of!(VehicleDesc, gravity),
+        offset_of!(WorldDesc, math_profile),
     ];
     if count != want.len() {
-        return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh".into());
+        return Err("libaltd_gpu.so layout table differs; rebuild it with gpu/build.sh or gpu/build-cuda.*".into());
     }
     for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
         if g != w as u64 {
             return Err(format!("GPU struct layout entry {i} differs (library {g}, Rust {w})"));
         }
     }
+    // A compiler can drop exports without failing the build, so check them up front.
+    for name in SIMULATOR_EXPORTS {
+        gpu.required_symbol::<unsafe extern "C" fn()>(name)?;
+    }
     Ok(())
 }
+
+/// The entry points `GpuWorld` and `GpuSim` call.
+#[cfg(not(target_arch = "wasm32"))]
+const SIMULATOR_EXPORTS: [&str; 16] = [
+    "altd_gpu_world_create",
+    "altd_gpu_world_free",
+    "altd_gpu_sim_create",
+    "altd_gpu_sim_set_world",
+    "altd_gpu_sim_free",
+    "altd_gpu_sim_upload",
+    "altd_gpu_sim_upload_agents",
+    "altd_gpu_sim_active_count",
+    "altd_gpu_sim_download",
+    "altd_gpu_sim_sensors",
+    "altd_gpu_sim_networks",
+    "altd_gpu_sim_novelty",
+    "altd_gpu_sim_infer",
+    "altd_gpu_sim_step",
+    "altd_gpu_sim_stats",
+    "altd_gpu_sim_window",
+];
 
 // ---- exactness helpers ----
 
@@ -694,6 +722,7 @@ pub(crate) const GRID_MARGIN: f64 = 1024.0;
 
 /// Owned host arrays behind a `WorldDesc`.
 pub struct TrackArrays {
+    math: MathProfile,
     pub surfaces: SurfaceTable,
     surface_rows: Vec<[f32; 4]>,
     default_surface: u32,
@@ -814,6 +843,7 @@ impl TrackArrays {
             .collect();
         let shape_grid = shape_grid(&shape_boxes, SHAPE_CELL, SHAPE_MARGIN);
         Ok(TrackArrays {
+            math: world.math,
             surfaces,
             surface_rows,
             default_surface,
@@ -888,7 +918,7 @@ impl TrackArrays {
             tile_ny: *ny,
             tiles: tiles.as_ptr(),
             path_points: self.path_offsets.len() as u32,
-            pad0: 0,
+            math_profile: self.math.index(),
             path_segments: self.path_rows.as_ptr(),
             path_offsets: self.path_offsets.as_ptr(),
             path_grid: NearGrid::desc(self.path_grid.as_ref()),
@@ -1668,8 +1698,16 @@ mod native_validation_tests {
         };
         let template = serde_json::from_str(include_str!("../../assets/scenes/formula_template.json")).unwrap();
         let settings = serde_json::from_str(include_str!("../../assets/random_track_settings.json")).unwrap();
-        let (_, scene) =
-            crate::track::training_tracks::training_scene_at(&template, &settings, None, 1729, 0, 0).unwrap();
+        let (_, scene) = crate::track::training_tracks::training_scene_at(
+            &template,
+            &settings,
+            None,
+            1729,
+            0,
+            0,
+            crate::math::profile::MathProfile::Proton,
+        )
+        .unwrap();
         let world = World::from_scene(&scene);
         let prepared = crate::gpu::hip::PreparedGpuWorld::new(&world).unwrap();
         let uploaded = GpuWorld::try_from_prepared(gpu, prepared).unwrap();

@@ -248,7 +248,10 @@ fn ray_tree_matches_bsp_traversal() {
     for case in generated.as_array().unwrap().iter().filter(|c| !c["result"].is_null()) {
         let track: altd_sim::track::random_track::GeneratedTrack =
             serde_json::from_value(case["result"].clone()).unwrap();
-        scenes.push((format!("generated {}", case["i"]), track.to_scene(&template)));
+        scenes.push((
+            format!("generated {}", case["i"]),
+            track.to_scene(&template, altd_sim::math::profile::MathProfile::Proton),
+        ));
     }
     for (name, scene) in &scenes {
         let world = World::from_scene(scene);

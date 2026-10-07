@@ -37,8 +37,8 @@ __device__ inline bool is_zero(Vec2 a) { return a.x == 0.0f && a.y == 0.0f; }
 // ---- vehicle ----
 
 // `godot_ease`
-__device__ inline double godot_ease(double value, double curve) {
-    return 1.0 - dpow(1.0 - py_clamp(value, 0.0, 1.0), 1.0 / curve);
+__device__ inline double godot_ease(uint32_t math, double value, double curve) {
+    return 1.0 - profile_pow(math, 1.0 - py_clamp(value, 0.0, 1.0), 1.0 / curve);
 }
 
 // `godot_math::combine`
@@ -53,13 +53,13 @@ __device__ inline Vec2 combine(Vec2 brake, Vec2 drive, float brake_max, float dr
 }
 
 // `Car::set_transform_angle`
-__device__ inline void set_transform_angle(Car& car, float angle, uint32_t& err) {
+__device__ inline void set_transform_angle(uint32_t math, Car& car, float angle, uint32_t& err) {
     float s, c;
     engine_sin_cos(angle, s, c, err);
     car.transform_angle = angle;
     car.basis_x = Vec2{c, s};
     car.basis_y = Vec2{-s, c};
-    car.rotation = native_atan2(s, c);
+    car.rotation = profile_atan2(math, s, c);
 }
 
 // ---- CollisionScratch::update_shape ----
@@ -626,12 +626,12 @@ __device__ inline StepCarry step_begin(const World& w, const VehicleDesc& v, Car
             float lateral_speed = dot(wheel_velocity, right);
             uint32_t off = spec.handbrake_off ? 1 : 0;
             if (!eased[off]) {
-                ease[off] = godot_ease(off ? 0.0 : control.handbrake, 0.3);
+                ease[off] = godot_ease(w.math_profile, off ? 0.0 : control.handbrake, 0.3);
                 eased[off] = true;
             }
             double lateral_grip = 0.20000000298023224
                 + (0.8 + (0.1 - 0.8) * ease[off])
-                    / (1.0 + dexp(((double)length(wheel_velocity) - 450.0) * 0.00800000037997961));
+                    / (1.0 + profile_exp(w.math_profile, ((double)length(wheel_velocity) - 450.0) * 0.00800000037997961));
             float effective_grip = (float)((double)v.grip * lateral_grip);
             Vec2 lateral = right * (-effective_grip * lateral_speed) * surface.grip;
             impulse = impulse + lateral;
@@ -705,7 +705,7 @@ __device__ inline bool step_end(const World& w, const VehicleDesc& v, Car& car, 
         Vec2 turned = Vec2{center.x * c - center.y * s, center.x * s + center.y * c};
         car.position = car.position + (center - turned);
     }
-    set_transform_angle(car, car.rotation + angle_delta, err);
+    set_transform_angle(w.math_profile, car, car.rotation + angle_delta, err);
     car.tick += drive ? 1 : 0;
     update_shape(v, car);
 

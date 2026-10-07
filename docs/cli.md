@@ -2,6 +2,8 @@
 
 Run commands from the repository root or an unpacked release archive; both contain `assets/`. `altd-sim --version` identifies the build, including nightly packages. `--threads N` sets the Rayon pool; the default respects CPU affinity. `--mode independent|lockstep` selects native scheduling. Both are global flags. Each command's `--help` is the complete argument reference.
 
+`--math-profile proton|win10-fma3|win11-fma3` is also global and selects the game's C runtime arithmetic independently of the CPU or GPU backend. Every build includes all three profiles. Omitted profiles use `proton` on Linux/macOS, `win10-fma3` on Windows before build 26100, and `win11-fma3` on Windows build 26100 and newer. For example, `altd-sim --math-profile win11-fma3 train-scratch ...` trains for current Windows on any supported host. [Math profiles](../math/README.md) describes the version boundaries and implementation.
+
 ## Commands and inputs
 
 | Command | Required inputs and purpose |
@@ -17,7 +19,7 @@ Run commands from the repository root or an unpacked release archive; both conta
 | `compare-network` | Positional network, trace and report; compare inference with recorded controls |
 | `compare-sensors` | Positional scene, trace, model, trajectory and report; compare sensor observations |
 | `compare-score` | Positional scene, trace and report; compare lap/score statistics |
-| `gpu-info` | Optional `--library`; load the HIP library used by `--gpu` and check its struct layouts |
+| `gpu-info` | Optional `--library`; load the GPU library used by `--gpu`, check its struct layouts and exports and, when a GPU is present, run one kernel on it |
 
 Scene and capture paths have no campaign defaults. `bench` and `train-scratch` default their sensor model to `assets/models/rally.json`. Scratch training defaults its sensor/control names to `assets/networks/rally.json`; these templates have no trained weights. The defaults are compiled into the binary, and `run.json` records them as `builtin:<path>`. Formula runs should explicitly use the Formula network/model assets and scene template.
 
@@ -96,6 +98,8 @@ target/release/altd-sim train-scratch --resume \
 
 `--generations` is the total target, including saved generations. Supply desired options again: omitted options use CLI defaults, except track seed/count retained in checkpoint metadata. An explicit `--tracks-per-generation` replaces the saved count. Preserve scene and track settings to reproduce the original sequence. Saved networks/RNG take precedence over a new `--seed` or `--init-network` during resume.
 
+`train-scratch --resume` also retains the checkpoint's math profile; an explicit different `--math-profile` is rejected. Checkpoints predating profiles use `proton`. New `run.json` and checkpoint metadata record `math_profile` so moving a run to another host does not change its arithmetic.
+
 Shape must match every checkpoint layer; matching parameter counts alone is insufficient. Population reductions keep the first networks, while expansions repeat them in order. Mutation uses the newly supplied schedule at the restored generation. Earlier checkpoints without shape/population recover those fields from adjacent `run.json` before updating current options.
 
 `--save-final-candidate` writes the complete-batch fitness leader before breeding, with lowest-index tie breaking. It preserves exact weights, ordered names, generation and reward metadata without consuming RNG. A completed checkpoint confirms its filename/hash/generation. A candidate without that confirmation is not a completed-stage result.
@@ -105,5 +109,7 @@ Shape must match every checkpoint layer; matching parameter counts alone is insu
 ## Frozen evaluation
 
 `evaluate` reads a version-1 suite containing `vehicle`, `options` and distinct `tracks`. Every track specifies relative scene/spawn filenames, their SHA-256 hashes and a finite tick limit. Options specify CPU backend, inference batch count and elimination. The evaluator validates finite network parameters, shape, ordered sensor/control names, vehicle compatibility and input hashes.
+
+A suite may set `options.math_profile` to a supported profile. An explicit CLI profile must agree with it. Without either, evaluation detects the host's profile; the report records the effective `math_profile`.
 
 Each track gets fresh state, contacts, controls, sensors and statistics. The evaluator never breeds or modifies training checkpoints/logs. Its atomic report records candidate/suite/simulator hashes, per-track score, progress, lap completion, optional best lap, collisions and executed ticks. An interrupted run does not publish a successful report. Existing tests build fully contained suites from fixed generated tracks.
