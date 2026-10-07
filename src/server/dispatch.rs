@@ -121,6 +121,10 @@ impl Connection {
                 self.session = Some(session);
                 ok(reply)
             }
+            "start" => {
+                self.session()?.start()?;
+                ok(Value::Null)
+            }
             "startWithShape" => {
                 let shape = arg(args, "shape")?
                     .as_array()

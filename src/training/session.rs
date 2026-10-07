@@ -104,7 +104,7 @@ pub struct Session {
     pub runner: TrainingRunner,
     #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     pub(crate) options: SessionOptions,
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     network: Value,
     /// Vehicle export retained to reject changes during track replacement.
     #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
@@ -280,7 +280,7 @@ impl Session {
             runner,
             #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
             options,
-            #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+            #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
             network: network.clone(),
             #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
             vehicle: scene["vehicle"].clone(),
@@ -293,7 +293,7 @@ impl Session {
     }
 
     /// The network export's `shape` (or `summary.shape`), if any.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub(crate) fn template_shape(&self) -> Option<Vec<usize>> {
         let summary = self.network.get("summary").unwrap_or(&self.network);
         summary
@@ -306,11 +306,12 @@ impl Session {
 
     /// Installs the first generation: mutations of the export's weights when
     /// it has any, else of a Xavier network of its shape.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
-    pub(crate) fn start(&mut self) -> Result<(), String> {
+    #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
+    pub fn start(&mut self) -> Result<(), String> {
         if self.network.get("weights").is_some() {
+            let shape = self.template_shape().ok_or("missing or invalid network shape")?;
+            self.check_shape(&shape)?;
             let seed = Network::try_from_game_export(&self.network)?;
-            self.check_shape(&seed.shape)?;
             let record = self.runner_mut()?.start_traced(&seed);
             self.record(record);
             self.networks_changed();

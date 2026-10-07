@@ -120,11 +120,15 @@ impl Client {
     }
 
     fn create(&mut self, options: &Value) -> Value {
+        self.create_with(&generated::network("formula"), options)
+    }
+
+    fn create_with(&mut self, network: &Value, options: &Value) -> Value {
         self.call(
             "create",
             json!({
                 "scene": generated::scene("formula", 0).to_string(),
-                "network": generated::network("formula").to_string(),
+                "network": network.to_string(),
                 "model": generated::model("formula").to_string(),
                 "options": options,
             }),
@@ -135,11 +139,15 @@ impl Client {
 /// A local session with the options of a remote one, on the server's
 /// default math profile unless the options name one.
 fn direct(options: &Value) -> Session {
+    direct_with(&generated::network("formula"), options)
+}
+
+fn direct_with(network: &Value, options: &Value) -> Session {
     let mut options = SessionOptions::from_json(&options.to_string()).unwrap();
     options.math_profile.get_or_insert(MathProfile::Proton);
     Session::new(
         &generated::scene("formula", 0),
-        &generated::network("formula"),
+        network,
         &generated::model("formula"),
         options,
     )
@@ -306,6 +314,139 @@ fn a_remote_session_matches_a_direct_session() {
         client.call_raw("checkpointBytes", Value::Null, None).1,
         session.checkpoint_bytes().unwrap()
     );
+}
+
+/// `start` uses the supplied network for both optimizers, reproducing native
+/// checkpoints and subsequent generations exactly.
+#[test]
+fn start_seeds_the_first_generation_from_the_created_network() {
+    let export = generated::network_export("formula");
+    let seed = Network::from_game_export(&export);
+    let address = start();
+    for (settings, magic) in [
+        (
+            json!({"algorithm": "ga", "selection_size": 2, "mutation_rate": 0.0, "weight_decay": 0.0}),
+            b"ALTDCKP2",
+        ),
+        (
+            json!({"algorithm": "ars", "ars": {"elite_count": 1, "nu": 0.02, "max_weight": 0.0}}),
+            b"ALTDCKP3",
+        ),
+    ] {
+        let options = json!({"population": 6, "seed": 3, "settings": settings});
+        let mut client = Client::connect(address);
+        let mut session = direct_with(&export, &options);
+        client.create_with(&export, &options);
+        let (reply, _) = client.call_raw("start", Value::Null, None);
+        assert!(reply.get("error").is_none(), "{reply}");
+        session.start().unwrap();
+        assert_eq!(reply["state"]["started"], true);
+        assert_eq!(reply["state"]["population"], 6);
+        assert_eq!(reply["state"]["checkpointGeneration"], 0);
+        for index in 0..6 {
+            let network: Value =
+                serde_json::from_str(client.call("networkJson", json!({"index": index})).as_str().unwrap()).unwrap();
+            let network = Network::from_game_export(&network);
+            assert_eq!(network.shape, seed.shape);
+            assert_eq!(
+                bits(&network.params),
+                bits(&session.runner.agents[index].network.params)
+            );
+            // GA with mutation/decay disabled preserves every seed. ARS's
+            // first car is the unchanged search point, before its probes.
+            if settings["algorithm"] == "ga" || index == 0 {
+                assert_eq!(bits(&network.params), bits(&seed.params));
+            }
+        }
+        let checkpoint = client.call_raw("checkpointBytes", Value::Null, None).1;
+        assert_eq!(&checkpoint[..8], magic);
+        assert_eq!(checkpoint, session.checkpoint_bytes().unwrap());
+        assert_eq!(
+            client.call("advanceGeneration", json!({"timeLimitTicks": 120})),
+            json!(session.advance_generation(120).unwrap())
+        );
+        let (preserved, rewards) = session.next_generation().unwrap();
+        assert_eq!(
+            client.call("nextGeneration", Value::Null),
+            json!({"preservedCount": preserved, "rewards": rewards})
+        );
+        assert_eq!(
+            client.call_raw("checkpointBytes", Value::Null, None).1,
+            session.checkpoint_bytes().unwrap()
+        );
+    }
+}
+
+#[test]
+fn start_uses_the_template_shape_and_recovers_when_it_is_missing() {
+    let options = json!({"population": 6, "seed": 3});
+    let address = start();
+    for nested in [false, true] {
+        let mut export = generated::network("formula");
+        if nested {
+            export["summary"] = json!({"shape": [20, 8, 5]});
+        } else {
+            export["shape"] = json!([20, 8, 5]);
+        }
+        let mut client = Client::connect(address);
+        client.create_with(&export, &options);
+        client.call("start", Value::Null);
+        let mut session = direct(&options);
+        session.start_with_shape(&[20, 8, 5]).unwrap();
+        assert_eq!(
+            client.call_raw("checkpointBytes", Value::Null, None).1,
+            session.checkpoint_bytes().unwrap()
+        );
+    }
+    let mut bare = Client::connect(address);
+    bare.create(&options);
+    let error = bare.error("start", Value::Null);
+    assert!(error.contains("start_with_shape"), "{error}");
+    bare.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    assert!(bare.call("generationSummary", Value::Null).is_object());
+}
+
+#[test]
+fn start_rejects_malformed_weights_without_starting_or_consuming_rng() {
+    let options = json!({"population": 6, "seed": 3});
+    let export = generated::network_export("formula");
+    let address = start();
+    for (name, value) in [
+        ("weights", Value::Null),
+        ("weights", json!([])),
+        ("biases", Value::Null),
+        ("biases", json!([])),
+        ("shape", json!([20, u64::MAX, 5])),
+        // This fits the buffer arithmetic but must reject its tiny weight
+        // arrays without trying to reserve the claimed multi-terabyte size.
+        ("shape", json!([20, 1u64 << 40, 5])),
+        ("shape", json!([19, 8, 5])),
+    ] {
+        let mut invalid = export.clone();
+        invalid[name] = value;
+        let mut client = Client::connect(address);
+        client.create_with(&invalid, &options);
+        let error = client.error("start", Value::Null);
+        assert!(!error.is_empty(), "{name}: {invalid}");
+        assert!(client
+            .error("advance", json!({"ticks": 1, "stopWhenInactive": false}))
+            .contains("not started"));
+        client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+        let mut session = direct(&options);
+        session.start_with_shape(&[20, 8, 5]).unwrap();
+        assert_eq!(
+            client.call_raw("checkpointBytes", Value::Null, None).1,
+            session.checkpoint_bytes().unwrap()
+        );
+    }
+    let mut invalid = export;
+    invalid["weights"][0][0][0] = json!("bad parameter");
+    let mut client = Client::connect(address);
+    client.create_with(&invalid, &options);
+    assert!(client
+        .error("start", Value::Null)
+        .contains("parameters must be numbers"));
+    client.call("startWithShape", json!({"shape": [20, 8, 5]}));
 }
 
 /// A session's own math profile overrides the server's, and its

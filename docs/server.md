@@ -63,6 +63,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | Operation | `args` | `ok` |
 | --- | --- | --- |
 | `create` | `scene`, `network`, `model` as JSON strings; optional `options` as a SessionOptions object | `{backend, backendNote, mathProfile}` |
+| `start` | None; seeds training from the `create` network export | `null` |
 | `startWithShape` | `shape` as an array of unsigned 32-bit integers | `null` |
 | `restoreCheckpointBytes` | Binary payload, no arguments required | `null` |
 | `restoreCheckpointJson` | `json` as a checkpoint JSON string | `null` |
@@ -77,6 +78,8 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | `checkpointBytes` | None | `null`, with a binary payload |
 
 Call `create` once, then start or restore before advancing. `options.backend` accepts `"cpu"`, the default, or `"hip"`. `options.mathProfile` accepts `"proton"`, `"win10-fma3"` or `"win11-fma3"` and defaults to the server's profile; checkpoints restore only into sessions of the profile they were made with. Other SessionOptions fields retain their regular defaults and unknown fields are rejected. A second successful `create` on the same connection is an error. Unknown operations and malformed JSON return errors while leaving the connection usable.
+
+`start` uses the export's `weights` and `biases` as the seed, matching `train-scratch --init-network` and the browser simulator. GA breeds mutations of that seed; ARS samples around it as its initial search point. Without weights, `start` draws a Xavier seed from `shape` (or `summary.shape`). Without either weights or a shape, use `startWithShape`. Malformed weighted exports return an error before starting and leave the connection usable.
 
 ### Binary frames
 

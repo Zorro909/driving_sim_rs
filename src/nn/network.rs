@@ -135,7 +135,8 @@ impl Network {
             return Err("the weight and bias layer count does not match shape".into());
         }
         let number = |v: &Value| v.as_f64().ok_or("network parameters must be numbers");
-        let mut params = Vec::with_capacity(parameter_count(&shape));
+        // Validate the supplied dimensions before allocating their claimed size.
+        let mut params = Vec::new();
         for (layer, (matrix, bias)) in weights.iter().zip(biases).enumerate() {
             let (matrix, bias) = (
                 matrix.as_array().ok_or("weights must be nested arrays")?,
