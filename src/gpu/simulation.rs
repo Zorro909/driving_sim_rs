@@ -1026,6 +1026,16 @@ pub fn sensor_desc(sensor: &Sensor) -> SensorDesc {
     }
 }
 
+/// `desc` with a ray sensor's local end point (`Car::ray_local`) in `offset`:
+/// the kernels read it instead of evaluating `math`'s sine and cosine per car.
+pub(crate) fn with_ray_offset(mut desc: SensorDesc, math: MathProfile) -> SensorDesc {
+    if desc.kind == 0 {
+        let angle = (desc.a - 90.0f32) * (std::f32::consts::PI / 180.0);
+        desc.offset = [math.cos(angle) * desc.b, math.sin(angle) * desc.b];
+    }
+    desc
+}
+
 // ---- simulation handle ----
 
 /// `ReadMask` of gpu/sim/sensors.h: the cars whose controls update this tick.
@@ -1222,6 +1232,10 @@ impl<'a> GpuSim<'a> {
             u32,
         ) -> *mut c_void = gpu.required_symbol("altd_gpu_sim_create")?;
         let free = gpu.required_symbol("altd_gpu_sim_free")?;
+        let sensors: Vec<_> = sensors
+            .iter()
+            .map(|&desc| with_ray_offset(desc, world.arrays.math))
+            .collect();
         let handle = unsafe { create(world.handle(), vehicle, sensors.as_ptr(), sensors.len() as u32, count) };
         if handle.is_null() {
             return Err("altd_gpu_sim_create failed to allocate the HIP simulator".into());

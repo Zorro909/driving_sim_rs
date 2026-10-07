@@ -162,13 +162,7 @@ s = s.replace(
 s = s.replace("Vec2 (*out)[2]", "__ref_Pairs out")
 s = s.replace('static_assert(MAX_PAIRS <= 32, "pair mask");', "")
 texts["step.h"] = s
-s = texts["sensors.h"]
-s = s.replace(
-    "float angle = (s.a - 90.0f) * (PI_F / 180.0f);\n            Vec2 local = Vec2{profile_cos(w.math_profile, angle, err) * s.b, profile_sin(w.math_profile, angle, err) * s.b};",
-    "Vec2 local = s.offset;",
-)
-assert "profile_cos" not in s and "profile_sin" not in s
-texts["sensors.h"] = s
+assert "profile_cos" not in texts["sensors.h"] and "profile_sin" not in texts["sensors.h"]
 s = texts["track.h"].replace("int64_t", "int32_t").replace("sat_i64", "sat_i32")
 s = (
     s.replace("const TileCell* tile_at", "int tile_at")

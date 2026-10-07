@@ -475,8 +475,6 @@ const UCRT_POW11_EXP: array<U64, 512> = array<U64, 512>(U64(0x00000000u, 0x00000
 
 const PI_F: f32 = 3.1415927410125732f;
 
-const FRAC_PI_2_F: f32 = 1.5707963705062866f;
-
 fn load_World(o: u32) -> World { return World(world_data[(o + 0u)], world_data[(o + 1u)], world_data[(o + 2u)], bitcast<f32>(world_data[(o + 3u)]), world_data[(o + 4u)], world_data[(o + 5u)], world_data[(o + 6u)], world_data[(o + 7u)], world_data[(o + 8u)], i32(world_data[(o + 9u)]), i32(world_data[(o + 10u)]), i32(world_data[(o + 11u)]), i32(world_data[(o + 12u)]), world_data[(o + 13u)], world_data[(o + 14u)], world_data[(o + 15u)], world_data[(o + 16u)], world_data[(o + 17u)], load_NearGrid((o + 18u)), world_data[(o + 28u)], bitcast<f32>(world_data[(o + 29u)]), world_data[(o + 30u)], world_data[(o + 31u)], world_data[(o + 32u)], load_NearGrid((o + 34u)), world_data[(o + 44u)], world_data[(o + 45u)], world_data[(o + 46u)], world_data[(o + 47u)], world_data[(o + 48u)], load_NearGrid((o + 50u)), U64(world_data[(o + 60u)], world_data[(o + 60u) + 1u]), world_data[(o + 62u)]); }
 
 fn load_NearGrid(o: u32) -> NearGrid { return NearGrid(U64(world_data[(o + 0u)], world_data[(o + 0u) + 1u]), U64(world_data[(o + 2u)], world_data[(o + 2u) + 1u]), U64(world_data[(o + 4u)], world_data[(o + 4u) + 1u]), world_data[(o + 6u)], world_data[(o + 7u)], world_data[(o + 8u)], world_data[(o + 9u)]); }
@@ -2982,6 +2980,16 @@ return select(normalized(sim_car.basis_x), vec2<f32>(bitcast<f32>(0x00000000u), 
 
 }
 
+fn cached_front() -> vec2<f32> {
+
+
+var r: vec2<f32> = cached_right();
+var s: f32 = bitcast<f32>(0xbf7fffffu ^ params.pad);
+var co: f32 = bitcast<f32>(0xb3bbbd2eu ^ params.pad);
+return vec2<f32>(fp_sub(fp_mul(r.x, co), fp_mul(r.y, s)), fp_add(fp_mul(r.x, s), fp_mul(r.y, co)));
+
+}
+
 fn sensor_path_offset() -> f32 {
 
 
@@ -3020,13 +3028,13 @@ case S_SPEED: {
 return f64_from_f32(rclamp(fp_div(length(sim_car.velocity), sim_vehicle.max_velocity_f), bitcast<f32>(0x00000000u), bitcast<f32>(0x3f800000u)));
 }
 case S_VELOCITY_FRONT: {
-return signed_sensor(dot(actual_velocity(), rotated(cached_right(), fp_div(fp_neg(PI_F), bitcast<f32>(0x40000000u)), err)), sim_vehicle.max_velocity_f);
+return signed_sensor(dot(actual_velocity(), cached_front()), sim_vehicle.max_velocity_f);
 }
 case S_VELOCITY_SIDE: {
 return signed_sensor(dot(actual_velocity(), cached_right()), fp_div(sim_vehicle.max_velocity_f, bitcast<f32>(0x40000000u)));
 }
 case S_ACCELERATION_FRONT: {
-return signed_sensor(dot(actual_acceleration(), rotated(cached_right(), fp_neg(FRAC_PI_2_F), err)), s.a);
+return signed_sensor(dot(actual_acceleration(), cached_front()), s.a);
 }
 case S_ACCELERATION_SIDE: {
 return signed_sensor(dot(actual_acceleration(), cached_right()), s.a);
@@ -3062,7 +3070,7 @@ if ((sim_world.path_points < u32(2i))) {
 return F64(0x00000000u, 0x00000000u);
 }
 var tangent: vec2<f32> = normalized(curve_direction(here, err));
-var forward: vec2<f32> = normalized(rotated(cached_right(), fp_neg(FRAC_PI_2_F), err));
+var forward: vec2<f32> = normalized(cached_front());
 return f64_from_f32(rclamp(dot(forward, tangent), fp_neg(bitcast<f32>(0x3f800000u)), bitcast<f32>(0x3f800000u)));
 }
 
