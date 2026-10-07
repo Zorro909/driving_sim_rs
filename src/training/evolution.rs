@@ -187,6 +187,14 @@ impl EvolutionSettings {
 
     /// `from_mcp`, reporting malformed settings instead of panicking.
     pub fn try_from_mcp(data: &Value) -> Result<EvolutionSettings, String> {
+        Self::try_from_mcp_with_population(data, None)
+    }
+
+    /// Validate creation settings after applying the embedding host's population override.
+    pub(crate) fn try_from_mcp_with_population(
+        data: &Value,
+        population: Option<usize>,
+    ) -> Result<EvolutionSettings, String> {
         let data = data.get("settings").unwrap_or(data);
         let mut s = EvolutionSettings::default();
         let bad = |key: &str| format!("invalid evolution settings: bad {key}");
@@ -251,6 +259,9 @@ impl EvolutionSettings {
                     })
                 })
                 .collect::<Result<_, String>>()?;
+        }
+        if let Some(population) = population {
+            s.population = population;
         }
         s.validate()?;
         Ok(s)
