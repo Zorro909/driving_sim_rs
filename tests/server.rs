@@ -789,25 +789,48 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
         .error("restoreCheckpointJson", json!({"json": checkpoint.to_string()}))
         .contains("state"));
 
-    // Both binary checkpoint formats carry the same JSON RNG inside an envelope.
-    for parent_format in [false, true] {
-        if parent_format {
+    // All binary checkpoint formats carry the same JSON RNG inside an envelope.
+    // Population options override settings before ARS's minimum-size validation.
+    let mut ars = direct(&json!({
+        "population": 16,
+        "settings": {"algorithm": "ars", "population": 4},
+    }));
+    ars.start_with_shape(&[20, 8, 5]).unwrap();
+    let ars_bytes = ars.checkpoint_bytes().unwrap();
+    assert_eq!(&ars_bytes[..8], b"ALTDCKP3");
+    let mut ars_client = Client::connect(address);
+    ars_client.create(&json!({
+        "population": 16,
+        "settings": {"algorithm": "ars", "population": 4},
+    }));
+    ars_client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    assert_eq!(ars_client.call_raw("checkpointBytes", Value::Null, None).1, ars_bytes);
+
+    for format in [1, 2, 3] {
+        if format == 2 {
             original.advance_generation(1).unwrap();
             original.next_generation().unwrap();
         }
-        let bytes = if parent_format {
-            original.checkpoint_bytes().unwrap()
-        } else {
-            client.call("restoreCheckpointJson", json!({"json": valid_checkpoint.to_string()}));
-            client.call_raw("checkpointBytes", Value::Null, None).1
+        let bytes = match format {
+            1 => {
+                client.call("restoreCheckpointJson", json!({"json": valid_checkpoint.to_string()}));
+                client.call_raw("checkpointBytes", Value::Null, None).1
+            }
+            2 => original.checkpoint_bytes().unwrap(),
+            3 => ars_bytes.clone(),
+            _ => unreachable!(),
         };
+        let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bytes));
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(client.call_raw("checkpointBytes", Value::Null, None).1, bytes);
         let word = |i: usize| u32::from_le_bytes(bytes[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
         let layers = word(3);
         let rng_len = word(4);
-        let rng_at = if parent_format {
-            48 + 4 * (layers + word(6) + word(7))
-        } else {
-            28 + 4 * layers
+        let rng_at = match format {
+            1 => 28 + 4 * layers,
+            2 => 48 + 4 * (layers + word(6) + word(7)),
+            3 => 36 + 4 * layers,
+            _ => unreachable!(),
         };
         let old_end = (rng_at + rng_len).next_multiple_of(8);
         let mut rng: Value = serde_json::from_slice(&bytes[rng_at..rng_at + rng_len]).unwrap();
@@ -820,8 +843,9 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
         bad.extend_from_slice(&bytes[old_end..]);
         let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bad));
         assert!(reply["error"].as_str().unwrap().contains("state"), "{reply}");
-        // A rejected restore did not destroy the existing population.
-        assert!(!client.call_raw("checkpointBytes", Value::Null, None).1.is_empty());
+        // A rejected restore preserves the exact checkpoint and a usable session.
+        assert_eq!(client.call_raw("checkpointBytes", Value::Null, None).1, bytes);
+        client.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
     }
     assert!(stop.0.try_wait().unwrap().is_none());
     assert_eq!(Client::connect(address).hello["protocol"], 1);

@@ -223,17 +223,14 @@ impl Session {
             return Err("spawn pose must be finite".into());
         }
         strings(&network["inputs"], "network inputs")?;
-        let mut settings = options
-            .settings
-            .as_ref()
-            .map_or_else(|| Ok(EvolutionSettings::default()), EvolutionSettings::try_from_mcp)?;
+        let mut settings = options.settings.as_ref().map_or_else(
+            || Ok(EvolutionSettings::default()),
+            |data| EvolutionSettings::try_from_mcp_with_population(data, options.population),
+        )?;
         if let Some(population) = options.population {
             settings.population = population;
         }
-        if settings.population == 0 {
-            return Err("population must be positive".into());
-        }
-        settings.validate_algorithm()?;
+        settings.validate()?;
         let math = options.math_profile.unwrap_or_else(MathProfile::detect);
         let world = Arc::new(World::from_scene_with(scene, math));
         let layout = SensorLayout::try_from_exports(network, model, math)?;
@@ -1298,7 +1295,7 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
             nu,
             max_weight,
         },
-        rng: TrainingRandom::from_json(&rng),
+        rng: TrainingRandom::try_from_json(&rng)?,
         math: rng_math(&rng)?,
     };
     record.validate()?;
