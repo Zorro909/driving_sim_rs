@@ -100,13 +100,15 @@ impl Connection {
                 let network = budget::parse(string_arg(args, "network")?, "network")?;
                 let model = budget::parse(string_arg(args, "model")?, "model")?;
                 let options = &args["options"];
-                plan.population = budget::settings(&options["settings"], 300)?;
-                if let Some(n) = options.get("population") {
-                    plan.population = n
-                        .as_u64()
-                        .and_then(|n| usize::try_from(n).ok())
-                        .ok_or("invalid population")?;
-                }
+                let population = options
+                    .get("population")
+                    .map(|n| {
+                        n.as_u64()
+                            .and_then(|n| usize::try_from(n).ok())
+                            .ok_or("invalid population")
+                    })
+                    .transpose()?;
+                plan.population = budget::settings(&options["settings"], 300, population)?;
                 if options.get("batchCount").and_then(Value::as_u64).is_some_and(|n| n > 8) {
                     return Err("server batchCount must be 1..8".into());
                 }
@@ -146,7 +148,7 @@ impl Connection {
                 // This operation uses serde defaults, not from_mcp's wrapper.
                 let parsed: crate::training::evolution::EvolutionSettings =
                     serde_json::from_value(settings.clone()).map_err(|e| format!("invalid evolution settings: {e}"))?;
-                budget::settings(&settings, parsed.population)?;
+                budget::settings(&settings, parsed.population, None)?;
                 plan.population = plan.population.max(parsed.population);
             }
             "replaceTrack" => {

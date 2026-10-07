@@ -109,7 +109,11 @@ pub(super) fn shape_numbers(shape: &[usize]) -> Result<usize, String> {
     Ok(count)
 }
 
-pub(super) fn settings(v: &Value, default_population: usize) -> Result<usize, String> {
+pub(super) fn settings(
+    v: &Value,
+    default_population: usize,
+    population_override: Option<usize>,
+) -> Result<usize, String> {
     let v = v.get("settings").unwrap_or(v);
     let integer = |v: &Value, key: &str, default: usize, max: usize| -> Result<usize, String> {
         match v.get(key) {
@@ -128,7 +132,11 @@ pub(super) fn settings(v: &Value, default_population: usize) -> Result<usize, St
     if v.get("rewards").and_then(Value::as_array).is_some_and(|r| r.len() > 13) {
         return Err("too many server reward terms".into());
     }
-    let population = integer(v, "population", default_population, MAX_POPULATION)?;
+    let population = match population_override {
+        Some(n) if n > MAX_POPULATION => return Err(format!("population exceeds server limit {MAX_POPULATION}")),
+        Some(n) => n,
+        None => integer(v, "population", default_population, MAX_POPULATION)?,
+    };
     if population == 0 {
         return Err("population must be positive".into());
     }
@@ -499,18 +507,19 @@ mod tests {
     fn retained_ars_settings_follow_server_count_limits() {
         for algorithm in ["ga", "ars"] {
             assert_eq!(
-                settings(&json!({"algorithm":algorithm,"ars":{"elite_count":2}}), 16).unwrap(),
+                settings(&json!({"algorithm":algorithm,"ars":{"elite_count":2}}), 16, None).unwrap(),
                 16
             );
             assert!(settings(
                 &json!({"algorithm":algorithm,"ars":{"elite_count":MAX_POPULATION + 1}}),
-                16
+                16,
+                None
             )
             .unwrap_err()
             .contains("elite_count"));
         }
-        assert!(settings(&json!({"ars":{"elite_count":-1}}), 16).is_err());
-        assert!(settings(&json!({"ars":{"elite_count":0.5}}), 16).is_err());
+        assert!(settings(&json!({"ars":{"elite_count":-1}}), 16, None).is_err());
+        assert!(settings(&json!({"ars":{"elite_count":0.5}}), 16, None).is_err());
     }
 
     #[test]
@@ -551,7 +560,7 @@ mod tests {
         }
         .bytes()
         .is_err());
-        assert!(settings(&json!({"population": u64::MAX}), 300).is_err());
+        assert!(settings(&json!({"population": u64::MAX}), 300, None).is_err());
     }
     #[test]
     fn admission_is_shared_and_releases_after_failure_or_disconnect() {

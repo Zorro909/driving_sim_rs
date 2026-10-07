@@ -1219,3 +1219,35 @@ fn retained_ars_settings_are_limited_before_session_mutation() {
         b"ALTDCKP3"
     );
 }
+
+#[test]
+fn population_override_is_applied_before_server_admission() {
+    for underlying in [0, 32_769] {
+        let options = json!({
+            "population":16,
+            "settings":{"algorithm":"ars","population":underlying,"ars":{"elite_count":2}},
+        });
+        let mut client = Client::connect(start());
+        client.create(&options);
+        client.call("startWithShape", json!({"shape":[20,8,5]}));
+        assert_eq!(
+            client.call_raw("generationSummary", Value::Null, None).0["state"]["population"],
+            16
+        );
+    }
+    let mut client = Client::connect(start());
+    for options in [
+        json!({"population":32_769,"settings":{"population":4}}),
+        json!({"population":16,"settings":{"population":0,"selection_size":32_769}}),
+        json!({"population":16,"settings":{"population":0,"ars":{"elite_count":32_769}}}),
+    ] {
+        let request = json!({
+            "scene":generated::scene("formula",0).to_string(),
+            "network":generated::network("formula").to_string(),
+            "model":generated::model("formula").to_string(),
+            "options":options,
+        });
+        assert!(client.error("create", request).contains("limit"));
+    }
+    client.create(&json!({"population":16}));
+}
