@@ -134,6 +134,7 @@ impl SensorLayout {
             if !layout.names.iter().map(String::as_str).eq(inputs) {
                 return Err("ordered sensor inputs differ from network".into());
             }
+            layout.validate_rays()?;
             return Ok(layout);
         }
         let vision: Vec<(f64, f64)> = model["vision"]
@@ -180,7 +181,20 @@ impl SensorLayout {
                     .ok_or_else(|| format!("unknown sensor: {name}")),
             })
             .collect::<Result<_, _>>()?;
-        Ok(SensorLayout { names, sensors })
+        let layout = SensorLayout { names, sensors };
+        layout.validate_rays()?;
+        Ok(layout)
+    }
+
+    fn validate_rays(&self) -> Result<(), String> {
+        for sensor in &self.sensors {
+            if let Sensor::Raycast { degrees, length } = sensor {
+                if !(*degrees as f32).is_finite() || !(*length as f32).is_finite() || (*length as f32) <= 0.0 {
+                    return Err("ray angle must be finite and length positive".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn read_into(&self, world: &World, car: &Car, scratch: &mut SensorScratch, out: &mut Vec<f64>) {

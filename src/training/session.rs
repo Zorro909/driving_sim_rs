@@ -237,6 +237,18 @@ impl Session {
         let math = options.math_profile.unwrap_or_else(MathProfile::detect);
         let world = Arc::new(World::from_scene_with(scene, math));
         let layout = SensorLayout::try_from_exports(network, model, math)?;
+        if layout
+            .sensors
+            .iter()
+            .any(|s| matches!(s, crate::physics::car::Sensor::WheelAngle))
+            && !scene["vehicle"]["wheels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["steering"].as_bool() == Some(true))
+        {
+            return Err("wheel angle sensor requires a steering wheel".into());
+        }
         let mut runner = TrainingRunner::new(
             world,
             V2::new(spawn.position[0], spawn.position[1]),
@@ -996,6 +1008,12 @@ fn read_population(bytes: &[u8]) -> Result<PopulationCheckpoint, String> {
         0
     };
     let data = bytes.get(params_at..).ok_or_else(invalid)?;
+    if data
+        .chunks_exact(8)
+        .any(|p| !f64::from_le_bytes(p.try_into().unwrap()).is_finite())
+    {
+        return Err("non-finite checkpoint parameter".into());
+    }
     let expected = population.checked_mul(size).and_then(|n| n.checked_mul(8));
     if expected != Some(data.len()) {
         return Err(format!(
@@ -1120,6 +1138,12 @@ fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
     let size = checked_parameter_count(&shape).ok_or_else(invalid)?;
     let stride = size.checked_mul(8).ok_or_else(invalid)?;
     let data = bytes.get(rates_at + 16..).ok_or_else(invalid)?;
+    if data
+        .chunks_exact(8)
+        .any(|p| !f64::from_le_bytes(p.try_into().unwrap()).is_finite())
+    {
+        return Err("non-finite checkpoint parameter".into());
+    }
     if parents.checked_mul(stride) != Some(data.len()) {
         return Err(format!(
             "the checkpoint holds {} bytes of parameters, {parents} networks of shape {shape:?} need more or fewer",

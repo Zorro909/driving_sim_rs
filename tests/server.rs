@@ -759,6 +759,18 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
             )
         )
         .contains("selection"));
+    let mut bad_model = model.clone();
+    bad_model["vision"][0]["length"] = json!(-1);
+    assert!(client
+        .error("create", request(&scene, &network, &bad_model, json!({})))
+        .contains("ray"));
+    let mut bad_wheels = scene.clone();
+    for w in bad_wheels["vehicle"]["wheels"].as_array_mut().unwrap() {
+        w["steering"] = json!(false);
+    }
+    assert!(client
+        .error("create", request(&bad_wheels, &network, &model, json!({})))
+        .contains("steering wheel"));
     client.create(&json!({"population": 4}));
     client.call("startWithShape", json!({"shape": [20, 8, 5]}));
     assert!(!client.error("replaceTrack", json!({"scene": "{}"})).is_empty());

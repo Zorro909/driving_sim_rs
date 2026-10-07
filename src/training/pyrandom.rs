@@ -70,6 +70,9 @@ impl PyRandom {
             None | Some(serde_json::Value::Null) => None,
             Some(v) => Some(f64::from_bits(v.as_u64().ok_or("invalid rng gaussian bits")?)),
         };
+        if gauss_next.is_some_and(|n| !n.is_finite()) {
+            return Err("invalid rng gaussian value".into());
+        }
         Ok(PyRandom {
             state: words.try_into().map_err(|_| "invalid rng state")?,
             index,
@@ -365,5 +368,23 @@ mod tests {
             assert_eq!(actual.to_json(), expected.to_json());
             assert_eq!(actual.randrange(57), expected.randrange(57));
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn malformed_words_indices_and_gaussian_bits_are_rejected() {
+        let valid = PyRandom::new(7).to_json();
+        let mut bad = valid.clone();
+        bad["state"][0] = serde_json::json!(u64::MAX);
+        assert!(PyRandom::try_from_json(&bad).is_err());
+        bad = valid.clone();
+        bad["index"] = serde_json::json!(625);
+        assert!(PyRandom::try_from_json(&bad).is_err());
+        bad = valid;
+        bad["gauss_next_bits"] = serde_json::json!(f64::NAN.to_bits());
+        assert!(PyRandom::try_from_json(&bad).is_err());
     }
 }
