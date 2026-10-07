@@ -25,9 +25,9 @@ pub const DEFAULT_PORT: u16 = 47800;
 pub const DEFAULT_ORIGIN: &str = "https://drivinglab.jectrum.de";
 /// The WebSocket endpoint.
 pub const PATH: &str = "/v1";
-/// Finite transport ceilings, matching Tungstenite's supported defaults.
+/// Finite transport ceilings independent of browser continuation framing.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = MAX_MESSAGE_BYTES;
 /// Includes sockets that have not yet completed the handshake.
 pub const MAX_CONNECTIONS: usize = 64;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
