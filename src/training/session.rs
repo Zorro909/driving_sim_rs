@@ -210,7 +210,7 @@ impl Session {
         let mut settings = options
             .settings
             .as_ref()
-            .map_or_else(EvolutionSettings::default, EvolutionSettings::from_mcp);
+            .map_or_else(|| Ok(EvolutionSettings::default()), EvolutionSettings::try_from_mcp)?;
         if let Some(population) = options.population {
             settings.population = population;
         }
@@ -567,6 +567,8 @@ impl Session {
             ));
         }
         agent.network = network;
+        // The optimizer's directions describe the population it produced, not this car.
+        self.runner.optimizer.invalidate();
         self.networks_changed();
         Ok(())
     }
@@ -1672,6 +1674,15 @@ mod tests {
             .unwrap()
             .contains("unknown algorithm"));
         assert!(bad(r#"{"population": 16, "settings": {"algorithm": "ars", "ars": {"nu": 0}}}"#).is_some());
+        for malformed in [
+            r#"{"algorithm": "ars", "ars": {"bogus": 1}}"#,
+            r#"{"algorithm": "ars", "ars": {"nu": "high"}}"#,
+            r#"{"algorithm": 3}"#,
+            r#"{"rewards": [{"metric": 1, "weight": 100}]}"#,
+        ] {
+            let options = format!(r#"{{"population": 16, "settings": {malformed}}}"#);
+            assert!(bad(&options).is_some(), "{malformed}");
+        }
         let mut s = generated_session(ARS_OPTIONS);
         assert!(s
             .set_evolution_settings(r#"{"algorithm": "ars", "population": 3}"#)

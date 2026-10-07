@@ -466,8 +466,17 @@ impl TrainingRunner {
         config: &mut crate::track::random_track::RandomTrackConfig,
         track_state: &mut [u64; 4],
     ) -> Result<(Generation, crate::track::random_track::GeneratedTrack), &'static str> {
+        // A failed track leaves the old population installed, so the optimizer
+        // must go on from the state that produced it. The RNG stays advanced.
+        let saved = self.optimizer.boxed_clone();
         let generation = self.reproduce_next();
-        let track = self.generate_track(template, config, track_state)?;
+        let track = match self.generate_track(template, config, track_state) {
+            Ok(track) => track,
+            Err(e) => {
+                self.optimizer = saved;
+                return Err(e);
+            }
+        };
         self.install_next(&generation);
         Ok((generation, track))
     }

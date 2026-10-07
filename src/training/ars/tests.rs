@@ -284,3 +284,75 @@ fn corrupt_records_are_rejected() {
         assert!(broken.validate().is_err());
     }
 }
+
+/// Scores that rank the first pair's plus probe best and the rest alike.
+fn fixed_scores(len: usize) -> Vec<f64> {
+    let mut scores = vec![0.0; len];
+    scores[1] = 10.0;
+    scores
+}
+
+fn next_with(ars: &mut Ars, cars: &[Network], s: &EvolutionSettings, seed: i64) -> Vec<Network> {
+    let results = agents(cars, &|_| 0.0);
+    let mut rng = TrainingRandom::from(PyRandom::new(seed));
+    ars.next(&results, Some(fixed_scores(cars.len())), s, &mut rng, &mut Vec::new(), false)
+        .generation
+        .networks
+}
+
+#[test]
+fn the_step_divides_by_the_noise_the_population_was_sampled_with() {
+    let run = |later_nu: f64| {
+        let s = settings(10, 0);
+        let (mut ars, mut rng) = (Ars::default(), TrainingRandom::from(PyRandom::new(1)));
+        let cars = ars.start(&seed(), &s, &mut rng, false).generation.networks;
+        let mut changed = s.clone();
+        changed.ars.nu = later_nu;
+        next_with(&mut ars, &cars, &changed, 2);
+        ars.theta
+    };
+    // The step happens before the new population is sampled, whatever nu says by then.
+    assert_eq!(run(0.1), run(0.001));
+}
+
+#[test]
+fn a_rebuilt_search_keeps_the_noise_it_sampled_with() {
+    let s = settings(10, 0);
+    let mut rng = TrainingRandom::from(PyRandom::new(1));
+    let (networks, record) = into_record(Ars::default().start(&seed(), &s, &mut rng, true));
+    let mut other = s.clone();
+    other.ars.nu = 0.001;
+    let (_, _, mut a) = record.rebuild();
+    let (_, _, mut b) = record.rebuild();
+    next_with(&mut a, &networks, &s, 3);
+    next_with(&mut b, &networks, &other, 3);
+    assert_eq!(a.theta, b.theta);
+}
+
+#[test]
+fn max_weight_bounds_the_search_point_and_elites_even_without_a_step() {
+    let mut s = settings(10, 2);
+    s.ars.max_weight = 0.01;
+    let (mut ars, mut rng) = (Ars::default(), TrainingRandom::from(PyRandom::new(1)));
+    let within = |cars: &[Network]| cars.iter().all(|n| n.params.iter().all(|p| p.abs() <= 0.01));
+    let first = ars.start(&seed(), &s, &mut rng, false).generation.networks;
+    assert!(within(&first), "the first population obeys the limit");
+    // Tied scores skip the step; the elites and the point still obey the limit.
+    let second = next_with(&mut ars, &first, &s, 2);
+    assert!(within(&second));
+    // A tighter limit later applies to the pool as well.
+    s.ars.max_weight = 0.005;
+    let third = next_with(&mut ars, &second, &s, 3);
+    assert!(third.iter().all(|n| n.params.iter().all(|p| p.abs() <= 0.005)));
+}
+
+#[test]
+fn an_edited_probe_makes_the_search_start_from_the_best_car() {
+    let s = settings(10, 0);
+    let (mut ars, mut rng) = (Ars::default(), TrainingRandom::from(PyRandom::new(1)));
+    let mut cars = ars.start(&seed(), &s, &mut rng, false).generation.networks;
+    cars[3].params[0] += 1.0;
+    ars.invalidate();
+    next_with(&mut ars, &cars, &s, 2);
+    assert_eq!(ars.theta, cars[1].params, "the leader of the fixed scores");
+}

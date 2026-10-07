@@ -371,6 +371,43 @@ fn random_training_transitions_install_generated_worlds_and_preserve_config() {
     assert_eq!(serde_json::to_value(state).unwrap(), cases[8]["after"]);
 }
 
+#[test]
+fn a_failed_random_track_transition_leaves_ars_describing_the_installed_cars() {
+    use altd_sim::track::random_track::RandomTrackConfig;
+    let cases: Value = serde_json::from_str(include_str!("fixtures/windows_tracks.json")).unwrap();
+    let template: Value = serde_json::from_str(include_str!("fixtures/native_free180.json")).unwrap();
+    let ars_runner = || {
+        let mut runner = tiny_runner();
+        runner.settings.algorithm = "ars".into();
+        runner.settings.population = 8;
+        runner.settings.ars.elite_count = 1;
+        runner.settings.rewards = vec![altd_sim::training::evolution::RewardSpec {
+            metric: "total_score".into(),
+            weight: 100,
+            kind: "default".into(),
+        }];
+        // The first turnover starts the search; the second one learns from its directions.
+        runner.next_generation();
+        runner
+    };
+    let (mut failed, mut control) = (ars_runner(), ars_runner());
+    for (i, agent) in failed.agents.iter_mut().enumerate() {
+        agent.stats.total_score = i as f64;
+    }
+    for (i, agent) in control.agents.iter_mut().enumerate() {
+        agent.stats.total_score = i as f64;
+    }
+    let rng = failed.rng.clone();
+    let mut config: RandomTrackConfig = serde_json::from_value(cases[8]["config"].clone()).unwrap();
+    let mut state = serde_json::from_value(cases[8]["state"].clone()).unwrap();
+    assert!(failed
+        .next_generation_random_track(&template["scene"], &mut config, &mut state)
+        .is_err());
+    failed.rng = rng;
+    let params = |g: altd_sim::training::evolution::Generation| g.networks.into_iter().map(|n| n.params).collect::<Vec<_>>();
+    assert_eq!(params(failed.next_generation()), params(control.next_generation()));
+}
+
 #[path = "support/double_math.rs"]
 mod double_math;
 #[test]

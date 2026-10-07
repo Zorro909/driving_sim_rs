@@ -179,56 +179,74 @@ impl Default for EvolutionSettings {
 
 impl EvolutionSettings {
     /// `EvolutionSettings.from_mcp`.
+    /// Panics on malformed settings; sessions use `try_from_mcp`.
     pub fn from_mcp(data: &Value) -> EvolutionSettings {
+        Self::try_from_mcp(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `from_mcp`, reporting malformed settings instead of panicking.
+    pub fn try_from_mcp(data: &Value) -> Result<EvolutionSettings, String> {
         let data = data.get("settings").unwrap_or(data);
         let mut s = EvolutionSettings::default();
-        let int = |key: &str| data.get(key).map(|v| v.as_f64().expect(key) as usize);
-        if let Some(v) = data.get("algorithm") {
-            s.algorithm = v.as_str().expect("algorithm").into();
+        let bad = |key: &str| format!("invalid evolution settings: bad {key}");
+        let int = |key: &str| -> Result<Option<usize>, String> {
+            data.get(key)
+                .map(|v| v.as_f64().map(|x| x as usize).ok_or_else(|| bad(key)))
+                .transpose()
+        };
+        let text = |key: &str| -> Result<Option<String>, String> {
+            data.get(key)
+                .map(|v| v.as_str().map(String::from).ok_or_else(|| bad(key)))
+                .transpose()
+        };
+        if let Some(v) = text("algorithm")? {
+            s.algorithm = v;
         }
         if let Some(v) = data.get("ars") {
-            s.ars = serde_json::from_value(v.clone()).expect("ars");
+            s.ars = serde_json::from_value(v.clone()).map_err(|e| format!("invalid evolution settings: ars: {e}"))?;
         }
-        if let Some(v) = int("population") {
+        if let Some(v) = int("population")? {
             s.population = v;
         }
-        if let Some(v) = data.get("selection_algorithm") {
-            s.selection_algorithm = v.as_str().expect("selection_algorithm").into();
+        if let Some(v) = text("selection_algorithm")? {
+            s.selection_algorithm = v;
         }
-        if let Some(v) = int("selection_size") {
+        if let Some(v) = int("selection_size")? {
             s.selection_size = v;
         }
-        if let Some(v) = data.get("crossover") {
-            s.crossover = v.as_str().expect("crossover").into();
+        if let Some(v) = text("crossover")? {
+            s.crossover = v;
         }
         if let Some(v) = data.get("mutation_rate") {
-            s.mutation_rate = v.as_f64().expect("mutation_rate");
+            s.mutation_rate = v.as_f64().ok_or_else(|| bad("mutation_rate"))?;
         }
         if let Some(v) = data.get("adaptive_mutation") {
-            s.adaptive_mutation = v.as_bool().expect("adaptive_mutation");
+            s.adaptive_mutation = v.as_bool().ok_or_else(|| bad("adaptive_mutation"))?;
         }
         if let Some(v) = data.get("weight_decay") {
-            s.weight_decay = v.as_f64().expect("weight_decay");
+            s.weight_decay = v.as_f64().ok_or_else(|| bad("weight_decay"))?;
         }
-        if let Some(v) = data.get("preserve_parents") {
-            s.preserve_parents = v.as_str().expect("preserve_parents").into();
+        if let Some(v) = text("preserve_parents")? {
+            s.preserve_parents = v;
         }
-        if let Some(v) = int("preserve_parents_size") {
+        if let Some(v) = int("preserve_parents_size")? {
             s.preserve_parents_size = v;
         }
         if let Some(rewards) = data.get("rewards") {
             s.rewards = rewards
                 .as_array()
-                .expect("rewards")
+                .ok_or_else(|| bad("rewards"))?
                 .iter()
-                .map(|item| RewardSpec {
-                    metric: item["metric"].as_str().expect("reward metric").into(),
-                    weight: item["weight"].as_i64().expect("integer reward weight"),
-                    kind: item.get("type").and_then(Value::as_str).unwrap_or("default").into(),
+                .map(|item| {
+                    Ok(RewardSpec {
+                        metric: item["metric"].as_str().ok_or_else(|| bad("reward metric"))?.into(),
+                        weight: item["weight"].as_i64().ok_or_else(|| bad("reward weight"))?,
+                        kind: item.get("type").and_then(Value::as_str).unwrap_or("default").into(),
+                    })
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
         }
-        s
+        Ok(s)
     }
 
     /// `dataclasses.asdict(settings)`.

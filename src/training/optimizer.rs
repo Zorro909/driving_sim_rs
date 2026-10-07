@@ -65,6 +65,15 @@ pub(crate) trait Optimizer: Send + Sync {
         scratch: &mut Vec<f64>,
         trace: bool,
     ) -> Produced;
+
+    /// A copy of the search state, to put back when the population `next`
+    /// produced cannot be installed.
+    fn boxed_clone(&self) -> Box<dyn Optimizer>;
+
+    /// The installed cars were edited from outside: forget whatever ties the
+    /// optimizer's state to the population it produced.
+    #[allow(dead_code)] // only the test and wasm `setNetworkJson` edit installed cars
+    fn invalidate(&mut self) {}
 }
 
 /// The optimizer for `algorithm`. Unknown names panic, as the other settings do.
@@ -106,6 +115,10 @@ impl Ga {
 impl Optimizer for Ga {
     fn name(&self) -> &'static str {
         "ga"
+    }
+
+    fn boxed_clone(&self) -> Box<dyn Optimizer> {
+        Box::new(Ga)
     }
 
     fn start(

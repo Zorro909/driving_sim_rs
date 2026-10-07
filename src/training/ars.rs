@@ -81,7 +81,7 @@ struct Layout {
     size: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Ars {
     shape: Vec<usize>,
     /// The search point; empty until the first population is made.
@@ -89,6 +89,9 @@ pub(crate) struct Ars {
     /// Best first.
     pool: Vec<Elite>,
     layout: Option<Layout>,
+    /// The noise scale the last population was sampled with; `learn` divides
+    /// by it, whatever the settings say by then.
+    nu: f64,
     /// The pairs' directions of the last population, one row of `theta.len()` each.
     deltas: Vec<f64>,
 }
@@ -152,6 +155,13 @@ impl Ars {
             "ars needs population >= elite_count + 3"
         );
         let pairs = (sampling.population - elites - 1) / 2;
+        if sampling.max_weight > 0.0 {
+            let limit = sampling.max_weight;
+            let clamp_all = |v: &mut Vec<f64>| v.iter_mut().for_each(|x| *x = x.clamp(-limit, limit));
+            clamp_all(&mut self.theta);
+            self.pool.iter_mut().for_each(|e| clamp_all(&mut e.params));
+        }
+        self.nu = sampling.nu;
         rng.standard_normals_into(pairs * n, &mut self.deltas);
         let (theta, deltas, nu, limit) = (&self.theta, &self.deltas, sampling.nu, sampling.max_weight);
         let clamp = move |v: f64| if limit > 0.0 { v.clamp(-limit, limit) } else { v };
@@ -234,7 +244,7 @@ impl Ars {
         if variance.sqrt() < 1e-6 {
             return;
         }
-        let scale = ars.alpha / (used as f64 * ars.nu);
+        let scale = ars.alpha / (used as f64 * self.nu);
         let n = self.theta.len();
         for (i, plus, minus) in ranked {
             let weight = scale * (plus - minus);
@@ -278,6 +288,16 @@ impl Ars {
 impl Optimizer for Ars {
     fn name(&self) -> &'static str {
         "ars"
+    }
+
+    fn boxed_clone(&self) -> Box<dyn Optimizer> {
+        Box::new(self.clone())
+    }
+
+    fn invalidate(&mut self) {
+        // `matches` fails from here on, so the next turnover searches on from the best car.
+        self.layout = None;
+        self.deltas.clear();
     }
 
     fn start(
