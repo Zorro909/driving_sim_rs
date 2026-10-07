@@ -180,32 +180,19 @@ impl Default for EvolutionSettings {
 
 impl EvolutionSettings {
     /// `EvolutionSettings.from_mcp`.
-    /// Panics on malformed settings; sessions use `try_from_mcp`.
+    /// Panics on malformed settings; preserves trusted CLI/export coercions.
     pub fn from_mcp(data: &Value) -> EvolutionSettings {
         Self::try_from_mcp(data).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// `from_mcp`, reporting malformed settings instead of panicking.
     pub fn try_from_mcp(data: &Value) -> Result<EvolutionSettings, String> {
-        Self::try_from_mcp_with_population(data, None)
-    }
-
-    /// Validate creation settings after applying the embedding host's population override.
-    pub(crate) fn try_from_mcp_with_population(
-        data: &Value,
-        population: Option<usize>,
-    ) -> Result<EvolutionSettings, String> {
         let data = data.get("settings").unwrap_or(data);
         let mut s = EvolutionSettings::default();
         let bad = |key: &str| format!("invalid evolution settings: bad {key}");
         let int = |key: &str| -> Result<Option<usize>, String> {
             data.get(key)
-                .map(|v| {
-                    v.as_f64()
-                        .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64)
-                        .map(|n| n as usize)
-                        .ok_or_else(|| bad(key))
-                })
+                .map(|v| v.as_f64().map(|x| x as usize).ok_or_else(|| bad(key)))
                 .transpose()
         };
         let text = |key: &str| -> Result<Option<String>, String> {
@@ -260,11 +247,29 @@ impl EvolutionSettings {
                 })
                 .collect::<Result<_, String>>()?;
         }
-        if let Some(population) = population {
-            s.population = population;
-        }
-        s.validate()?;
         Ok(s)
+    }
+
+    /// Validate creation settings after applying the embedding host's population override.
+    pub(crate) fn try_from_mcp_with_population(
+        data: &Value,
+        population: Option<usize>,
+    ) -> Result<EvolutionSettings, String> {
+        let fields = data.get("settings").unwrap_or(data);
+        for key in ["population", "selection_size", "preserve_parents_size"] {
+            if let Some(value) = fields.get(key) {
+                value
+                    .as_f64()
+                    .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64)
+                    .ok_or_else(|| format!("invalid evolution settings: bad {key}"))?;
+            }
+        }
+        let mut settings = Self::try_from_mcp(data)?;
+        if let Some(population) = population {
+            settings.population = population;
+        }
+        settings.validate()?;
+        Ok(settings)
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -896,6 +901,67 @@ pub(crate) fn breed_game(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_mcp_settings_keep_cli_coercions_and_population_override() {
+        let data = json!({"settings":{
+            "population":0,"selection_size":2.75,"preserve_parents_size":1.5,"rewards":[]
+        }});
+        let mut settings = EvolutionSettings::from_mcp(&data);
+        assert_eq!(settings.population, 0);
+        assert_eq!(settings.selection_size, 2);
+        assert_eq!(settings.preserve_parents_size, 1);
+        settings.population = 4; // The CLI applies --population after parsing.
+        settings.validate_algorithm().unwrap();
+        let network = Network::xavier(&[2, 2], &mut PyRandom::new(7));
+        let agents = [
+            AgentResult {
+                network: &network,
+                metrics: [Some(1.0); 14],
+                update_count: 1,
+            },
+            AgentResult {
+                network: &network,
+                metrics: [Some(2.0); 14],
+                update_count: 1,
+            },
+        ];
+        let generation = reproduce(&agents, &settings, &mut PyRandom::new(8));
+        assert_eq!(generation.networks.len(), 4);
+        assert_eq!(generation.rewards, vec![0.0, 0.0]);
+
+        let parsed = EvolutionSettings::try_from_mcp(&json!({
+            "rewards":[{"metric":"total_score","weight":1,"type":"legacy-kind"}]
+        }))
+        .unwrap();
+        assert_eq!(parsed.rewards[0].kind, "legacy-kind");
+        assert_eq!(
+            reward_values(&agents, &parsed.rewards),
+            reward_values(&agents, &EvolutionSettings::default().rewards)
+        );
+    }
+
+    #[test]
+    fn session_mcp_settings_validate_after_overrides_without_cli_coercions() {
+        assert_eq!(
+            EvolutionSettings::try_from_mcp_with_population(&json!({"population":0}), Some(4))
+                .unwrap()
+                .population,
+            4
+        );
+        for data in [
+            json!({"population":0}),
+            json!({"rewards":[]}),
+            json!({"selection_size":2.75}),
+            json!({"preserve_parents_size":1.5}),
+            json!({"rewards":[{"metric":"total_score","weight":1,"type":"legacy-kind"}]}),
+        ] {
+            assert!(
+                EvolutionSettings::try_from_mcp_with_population(&data, None).is_err(),
+                "{data}"
+            );
+        }
+    }
 
     /// Sequential reference: clone every child, then mutate and decay it in place.
     fn reproduce_reference(agents: &[AgentResult], settings: &EvolutionSettings, rng: &mut PyRandom) -> Generation {

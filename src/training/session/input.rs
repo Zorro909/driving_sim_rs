@@ -1,4 +1,6 @@
 //! Validate embedding-host scene JSON before legacy, trusted-data constructors.
+use crate::math::vec2::V2;
+use crate::track::world::Surface;
 use serde_json::Value;
 
 fn number(v: &Value, label: &str) -> Result<f64, String> {
@@ -45,6 +47,40 @@ fn array<'a>(v: &'a Value, key: &str) -> Result<&'a [Value], String> {
             .map(Vec::as_slice)
             .ok_or_else(|| format!("invalid array: {key}")),
     }
+}
+
+fn cell_coords(v: &Value, label: &str) -> Result<[i64; 2], String> {
+    vector(v, label)?;
+    let read = |v: &Value| {
+        let n = number(v, label)?;
+        // Match the constructor's truncation without allowing saturating casts.
+        if n <= i64::MIN as f64 || n >= i64::MAX as f64 {
+            return Err(format!("{label} exceeds signed integer range"));
+        }
+        Ok(n as i64)
+    };
+    Ok([read(&v[0])?, read(&v[1])?])
+}
+
+fn tile_capacity(lo: [i64; 2], hi: [i64; 2]) -> Result<(), String> {
+    let span = |i: usize| hi[i].checked_sub(lo[i]).and_then(|n| n.checked_add(1));
+    let cells = span(0)
+        .and_then(|nx| span(1).and_then(|ny| nx.checked_mul(ny)))
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or("tile table dimensions overflow")?;
+    // Each actual dense table must fit Vec's signed byte-offset capacity.
+    // This checks numerical allocation capacity, not a work quota.
+    if [
+        std::alloc::Layout::array::<Option<Surface>>(cells),
+        std::alloc::Layout::array::<Option<String>>(cells),
+        std::alloc::Layout::array::<Option<Option<(V2, V2)>>>(cells),
+    ]
+    .iter()
+    .any(Result::is_err)
+    {
+        return Err("tile table exceeds allocation capacity".into());
+    }
+    Ok(())
 }
 
 pub(super) fn scene(v: &Value) -> Result<(), String> {
@@ -141,8 +177,9 @@ pub(super) fn scene(v: &Value) -> Result<(), String> {
         }
     }
     for shape in array(track, "physics_shapes")? {
-        for key in ["tile", "origin"] {
-            optional_vector(shape, key)?;
+        optional_vector(shape, "origin")?;
+        if let Some(tile) = shape.get("tile") {
+            cell_coords(tile, "shape tile")?;
         }
         let points = shape["points"]
             .as_array()
@@ -167,10 +204,13 @@ pub(super) fn scene(v: &Value) -> Result<(), String> {
             vector(p, "polygon point")?;
         }
     }
-    for key in ["path", "path_forward", "native_cell_order"] {
+    for key in ["path", "path_forward"] {
         for p in array(track, key)? {
             vector(p, key)?;
         }
+    }
+    for cell in array(track, "native_cell_order")? {
+        cell_coords(cell, "native_cell_order")?;
     }
     if array(track, "path")?.len() < 2 {
         return Err("track path needs at least two points".into());
@@ -179,14 +219,24 @@ pub(super) fn scene(v: &Value) -> Result<(), String> {
     if !forward.is_empty() && forward.len() != array(track, "path")?.len() {
         return Err("path_forward and path lengths differ".into());
     }
-    for tile in array(track, "tiles")? {
-        vector(&tile["coords"], "tile coords")?;
+    let tiles = array(track, "tiles")?;
+    let mut lo = [i64::MAX; 2];
+    let mut hi = [i64::MIN; 2];
+    for tile in tiles {
+        let coords = cell_coords(&tile["coords"], "tile coords")?;
+        for i in 0..2 {
+            lo[i] = lo[i].min(coords[i]);
+            hi[i] = hi[i].max(coords[i]);
+        }
         if tile["surface"].as_str().is_none() {
             return Err("invalid tile surface".into());
         }
         for p in array(tile, "connections")? {
             vector(p, "tile connection")?;
         }
+    }
+    if !tiles.is_empty() {
+        tile_capacity(lo, hi)?;
     }
     if let Some(curve) = track.get("curve") {
         let interval = number(&curve["bake_interval"], "bake_interval")?;

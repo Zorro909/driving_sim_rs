@@ -672,6 +672,7 @@ fn fragmented_messages_obey_the_assembled_limit() {
     let mut socket = WebSocket::from_raw_socket(Cursor::new(frames), Role::Server, Some(config));
     assert!(matches!(socket.read(), Err(tungstenite::Error::Capacity(_))));
 }
+
 /// Exercise the actual CLI process, not a thread with a test-only unwind profile.
 /// `cargo test --release --test server malformed_nested_inputs` also runs the
 /// production panic=abort executable.
@@ -687,7 +688,17 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
         }
     }
     let child = Command::new(env!("CARGO_BIN_EXE_altd-sim"))
-        .args(["--threads", "1", "serve", "--port", "0", "--allow-origin", ORIGIN])
+        .args([
+            "--threads",
+            "1",
+            "--math-profile",
+            "proton",
+            "serve",
+            "--port",
+            "0",
+            "--allow-origin",
+            ORIGIN,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -771,9 +782,125 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     assert!(client
         .error("create", request(&bad_wheels, &network, &model, json!({})))
         .contains("steering wheel"));
+
+    for spawn in [
+        json!({"position": [1e300, 0], "rotation": 0}),
+        json!({"position": [0, -1e300], "rotation": 0}),
+        json!({"position": [0, 0], "rotation": 1e300}),
+    ] {
+        assert!(client
+            .error("create", request(&scene, &network, &model, json!({"spawn": spawn})))
+            .contains("float32"));
+    }
+
+    let mut invalid_tiles = Vec::new();
+    for coords in [
+        json!([[-1e30, 0], [1e30, 0]]),
+        json!([[-9e18, 0], [9e18, 0]]),
+        json!([[0, 0], [4e9, 4e9]]),
+        json!([[0, 0], [1e9, 1e9]]),
+    ] {
+        let mut bad = scene.clone();
+        bad["track"]["tiles"] = json!([
+            {"coords": coords[0], "surface": "asphalt"},
+            {"coords": coords[1], "surface": "asphalt"},
+        ]);
+        invalid_tiles.push(bad);
+    }
+    let mut invalid_order = scene.clone();
+    invalid_order["track"]["native_cell_order"] = json!([[-1e30, 0], [1e30, 0]]);
+    invalid_tiles.push(invalid_order);
+    for bad in &invalid_tiles {
+        assert!(!client
+            .error("create", request(bad, &network, &model, json!({})))
+            .is_empty());
+    }
+
+    for (name, kind, maximum) in [
+        ("AccF", "accelerationFront", "MaxAcceleration"),
+        ("AccS", "accelerationSide", "MaxAcceleration"),
+        ("Wall", "distanceFromWall", "MaxDistance"),
+    ] {
+        let mut sensor_network = network.clone();
+        sensor_network["inputs"] = json!([name]);
+        let mut sensor_model = model.clone();
+        sensor_model["sensor_layout"] = json!({"names": [name], "sensors": [{"$type": kind}]});
+        for value in [0.0, -0.0, -1.0, 1e-50] {
+            sensor_model["sensor_layout"]["sensors"][0][maximum] = json!(value);
+            assert!(client
+                .error("create", request(&scene, &sensor_network, &sensor_model, json!({})))
+                .contains(maximum));
+        }
+        sensor_model["sensor_layout"]["sensors"][0][maximum] = json!(100.0);
+        let mut positive = Client::connect(address);
+        positive.call(
+            "create",
+            request(&scene, &sensor_network, &sensor_model, json!({"population": 4})),
+        );
+        positive.call("startWithShape", json!({"shape": [1, 2, 5]}));
+        positive.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
+        let mut direct = Session::new(
+            &scene,
+            &sensor_network,
+            &sensor_model,
+            SessionOptions::from_json(r#"{"population":4,"mathProfile":"proton"}"#).unwrap(),
+        )
+        .unwrap();
+        direct.start_with_shape(&[1, 2, 5]).unwrap();
+        direct.advance(6, false).unwrap();
+        assert!(direct.sensors(0).unwrap().iter().all(|v| v.is_finite()));
+        assert_eq!(
+            positive.call_raw("checkpointBytes", Value::Null, None).1,
+            direct.checkpoint_bytes().unwrap()
+        );
+    }
+
     client.create(&json!({"population": 4}));
     client.call("startWithShape", json!({"shape": [20, 8, 5]}));
     assert!(!client.error("replaceTrack", json!({"scene": "{}"})).is_empty());
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    let mut changed_wheels = scene.clone();
+    let wheels = changed_wheels["vehicle"]["wheels"].as_array_mut().unwrap();
+    wheels.push(wheels[0].clone());
+    for bad in [&bad_wheels, &changed_wheels] {
+        assert!(client
+            .error("replaceTrack", json!({"scene": bad.to_string()}))
+            .contains("keep the vehicle"));
+        assert_eq!(client.call_raw("checkpointBytes", Value::Null, None).1, before);
+    }
+    for bad in &invalid_tiles {
+        assert!(!client
+            .error("replaceTrack", json!({"scene": bad.to_string()}))
+            .is_empty());
+        assert_eq!(client.call_raw("checkpointBytes", Value::Null, None).1, before);
+    }
+    let replacement = generated::scene("formula", 1);
+    client.call("replaceTrack", json!({"scene": replacement.to_string()}));
+    client.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
+
+    let spawn = generated::spawn(&scene);
+    let mut spawn_client = Client::connect(address);
+    spawn_client.create(&json!({"population": 4, "spawn": spawn}));
+    spawn_client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    let mut spawn_direct = direct(&json!({"population": 4, "spawn": spawn}));
+    spawn_direct.start_with_shape(&[20, 8, 5]).unwrap();
+    assert_eq!(
+        spawn_client.call_raw("checkpointBytes", Value::Null, None).1,
+        spawn_direct.checkpoint_bytes().unwrap()
+    );
+
+    let mut negative_tiles = scene.clone();
+    negative_tiles["track"]["tiles"] = json!([
+        {"coords": [-1, -1], "surface": "asphalt"},
+        {"coords": [1, 1], "surface": "asphalt"},
+    ]);
+    let mut tile_client = Client::connect(address);
+    tile_client.call(
+        "create",
+        request(&negative_tiles, &network, &model, json!({"population": 4})),
+    );
+    tile_client.call("startWithShape", json!({"shape": [20, 8, 5]}));
+    tile_client.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
 
     let original = direct(&json!({"population": 4}));
     let mut original = original;
