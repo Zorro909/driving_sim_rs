@@ -847,6 +847,33 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
         assert_eq!(client.call_raw("checkpointBytes", Value::Null, None).1, bytes);
         client.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
     }
+
+    ars.advance_generation(1).unwrap();
+    ars.next_generation().unwrap();
+    let bytes = ars.checkpoint_bytes().unwrap();
+    let word = |i: usize| u32::from_le_bytes(bytes[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
+    assert!(word(5) > 0, "the checkpoint must contain an elite pool");
+    let size = ars.runner.agents[0].network.params.len();
+    let floats_at = (36 + 4 * word(3) + word(4)).next_multiple_of(8);
+    let theta_at = floats_at + 16;
+    let elite_at = theta_at + size * 8;
+    let score_at = elite_at + size * 8;
+    let (reply, _) = ars_client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bytes));
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_eq!(ars_client.call_raw("checkpointBytes", Value::Null, None).1, bytes);
+    for at in [theta_at, elite_at, score_at] {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bad = bytes.clone();
+            bad[at..at + 8].copy_from_slice(&value.to_le_bytes());
+            let (reply, _) = ars_client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bad));
+            assert!(
+                reply["error"].as_str().is_some_and(|e| e.contains("non-finite")),
+                "{reply}"
+            );
+            assert_eq!(ars_client.call_raw("checkpointBytes", Value::Null, None).1, bytes);
+        }
+    }
+    ars_client.call("advance", json!({"ticks": 6, "stopWhenInactive": false}));
     assert!(stop.0.try_wait().unwrap().is_none());
     assert_eq!(Client::connect(address).hello["protocol"], 1);
 }

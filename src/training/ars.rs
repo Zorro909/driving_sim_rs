@@ -122,6 +122,14 @@ impl ArsRecord {
         if Some(self.theta.len()) != size || self.pool.iter().any(|e| Some(e.params.len()) != size) {
             return Err("the checkpoint has the wrong number of parameters".into());
         }
+        if self.theta.iter().any(|p| !p.is_finite())
+            || self
+                .pool
+                .iter()
+                .any(|e| !e.score.is_finite() || e.params.iter().any(|p| !p.is_finite()))
+        {
+            return Err("non-finite checkpoint parameter or elite score".into());
+        }
         let s = &self.sampling;
         let positive = |x: f64| x.is_finite() && x > 0.0;
         if !positive(s.nu) || !s.max_weight.is_finite() || s.max_weight < 0.0 {
