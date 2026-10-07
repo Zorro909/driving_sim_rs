@@ -214,6 +214,14 @@ impl Session {
             return Err("the HIP backend is only available in the native simulator".into());
         }
         let output_names = strings(&network["outputs"], "network outputs")?;
+        for name in &output_names {
+            if !["acceleration", "steering", "brake", "handbrake", "boost"].contains(&name.to_lowercase().as_str()) {
+                return Err(format!("unknown control output: {name}"));
+            }
+        }
+        if !spawn.position.iter().all(|n| n.is_finite()) || !spawn.rotation.is_finite() {
+            return Err("spawn pose must be finite".into());
+        }
         strings(&network["inputs"], "network inputs")?;
         let mut settings = options
             .settings
