@@ -13,6 +13,7 @@ use crate::math::vec2::{closest_point, V2};
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Surface {
@@ -26,6 +27,30 @@ pub(crate) const ASPHALT: Surface = Surface {
     power: 1.0,
     steering: 1.0,
 };
+
+/// FNV-1a for the few short, trusted surface names looked up for every wheel
+/// on every tick; SipHash dominated that lookup.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NameHasher(u64);
+
+impl Default for NameHasher {
+    fn default() -> Self {
+        NameHasher(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Hasher for NameHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+pub(crate) type SurfaceMap = HashMap<String, Surface, BuildHasherDefault<NameHasher>>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct WheelConfig {
@@ -65,7 +90,7 @@ pub struct VehicleConfig {
     pub(crate) linear_damp: f64,
     pub(crate) angular_damp: f64,
     pub(crate) bounce: f64,
-    pub(crate) surfaces: HashMap<String, Surface>,
+    pub(crate) surfaces: SurfaceMap,
 }
 
 impl VehicleConfig {
@@ -828,8 +853,7 @@ pub fn load_vehicle(scene: &Value) -> VehicleConfig {
         .get("shape_basis")
         .map(|b| (F2::from(vector(&b[0])), F2::from(vector(&b[1]))))
         .unwrap_or_else(|| {
-            let c = crate::math::native_math::engine_cos(angle as f32);
-            let s = crate::math::native_math::engine_sin(angle as f32);
+            let (s, c) = crate::math::native_math::engine_sin_cos(angle as f32);
             (F2 { x: c, y: s }, F2 { x: -s, y: c })
         });
     let physics = scene.get("physics").cloned().unwrap_or(Value::Null);
