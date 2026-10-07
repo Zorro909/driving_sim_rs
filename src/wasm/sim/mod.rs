@@ -278,17 +278,7 @@ fn encode(session: &crate::training::session::Session) -> Result<Encoded, String
         .layout
         .sensors
         .iter()
-        .map(|sensor| {
-            let mut desc = simulation::sensor_desc(sensor);
-            if desc.kind == 0 {
-                let angle = (desc.a - 90.0f32) * (std::f32::consts::PI / 180.0);
-                desc.offset = [
-                    runner.world.math.cos(angle) * desc.b,
-                    runner.world.math.sin(angle) * desc.b,
-                ];
-            }
-            desc
-        })
+        .map(|sensor| simulation::with_ray_offset(simulation::sensor_desc(sensor), runner.world.math))
         .collect();
     if sensors.len() > 64 {
         return Err("WebGPU supports at most 64 sensor inputs".into());
