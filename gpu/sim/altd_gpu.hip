@@ -638,14 +638,47 @@ ALTD_API Sim* altd_gpu_sim_create(const World* world, const VehicleDesc* vehicle
     return s;
 }
 
+struct RefreshedSensors { Sensors sensors; uint32_t error; };
+
+// Ray endpoints belong to the world's math profile. Recompute once per profile
+// switch, retaining the precomputed endpoints in the per-car sensing kernels.
+__global__ void refresh_ray_offsets(Sensors sensors, uint32_t math, RefreshedSensors* out) {
+    uint32_t error = 0;
+    for (uint32_t i = 0; i < sensors.count; ++i) {
+        SensorDesc& sensor = sensors.s[i];
+        if (sensor.kind != S_RAYCAST) continue;
+        float angle = (sensor.a - 90.0f) * (PI_F / 180.0f);
+        sensor.offset = Vec2{profile_cos(math, angle, error) * sensor.b,
+                             profile_sin(math, angle, error) * sensor.b};
+    }
+    out->sensors = sensors;
+    out->error = error;
+}
+
 // Graph kernels capture world pointers by value. Invalidate the graph before
 // releasing the old track, while retaining all population allocations.
 ALTD_API int altd_gpu_sim_set_world(Sim* s, const World* world) {
     CHECK(hipStreamSynchronize(s->stream));
+    Sensors sensors = s->sensors;
+    if (s->world.math_profile != world->math_profile) {
+        struct DeviceBuffer {
+            RefreshedSensors* value = nullptr;
+            ~DeviceBuffer() { if (value) (void)hipFree(value); }
+        } buffer;
+        CHECK(hipMalloc(&buffer.value, sizeof(RefreshedSensors)));
+        refresh_ray_offsets<<<1, 1, 0, s->stream>>>(sensors, world->math_profile, buffer.value);
+        CHECK(hipGetLastError());
+        CHECK(hipStreamSynchronize(s->stream));
+        RefreshedSensors refreshed{};
+        CHECK(hipMemcpy(&refreshed, buffer.value, sizeof(refreshed), hipMemcpyDeviceToHost));
+        if (refreshed.error) return -static_cast<int>(refreshed.error);
+        sensors = refreshed.sensors;
+    }
     if (s->graph_exec) {
         CHECK(hipGraphExecDestroy(s->graph_exec));
         s->graph_exec = nullptr;
     }
+    s->sensors = sensors;
     s->world = *world;
     return 0;
 }
