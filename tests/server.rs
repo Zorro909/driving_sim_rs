@@ -1004,3 +1004,55 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     assert!(stop.0.try_wait().unwrap().is_none());
     assert_eq!(Client::connect(address).hello["protocol"], 1);
 }
+
+#[test]
+fn resource_limits_reject_work_without_losing_the_session() {
+    let address = start();
+    let mut client = Client::connect(address);
+    let request = json!({
+        "scene":generated::scene("formula",0).to_string(),
+        "network":generated::network("formula").to_string(),
+        "model":generated::model("formula").to_string(),
+        "options":{"population":u64::MAX},
+    });
+    assert!(client.error("create", request).contains("population"));
+    client.create(&json!({"population":4}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("startWithShape", json!({"shape":[20,u32::MAX,5]}))
+        .contains("server"));
+    assert!(client
+        .error("advance", json!({"ticks":u64::MAX,"stopWhenInactive":false}))
+        .contains("budget"));
+    assert!(client
+        .error("advanceGeneration", json!({"timeLimitTicks":u64::MAX}))
+        .contains("budget"));
+    assert!(client
+        .error(
+            "setEvolutionSettings",
+            json!({"json":json!({"population":u64::MAX}).to_string()})
+        )
+        .contains("population"));
+    let mut bad = generated::scene("formula", 0);
+    bad["track"]["tiles"] = json!([
+        {"coords":[0,0],"surface":"asphalt"},
+        {"coords":[1000000,1000000],"surface":"asphalt"}
+    ]);
+    assert!(client
+        .error("replaceTrack", json!({"scene":bad.to_string()}))
+        .contains("budget"));
+    let mut header = before.clone();
+    header[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&header));
+    assert!(reply["error"].as_str().unwrap().contains("population"));
+    assert!(client
+        .error(
+            "restoreCheckpointJson",
+            json!({"json":json!({"shape":[20,u64::MAX,5]}).to_string()})
+        )
+        .contains("32-bit"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    assert_eq!(client.call("advance", json!({"ticks":1,"stopWhenInactive":false})), 1);
+    assert_eq!(Client::connect(address).hello["protocol"], 1);
+}
