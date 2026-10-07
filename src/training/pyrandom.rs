@@ -41,20 +41,40 @@ impl PyRandom {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_json(data: &serde_json::Value) -> PyRandom {
-        let words: Vec<u32> = data["state"]
+        Self::try_from_json(data).expect("valid random state")
+    }
+
+    pub(crate) fn try_from_json(data: &serde_json::Value) -> Result<PyRandom, String> {
+        let words = data["state"]
             .as_array()
-            .expect("rng state")
+            .filter(|w| w.len() == N)
+            .ok_or("invalid rng state length")?;
+        let words: Vec<u32> = words
             .iter()
-            .map(|v| v.as_u64().unwrap() as u32)
-            .collect();
-        let index = data["index"].as_u64().expect("rng index") as usize;
-        assert!(words.len() == N && index <= N, "invalid random state");
-        PyRandom {
-            state: words.try_into().unwrap(),
-            index,
-            gauss_next: data["gauss_next_bits"].as_u64().map(f64::from_bits),
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or("invalid rng state word")
+            })
+            .collect::<Result<_, _>>()?;
+        let index = data["index"]
+            .as_u64()
+            .filter(|n| *n <= N as u64)
+            .ok_or("invalid rng index")? as usize;
+        if words.iter().all(|w| *w == 0) {
+            return Err("rng state must not be all zero".into());
         }
+        let gauss_next = match data.get("gauss_next_bits") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => Some(f64::from_bits(v.as_u64().ok_or("invalid rng gaussian bits")?)),
+        };
+        Ok(PyRandom {
+            state: words.try_into().map_err(|_| "invalid rng state")?,
+            index,
+            gauss_next,
+        })
     }
 
     fn init_genrand(&mut self, seed: u32) {

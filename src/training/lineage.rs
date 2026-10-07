@@ -33,10 +33,13 @@ impl TrainingRandom {
         }
     }
     pub fn from_json(v: &Value) -> Self {
+        Self::try_from_json(v).expect("valid training random state")
+    }
+    pub fn try_from_json(v: &Value) -> Result<Self, String> {
         if v["backend"].as_str() == Some("game") {
-            Self::Game(crate::training::game_random::GameRandom::from_json(v))
+            Ok(Self::Game(crate::training::game_random::GameRandom::try_from_json(v)?))
         } else {
-            Self::Python(PyRandom::from_json(v))
+            Ok(Self::Python(PyRandom::try_from_json(v)?))
         }
     }
     /// The game's streams use `math` (.NET Math.Log); the Python backend

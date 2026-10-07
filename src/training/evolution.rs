@@ -192,7 +192,12 @@ impl EvolutionSettings {
         let bad = |key: &str| format!("invalid evolution settings: bad {key}");
         let int = |key: &str| -> Result<Option<usize>, String> {
             data.get(key)
-                .map(|v| v.as_f64().map(|x| x as usize).ok_or_else(|| bad(key)))
+                .map(|v| {
+                    v.as_f64()
+                        .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64)
+                        .map(|n| n as usize)
+                        .ok_or_else(|| bad(key))
+                })
                 .transpose()
         };
         let text = |key: &str| -> Result<Option<String>, String> {
@@ -247,7 +252,43 @@ impl EvolutionSettings {
                 })
                 .collect::<Result<_, String>>()?;
         }
+        s.validate()?;
         Ok(s)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.validate_algorithm()?;
+        if self.population == 0 || self.selection_size == 0 {
+            return Err("population and selection_size must be positive".into());
+        }
+        if !["best", "tournament", "roulette"].contains(&self.selection_algorithm.as_str())
+            || !["none", "single_point", "uniform"].contains(&self.crossover.as_str())
+            || !["off", "on_selection_size", "on_custom"].contains(&self.preserve_parents.as_str())
+        {
+            return Err("unknown selection, crossover or preservation mode".into());
+        }
+        if !self.mutation_rate.is_finite()
+            || !(0.0..=10.0).contains(&self.mutation_rate)
+            || !self.weight_decay.is_finite()
+            || !(0.0..=1.0).contains(&self.weight_decay)
+        {
+            return Err("mutation_rate must be in 0..10 and weight_decay in 0..1".into());
+        }
+        if self.rewards.is_empty()
+            || self.rewards.iter().any(|r| {
+                crate::training::evolution::metric_index(&r.metric).is_none()
+                    || !["default", "average"].contains(&r.kind.as_str())
+            })
+        {
+            return Err("invalid reward metric or type".into());
+        }
+        self.rewards.iter().try_fold(0i64, |total, r| {
+            r.weight
+                .checked_abs()
+                .and_then(|w| total.checked_add(w))
+                .ok_or("reward weights overflow")
+        })?;
+        Ok(())
     }
 
     /// `dataclasses.asdict(settings)`.

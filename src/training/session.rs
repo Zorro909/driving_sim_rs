@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod hip;
+mod input;
 #[cfg(not(target_arch = "wasm32"))]
 pub use hip::device as hip_device;
 
@@ -183,6 +184,7 @@ impl Session {
     /// optionally `weights`/`biases`) and `model` (sensor parameters) as the
     /// CLI loads them.
     pub fn new(scene: &Value, network: &Value, model: &Value, options: SessionOptions) -> Result<Session, String> {
+        input::scene(scene)?;
         let spawn = match options.spawn {
             Some(s) => s,
             None => match (
@@ -226,7 +228,7 @@ impl Session {
         settings.validate_algorithm()?;
         let math = options.math_profile.unwrap_or_else(MathProfile::detect);
         let world = Arc::new(World::from_scene_with(scene, math));
-        let layout = SensorLayout::from_exports(network, model, math);
+        let layout = SensorLayout::try_from_exports(network, model, math)?;
         let mut runner = TrainingRunner::new(
             world,
             V2::new(spawn.position[0], spawn.position[1]),
@@ -473,31 +475,7 @@ impl Session {
     pub fn set_evolution_settings(&mut self, text: &str) -> Result<(), String> {
         let settings: EvolutionSettings =
             serde_json::from_str(text).map_err(|e| format!("invalid evolution settings: {e}"))?;
-        settings.validate_algorithm()?;
-        if settings.population == 0 || settings.selection_size == 0 {
-            return Err("population and selection_size must be positive".into());
-        }
-        if !["best", "tournament", "roulette"].contains(&settings.selection_algorithm.as_str())
-            || !["none", "single_point", "uniform"].contains(&settings.crossover.as_str())
-            || !["off", "on_selection_size", "on_custom"].contains(&settings.preserve_parents.as_str())
-        {
-            return Err("unknown selection, crossover or preservation mode".into());
-        }
-        if !settings.mutation_rate.is_finite()
-            || !(0.0..=10.0).contains(&settings.mutation_rate)
-            || !settings.weight_decay.is_finite()
-            || !(0.0..=1.0).contains(&settings.weight_decay)
-        {
-            return Err("mutation_rate must be in 0..10 and weight_decay in 0..1".into());
-        }
-        if settings.rewards.is_empty()
-            || settings.rewards.iter().any(|r| {
-                crate::training::evolution::metric_index(&r.metric).is_none()
-                    || !["default", "average"].contains(&r.kind.as_str())
-            })
-        {
-            return Err("invalid reward metric or type".into());
-        }
+        settings.validate()?;
         self.runner.settings = settings;
         Ok(())
     }
@@ -647,7 +625,7 @@ impl Session {
         let rng = if value["rng"].is_null() {
             None
         } else {
-            Some(TrainingRandom::from_json(&value["rng"]))
+            Some(TrainingRandom::try_from_json(&value["rng"])?)
         };
         self.restore(&shape, generation, params, rng)
     }
@@ -885,6 +863,7 @@ impl Session {
     /// `next_generation`; the vehicle must not change.
     #[cfg(any(test, feature = "server", all(target_arch = "wasm32", feature = "wasm")))]
     pub fn replace_track(&mut self, scene: &Value) -> Result<(), String> {
+        input::scene(scene)?;
         let position = scene
             .get("reset_position")
             .map(crate::track::world::vector)
@@ -1024,7 +1003,7 @@ fn read_population(bytes: &[u8]) -> Result<PopulationCheckpoint, String> {
     let rng = if rng.is_null() {
         None
     } else {
-        Some((TrainingRandom::from_json(&rng), rng_math(&rng)?))
+        Some((TrainingRandom::try_from_json(&rng)?, rng_math(&rng)?))
     };
     Ok((shape, generation, params, rng))
 }
@@ -1168,7 +1147,7 @@ fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
             adaptive_mutation: flags == 1,
             weight_decay,
         },
-        rng: TrainingRandom::from_json(&rng),
+        rng: TrainingRandom::try_from_json(&rng)?,
         math: rng_math(&rng)?,
     };
     lineage.validate()?;

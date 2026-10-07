@@ -65,6 +65,7 @@ impl SensorLayout {
             let number = |key: &str| {
                 row[key]
                     .as_f64()
+                    .filter(|x| (*x as f32).is_finite())
                     .map(|x| x as f32 as f64)
                     .ok_or_else(|| format!("missing sensor parameter {key}"))
             };
@@ -99,6 +100,7 @@ impl SensorLayout {
                     };
                     let component = |v: &Value| {
                         v.as_f64()
+                            .filter(|x| (*x as f32).is_finite())
                             .map(|x| x as f32 as f64)
                             .ok_or("missing grip offset component")
                     };
@@ -117,36 +119,53 @@ impl SensorLayout {
     /// `SensorLayout.from_exports(live_network, model)`. Vision rays the model
     /// does not list get the editor's length under `math`.
     pub fn from_exports(live_network: &Value, model: &Value, math: MathProfile) -> SensorLayout {
+        Self::try_from_exports(live_network, model, math).expect("valid sensor exports")
+    }
+
+    pub fn try_from_exports(live_network: &Value, model: &Value, math: MathProfile) -> Result<SensorLayout, String> {
         if let Some(exact) = model.get("sensor_layout") {
-            let layout = Self::from_ordered(exact).expect("exact sensor descriptors");
+            let layout = Self::from_ordered(exact)?;
             let inputs: Vec<_> = live_network["inputs"]
                 .as_array()
-                .expect("network inputs")
+                .ok_or("missing network inputs")?
                 .iter()
-                .map(|v| v.as_str().expect("input name"))
-                .collect();
-            assert!(
-                layout.names.iter().map(String::as_str).eq(inputs),
-                "ordered sensor inputs differ from network"
-            );
-            return layout;
+                .map(|v| v.as_str().ok_or("invalid input name"))
+                .collect::<Result<_, _>>()?;
+            if !layout.names.iter().map(String::as_str).eq(inputs) {
+                return Err("ordered sensor inputs differ from network".into());
+            }
+            return Ok(layout);
         }
         let vision: Vec<(f64, f64)> = model["vision"]
             .as_array()
-            .expect("model vision")
+            .ok_or("missing model vision")?
             .iter()
-            .map(|item| (item["angle"].as_f64().unwrap(), item["length"].as_f64().unwrap()))
-            .collect();
+            .map(|item| {
+                Ok((
+                    item["angle"]
+                        .as_f64()
+                        .filter(|n| (*n as f32).is_finite())
+                        .ok_or("invalid vision angle")?,
+                    item["length"]
+                        .as_f64()
+                        .filter(|n| (*n as f32).is_finite())
+                        .ok_or("invalid vision length")?,
+                ))
+            })
+            .collect::<Result<_, String>>()?;
         let names: Vec<String> = live_network["inputs"]
             .as_array()
-            .expect("network inputs")
+            .ok_or("missing network inputs")?
             .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
+            .map(|v| v.as_str().map(str::to_owned).ok_or("invalid input name"))
+            .collect::<Result<_, _>>()?;
         let sensors = names
             .iter()
             .map(|name| match vision_angle(name) {
                 Some(angle) => {
+                    if !(angle as f32).is_finite() {
+                        return Err("invalid vision angle".into());
+                    }
                     // Python dict: the last vision entry with this angle wins.
                     // Angles the model does not list get the editor's length.
                     let length = vision
@@ -154,12 +173,14 @@ impl SensorLayout {
                         .rev()
                         .find(|(a, _)| *a == angle)
                         .map_or_else(|| vision_length(angle as f32, math) as f64, |&(_, length)| length);
-                    Sensor::Raycast { degrees: angle, length }
+                    Ok(Sensor::Raycast { degrees: angle, length })
                 }
-                None => Sensor::by_name(sensor_type(name).unwrap_or_else(|| panic!("unknown sensor: {name}"))),
+                None => sensor_type(name)
+                    .map(Sensor::by_name)
+                    .ok_or_else(|| format!("unknown sensor: {name}")),
             })
-            .collect();
-        SensorLayout { names, sensors }
+            .collect::<Result<_, _>>()?;
+        Ok(SensorLayout { names, sensors })
     }
 
     pub fn read_into(&self, world: &World, car: &Car, scratch: &mut SensorScratch, out: &mut Vec<f64>) {
