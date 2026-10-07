@@ -111,7 +111,7 @@ pub(super) fn shape_numbers(shape: &[usize]) -> Result<usize, String> {
 
 pub(super) fn settings(v: &Value, default_population: usize) -> Result<usize, String> {
     let v = v.get("settings").unwrap_or(v);
-    let integer = |key: &str, default: usize, max: usize| -> Result<usize, String> {
+    let integer = |v: &Value, key: &str, default: usize, max: usize| -> Result<usize, String> {
         match v.get(key) {
             None => Ok(default),
             Some(n) => n
@@ -122,12 +122,13 @@ pub(super) fn settings(v: &Value, default_population: usize) -> Result<usize, St
         }
     };
     for key in ["selection_size", "preserve_parents_size"] {
-        integer(key, 3, MAX_POPULATION)?;
+        integer(v, key, 3, MAX_POPULATION)?;
     }
+    integer(&v["ars"], "elite_count", 3, MAX_POPULATION)?;
     if v.get("rewards").and_then(Value::as_array).is_some_and(|r| r.len() > 13) {
         return Err("too many server reward terms".into());
     }
-    let population = integer("population", default_population, MAX_POPULATION)?;
+    let population = integer(v, "population", default_population, MAX_POPULATION)?;
     if population == 0 {
         return Err("population must be positive".into());
     }
@@ -361,18 +362,27 @@ pub(super) fn binary(bytes: &[u8]) -> Result<(usize, usize), String> {
     if !(2..=20).contains(&layers) {
         return Err("checkpoint layer count exceeds server limit".into());
     }
-    let parent = bytes.get(..8) == Some(b"ALTDCKP2".as_slice());
-    if !parent && bytes.get(..8) != Some(b"ALTDCKP1".as_slice()) {
-        return Err("invalid checkpoint magic".into());
-    }
-    if parent {
-        for i in [5, 6, 7] {
-            if word(i)? > MAX_POPULATION {
-                return Err("checkpoint lineage count exceeds server limit".into());
+    let (first, population) = match bytes.get(..8) {
+        Some(m) if m == b"ALTDCKP1" => (5, population),
+        Some(m) if m == b"ALTDCKP2" => {
+            for i in [5, 6, 7] {
+                if word(i)? > MAX_POPULATION {
+                    return Err("checkpoint lineage count exceeds server limit".into());
+                }
             }
+            (10, population)
         }
-    }
-    let first = if parent { 10 } else { 5 };
+        Some(m) if m == b"ALTDCKP3" => {
+            let pool = word(5)?;
+            if pool > MAX_POPULATION || word(6)? > MAX_POPULATION {
+                return Err("checkpoint ARS elite count exceeds server limit".into());
+            }
+            // The optimizer retains the pool and search point independently of
+            // the sampled cars, so charge them even after a population decrease.
+            (7, population.max(pool + 1))
+        }
+        _ => return Err("invalid checkpoint magic".into()),
+    };
     let shape = (0..layers).map(|i| word(first + i)).collect::<Result<Vec<_>, _>>()?;
     Ok((population, shape_numbers(&shape)?))
 }
@@ -445,8 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn binary_rng_document_limits_cover_both_formats() {
-        for (magic, first) in [(b"ALTDCKP1", 5), (b"ALTDCKP2", 10)] {
+    fn binary_rng_document_limits_cover_all_formats() {
+        for (magic, first) in [(b"ALTDCKP1", 5), (b"ALTDCKP2", 10), (b"ALTDCKP3", 7)] {
             for size in [MAX_JSON, MAX_JSON + 1] {
                 let mut bytes = magic.to_vec();
                 let mut words = vec![0u32; first + 2];
@@ -459,6 +469,48 @@ mod tests {
                 assert_eq!(binary(&bytes).is_ok(), size == MAX_JSON);
             }
         }
+    }
+
+    #[test]
+    fn ars_checkpoint_pool_is_charged_and_counts_are_bounded() {
+        let header = |population, pool, elites| {
+            let mut bytes = b"ALTDCKP3".to_vec();
+            let words = [0u32, 0, population, 2, 0, pool, elites, 20, 5];
+            bytes.extend(words.iter().flat_map(|n| n.to_le_bytes()));
+            bytes
+        };
+        assert_eq!(binary(&header(16, 2, 2)).unwrap(), (16, 105));
+        // A checkpoint can retain a pool larger than the sampled population.
+        assert_eq!(binary(&header(4, 100, 0)).unwrap(), (101, 105));
+        for (pool, elites) in [(MAX_POPULATION as u32 + 1, 0), (0, MAX_POPULATION as u32 + 1)] {
+            assert!(binary(&header(16, pool, elites)).unwrap_err().contains("elite"));
+        }
+        let (population, parameters) = binary(&header(4, 10_000, 0)).unwrap();
+        assert!(Plan {
+            population,
+            parameters,
+            ..Plan::default()
+        }
+        .bytes()
+        .is_err());
+    }
+
+    #[test]
+    fn retained_ars_settings_follow_server_count_limits() {
+        for algorithm in ["ga", "ars"] {
+            assert_eq!(
+                settings(&json!({"algorithm":algorithm,"ars":{"elite_count":2}}), 16).unwrap(),
+                16
+            );
+            assert!(settings(
+                &json!({"algorithm":algorithm,"ars":{"elite_count":MAX_POPULATION + 1}}),
+                16
+            )
+            .unwrap_err()
+            .contains("elite_count"));
+        }
+        assert!(settings(&json!({"ars":{"elite_count":-1}}), 16).is_err());
+        assert!(settings(&json!({"ars":{"elite_count":0.5}}), 16).is_err());
     }
 
     #[test]

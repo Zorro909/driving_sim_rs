@@ -1153,3 +1153,69 @@ fn resource_limits_reject_work_without_losing_the_session() {
     assert_eq!(client.call("advance", json!({"ticks":1,"stopWhenInactive":false})), 1);
     assert_eq!(Client::connect(address).hello["protocol"], 1);
 }
+
+#[test]
+fn ars_checkpoint_admission_restores_and_continues_exactly() {
+    let options = json!({"population":16,"seed":4,"settings":{"algorithm":"ars","ars":{"elite_count":2}}});
+    let mut source = direct(&options);
+    source.start_with_shape(&[20, 8, 5]).unwrap();
+    source.advance(12, false).unwrap();
+    source.next_generation().unwrap();
+    let saved = source.checkpoint_bytes().unwrap();
+    assert_eq!(&saved[..8], b"ALTDCKP3");
+    assert_eq!(u32::from_le_bytes(saved[28..32].try_into().unwrap()), 2);
+
+    let mut client = Client::connect(start());
+    client.create(&options);
+    let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&saved));
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_eq!(saved, client.call_raw("checkpointBytes", Value::Null, None).1);
+    for (word, value) in [(2, 32_769u32), (5, 32_769), (6, 32_769), (4, 16 * 1024 * 1024 + 1)] {
+        let mut bad = saved.clone();
+        bad[8 + word * 4..12 + word * 4].copy_from_slice(&value.to_le_bytes());
+        let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bad));
+        assert!(reply["error"].as_str().is_some(), "{reply}");
+        assert_eq!(saved, client.call_raw("checkpointBytes", Value::Null, None).1);
+    }
+    source.advance(12, false).unwrap();
+    client.call("advance", json!({"ticks":12,"stopWhenInactive":false}));
+    assert_eq!(
+        f64s(&client.call_raw("carStates", Value::Null, None).1),
+        bits(&source.car_states())
+    );
+    source.next_generation().unwrap();
+    client.call("nextGeneration", Value::Null);
+    assert_eq!(
+        source.checkpoint_bytes().unwrap(),
+        client.call_raw("checkpointBytes", Value::Null, None).1
+    );
+}
+
+#[test]
+fn retained_ars_settings_are_limited_before_session_mutation() {
+    let oversized = json!({"algorithm":"ga","ars":{"elite_count":32_769}});
+    let mut client = Client::connect(start());
+    let request = json!({
+        "scene":generated::scene("formula",0).to_string(),
+        "network":generated::network("formula").to_string(),
+        "model":generated::model("formula").to_string(),
+        "options":{"population":16,"settings":oversized},
+    });
+    assert!(client.error("create", request).contains("elite_count"));
+    client.create(&json!({"population":16}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("setEvolutionSettings", json!({"json":oversized.to_string()}))
+        .contains("elite_count"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    client.call(
+        "setEvolutionSettings",
+        json!({"json":json!({"algorithm":"ars","population":16,"ars":{"elite_count":2}}).to_string()}),
+    );
+    client.call("nextGeneration", Value::Null);
+    assert_eq!(
+        &client.call_raw("checkpointBytes", Value::Null, None).1[..8],
+        b"ALTDCKP3"
+    );
+}

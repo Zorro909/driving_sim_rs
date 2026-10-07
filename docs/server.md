@@ -107,7 +107,7 @@ apply to `serve`; the native CLI's operator-selected runs retain their current l
 | --- | --- |
 | Each embedded JSON document | 16 MiB |
 | Binary checkpoint payload | 32 MiB |
-| Population, selection and preservation counts | 32,768 |
+| Population, selection, preservation and ARS elite counts | 32,768 |
 | Network architecture | 2–20 layers, 1–64 nodes/layer, 16,384 parameters/network |
 | Population × parameters | 1,048,576 parameters |
 | Solver iterations / reported contacts / wheels | 64 / 64 / 16 |
@@ -131,7 +131,7 @@ cells, and (when HIP is requested or active) padded nearest-path and baked-curve
 candidate grids. The GPU estimate conservatively charges every segment in every
 padded cell; it may reject tracks whose actual sparse lists would fit. Initial
 HIP requests are charged before device preparation even if execution later falls
-back to CPU. Both binary checkpoint formats enforce the separate embedded RNG
+back to CPU. All three binary checkpoint formats enforce the separate embedded RNG
 JSON document limit before reconstruction. These remain admission estimates,
 not a measured allocator or RSS guarantee.
 
@@ -146,7 +146,8 @@ allocator or RSS limits**. Upper bounds are combined: a maximum population and a
 maximum architecture cannot necessarily be used together. Reservations include
 both the old and proposed state during replacement, release on failure/disconnect,
 and retain the largest admitted population until disconnect so pending settings
-cannot undercharge a still-live population.
+cannot undercharge a still-live population. ARS checkpoint admission also charges
+the retained elite pool and search point when they outnumber the sampled cars.
 
 One request executes at a time across the server's sessions. Contending clients get
 `server busy; retry this request later`, rather than accumulating queued compute.
