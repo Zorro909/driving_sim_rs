@@ -108,6 +108,7 @@ apply to `serve`; the native CLI's operator-selected runs retain their current l
 | Each embedded JSON document | 16 MiB |
 | Binary checkpoint payload | 32 MiB |
 | Population, selection, preservation and ARS elite counts | 32,768 |
+| Reward terms | 14 (the current metric count) |
 | Network architecture | 2–20 layers, 1–64 nodes/layer, 16,384 parameters/network |
 | Population × parameters | 1,048,576 parameters |
 | Solver iterations / reported contacts / wheels | 64 / 64 / 16 |

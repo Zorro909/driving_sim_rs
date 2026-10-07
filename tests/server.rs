@@ -1005,7 +1005,6 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     assert_eq!(Client::connect(address).hello["protocol"], 1);
 }
 
-
 #[test]
 fn partial_settings_are_charged_before_mutation() {
     let mut client = Client::connect(start());
@@ -1250,4 +1249,26 @@ fn population_override_is_applied_before_server_admission() {
         assert!(client.error("create", request).contains("limit"));
     }
     client.create(&json!({"population":16}));
+}
+
+#[test]
+fn all_known_reward_metrics_fit_server_admission() {
+    let mut rewards: Vec<_> = altd_sim::training::evolution::METRIC_NAMES
+        .iter()
+        .map(|metric| json!({"metric":metric,"weight":1,"type":"default"}))
+        .collect();
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":16,"settings":{"rewards":rewards}}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    client.call("advance", json!({"ticks":6,"stopWhenInactive":false}));
+    client.call("nextGeneration", Value::Null);
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    rewards.push(rewards[0].clone());
+    assert!(client
+        .error(
+            "setEvolutionSettings",
+            json!({"json":json!({"population":16,"rewards":rewards}).to_string()})
+        )
+        .contains("too many server reward terms"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
 }

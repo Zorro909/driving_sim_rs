@@ -129,7 +129,10 @@ pub(super) fn settings(
         integer(v, key, 3, MAX_POPULATION)?;
     }
     integer(&v["ars"], "elite_count", 3, MAX_POPULATION)?;
-    if v.get("rewards").and_then(Value::as_array).is_some_and(|r| r.len() > 13) {
+    if v.get("rewards")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.len() > crate::training::evolution::METRIC_NAMES.len())
+    {
         return Err("too many server reward terms".into());
     }
     let population = match population_override {
