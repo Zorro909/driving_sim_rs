@@ -656,15 +656,14 @@ __global__ void refresh_ray_offsets(Sensors sensors, uint32_t math, RefreshedSen
     out->error = error;
 }
 
-// Cached shape/surface indices belong to the old track. Never carry them into
-// a smaller world; preserve motion and networks while rebuilding these caches.
+// Cached shape/surface indices belong to the old track. Preserve world-independent
+// AABBs and wheel motion, and rebuild collision pairs before the next collision phase.
 __global__ void invalidate_world_cache(Car* cars, uint32_t n, uint32_t surface) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Car& c = cars[i];
     c.pair_count = c.contact_count = 0;
-    c.flags &= ~(CAR_HAS_LEAF | CAR_PAIR_CHECK);
-    c.wheel_has_previous = 0;
+    c.flags |= CAR_PAIR_CHECK;
     for (uint32_t j = 0; j < MAX_WHEELS; ++j) c.wheel_surface[j] = surface;
 }
 
