@@ -7,7 +7,7 @@ use crate::math::profile::MathProfile;
 use crate::math::vec2::V2;
 use crate::nn::network::{parameter_count, Network};
 use crate::track::world::World;
-use crate::training::ars::{ArsRecord, Elite, Sampling};
+use crate::training::ars::{ArsRecord, Elite, Head, Sampling};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use crate::training::evolution::METRIC_NAMES;
 use crate::training::evolution::{Breeding, EvolutionSettings, CROSSOVERS};
@@ -137,7 +137,7 @@ enum Saved {
     },
     /// After a start or reproduction: what bred the cars. Saved as format 2.
     Lineage(Lineage),
-    /// After an ARS start or reproduction: the search state that sampled the cars. Saved as format 3.
+    /// After an ARS start or reproduction: the search state that sampled the cars. Saved as format 4.
     Ars(ArsRecord),
 }
 
@@ -166,8 +166,10 @@ pub struct GenerationSummary {
 const CHECKPOINT_MAGIC: &[u8; 8] = b"ALTDCKP1";
 /// Format 2: the parents a generation was bred from (`Lineage`).
 const PARENTS_MAGIC: &[u8; 8] = b"ALTDCKP2";
-/// Format 3: the ARS search state a generation was sampled from (`ArsRecord`).
-const ARS_MAGIC: &[u8; 8] = b"ALTDCKP3";
+/// Format 3: the ARS search state of a single search point without step size state, still readable.
+const ARS_V3_MAGIC: &[u8; 8] = b"ALTDCKP3";
+/// Format 4: the ARS search state a generation was sampled from (`ArsRecord`).
+const ARS_MAGIC: &[u8; 8] = b"ALTDCKP4";
 
 fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
     value
@@ -767,7 +769,7 @@ impl Session {
         self.boundary.as_ref().map(|b| (b.generation, b.tick))
     }
 
-    /// The boundary of the current generation in binary: format 3 (see
+    /// The boundary of the current generation in binary: format 4 (see
     /// `ars_bytes`) after an ARS start or reproduction, format 2 (see
     /// `parent_bytes`) after a GA start or reproduction, format 1 (see
     /// `population_bytes`) after restoring a full checkpoint.
@@ -794,7 +796,7 @@ impl Session {
                 let (generation, lineage) = read_parents(bytes)?;
                 self.restore_lineage(generation, lineage)
             }
-            Some(m) if m == ARS_MAGIC => {
+            Some(m) if m == ARS_MAGIC || m == ARS_V3_MAGIC => {
                 let (generation, record) = read_ars(bytes)?;
                 self.restore_ars(generation, record)
             }
@@ -1195,12 +1197,15 @@ fn read_parents(bytes: &[u8]) -> Result<(u64, Lineage), String> {
     Ok((generation, lineage))
 }
 
-/// Format 3, `ALTDCKP3`, little-endian: u32 words generation, tick,
-/// population, layer count L, RNG JSON length R, elite pool size E and elite
-/// count K; the u32 shape; the RNG JSON; zero padding to a multiple of 8
-/// bytes; f64 nu and max weight; the f64 parameters of the search point; then
-/// each of the E pool members' f64 parameters followed by its f64 score.
-/// Words 0 to 4 sit where formats 1 and 2 have them.
+/// Format 4, `ALTDCKP4`, little-endian: u32 words generation, tick,
+/// population, layer count L, RNG JSON length R, elite pool size E, elite
+/// count K and head count H; the u32 shape; the RNG JSON; zero padding to a
+/// multiple of 8 bytes; f64 nu and max weight; for each head its f64
+/// parameters, then its step size, fast and slow reward averages (NaN while
+/// unset) and its generations since the last trend check; then each of the E
+/// pool members' f64 parameters followed by its f64 score. Words 0 to 4 sit
+/// where formats 1 and 2 have them. Format 3 has no head count word (one
+/// head) and only the parameters of the search point.
 fn ars_bytes(generation: u64, tick: u64, r: &ArsRecord) -> Result<Vec<u8>, String> {
     let rng = rng_json(&r.rng, r.math).to_string();
     let s = &r.sampling;
@@ -1212,10 +1217,14 @@ fn ars_bytes(generation: u64, tick: u64, r: &ArsRecord) -> Result<Vec<u8>, Strin
         rng.len() as u64,
         r.pool.len() as u64,
         s.elite_count as u64,
+        r.heads.len() as u64,
     ];
-    let size = r.theta.len();
+    let size = r.heads[0].theta.len();
     let mut out = Vec::with_capacity(
-        8 + 4 * (header.len() + r.shape.len()) + rng.len() + 24 + (r.pool.len() + 1) * (size + 1) * 8,
+        8 + 4 * (header.len() + r.shape.len())
+            + rng.len()
+            + 24
+            + (r.heads.len() * (size + 4) + r.pool.len() * (size + 1)) * 8,
     );
     out.extend_from_slice(ARS_MAGIC);
     for n in header.into_iter().chain(r.shape.iter().map(|&n| n as u64)) {
@@ -1229,8 +1238,14 @@ fn ars_bytes(generation: u64, tick: u64, r: &ArsRecord) -> Result<Vec<u8>, Strin
     out.resize(out.len().next_multiple_of(8), 0);
     out.extend_from_slice(&s.nu.to_le_bytes());
     out.extend_from_slice(&s.max_weight.to_le_bytes());
-    for p in &r.theta {
-        out.extend_from_slice(&p.to_le_bytes());
+    for h in &r.heads {
+        for p in &h.theta {
+            out.extend_from_slice(&p.to_le_bytes());
+        }
+        for x in [h.alpha, h.fast, h.slow] {
+            out.extend_from_slice(&x.unwrap_or(f64::NAN).to_le_bytes());
+        }
+        out.extend_from_slice(&f64::from(h.since_check).to_le_bytes());
     }
     for e in &r.pool {
         for p in &e.params {
@@ -1241,8 +1256,10 @@ fn ars_bytes(generation: u64, tick: u64, r: &ArsRecord) -> Result<Vec<u8>, Strin
     Ok(out)
 }
 
-/// Reads format 3 (see `ars_bytes`) and validates it: `(generation, record)`.
+/// Reads format 4 or 3 (see `ars_bytes`) and validates it: `(generation, record)`.
 fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
+    let v3 = bytes.get(..8) == Some(ARS_V3_MAGIC.as_slice());
+    let header_words: usize = if v3 { 7 } else { 8 };
     let invalid = || "invalid binary checkpoint".to_string();
     let word = |i: usize| -> Result<usize, String> {
         let at = i.checked_mul(4).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
@@ -1253,7 +1270,8 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
     };
     let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
     let (pool_len, elite_count) = (word(5)?, word(6)?);
-    let rng_at = 7usize
+    let head_count = if v3 { 1 } else { word(7)? };
+    let rng_at = header_words
         .checked_add(layers)
         .and_then(|n| n.checked_mul(4))
         .and_then(|n| n.checked_add(8))
@@ -1263,7 +1281,7 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
         .checked_add(rng_len)
         .filter(|&end| end <= bytes.len())
         .ok_or_else(invalid)?;
-    let shape: Vec<usize> = (0..layers).map(|i| word(7 + i)).collect::<Result<_, _>>()?;
+    let shape: Vec<usize> = (0..layers).map(|i| word(header_words + i)).collect::<Result<_, _>>()?;
     if shape.len() < 2 || shape.contains(&0) {
         return Err(invalid());
     }
@@ -1275,10 +1293,11 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
     let floats_at = rng_end.next_multiple_of(8);
     let size = checked_parameter_count(&shape).ok_or_else(invalid)?;
     let data = bytes.get(floats_at..).ok_or_else(invalid)?;
-    // nu and max weight, the search point, then the pool members and their scores.
+    // nu and max weight, the search points with their step size state, then the pool members and their scores.
+    let per_head = size.checked_add(if v3 { 0 } else { 4 }).ok_or_else(invalid)?;
     let expected = pool_len
         .checked_mul(size.checked_add(1).ok_or_else(invalid)?)
-        .and_then(|n| n.checked_add(size))
+        .and_then(|n| n.checked_add(head_count.checked_mul(per_head)?))
         .and_then(|n| n.checked_add(2))
         .and_then(|n| n.checked_mul(8));
     if expected != Some(data.len()) {
@@ -1290,7 +1309,33 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
     let mut floats = data.chunks_exact(8).map(|p| f64::from_le_bytes(p.try_into().unwrap()));
     let mut take = |count: usize| -> Vec<f64> { floats.by_ref().take(count).collect() };
     let (nu, max_weight) = (take(1)[0], take(1)[0]);
-    let theta = take(size);
+    let known = |x: f64| (!x.is_nan()).then_some(x);
+    let heads = (0..head_count)
+        .map(|_| {
+            let theta = take(size);
+            if v3 {
+                return Ok(Head {
+                    theta,
+                    alpha: None,
+                    fast: None,
+                    slow: None,
+                    since_check: 0,
+                });
+            }
+            let state = take(4);
+            let since_check = u32::try_from(state[3] as u64)
+                .ok()
+                .filter(|&n| f64::from(n) == state[3])
+                .ok_or("the checkpoint's trend check counter is out of range")?;
+            Ok(Head {
+                theta,
+                alpha: known(state[0]),
+                fast: known(state[1]),
+                slow: known(state[2]),
+                since_check,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let pool = (0..pool_len)
         .map(|_| Elite {
             params: take(size),
@@ -1299,13 +1344,14 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
         .collect();
     let record = ArsRecord {
         shape,
-        theta,
+        heads,
         pool,
         sampling: Sampling {
             population,
             elite_count,
             nu,
             max_weight,
+            heads: head_count,
         },
         rng: TrainingRandom::try_from_json(&rng)?,
         math: rng_math(&rng)?,
@@ -1649,7 +1695,7 @@ mod tests {
         let mut s = generated_session(ARS_OPTIONS);
         s.start_with_shape(&[20, 8, 5]).unwrap();
         let first = s.checkpoint_bytes().unwrap();
-        assert_eq!(&first[..8], b"ALTDCKP3");
+        assert_eq!(&first[..8], b"ALTDCKP4");
         let mut t = generated_session(ARS_OPTIONS);
         t.restore_checkpoint_bytes(&first).unwrap();
         assert_eq!(t.checkpoint().unwrap(), s.checkpoint().unwrap(), "generation 0");
@@ -1662,7 +1708,7 @@ mod tests {
             assert!(preserved <= 3);
         }
         let bytes = s.checkpoint_bytes().unwrap();
-        assert_eq!(&bytes[..8], b"ALTDCKP3");
+        assert_eq!(&bytes[..8], b"ALTDCKP4");
         let json = s.checkpoint().unwrap();
         let mut u = generated_session(ARS_OPTIONS);
         u.restore_checkpoint_bytes(&bytes).unwrap();
@@ -1675,6 +1721,58 @@ mod tests {
             assert_eq!(state_bits(&mut u), state_bits(&mut s));
             assert_eq!(u.next_generation().unwrap(), s.next_generation().unwrap());
             assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
+        }
+    }
+
+    const ARS_HEADS_OPTIONS: &str = r#"{"population": 16, "seed": 4, "settings": {"algorithm": "ars", "ars": {"elite_count": 2, "heads": 3, "alpha_adapt_every": 1}}}"#;
+
+    /// Several search points and their step size state survive a checkpoint.
+    #[test]
+    fn multi_head_ars_checkpoints_continue_identically() {
+        let mut s = generated_session(ARS_HEADS_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        for _ in 0..3 {
+            s.advance_generation(120).unwrap();
+            s.next_generation().unwrap();
+        }
+        let bytes = s.checkpoint_bytes().unwrap();
+        let mut t = generated_session(ARS_HEADS_OPTIONS);
+        t.restore_checkpoint_bytes(&bytes).unwrap();
+        assert_eq!(t.checkpoint_bytes().unwrap(), bytes);
+        for _ in 0..2 {
+            s.advance_generation(120).unwrap();
+            t.advance_generation(120).unwrap();
+            assert_eq!(t.next_generation().unwrap(), s.next_generation().unwrap());
+            assert_eq!(t.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
+        }
+    }
+
+    /// Format 3 held one search point and no step size state.
+    #[test]
+    fn format_3_ars_checkpoints_still_load() {
+        let mut s = generated_session(ARS_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        let v4 = s.checkpoint_bytes().unwrap();
+        let rng_len = u32::from_le_bytes(v4[8 + 16..8 + 20].try_into().unwrap()) as usize;
+        let size = parameter_count(&[20, 8, 5]);
+        let mut v3 = ARS_V3_MAGIC.to_vec();
+        v3.extend_from_slice(&v4[8..8 + 28]);
+        // Shape and generator, without the head count word.
+        let rng_end = 8 + 4 * (8 + 3) + rng_len;
+        v3.extend_from_slice(&v4[8 + 32..rng_end]);
+        v3.resize(v3.len().next_multiple_of(8), 0);
+        let floats_at = rng_end.next_multiple_of(8);
+        // nu and max weight, the point, then the pool; skip the four step size words.
+        v3.extend_from_slice(&v4[floats_at..floats_at + (2 + size) * 8]);
+        v3.extend_from_slice(&v4[floats_at + (2 + size + 4) * 8..]);
+        let mut t = generated_session(ARS_OPTIONS);
+        t.restore_checkpoint_bytes(&v3).unwrap();
+        assert_eq!(t.checkpoint().unwrap(), s.checkpoint().unwrap());
+        assert_eq!(&t.checkpoint_bytes().unwrap()[..8], b"ALTDCKP4");
+        for _ in 0..2 {
+            s.advance_generation(120).unwrap();
+            t.advance_generation(120).unwrap();
+            assert_eq!(t.next_generation().unwrap(), s.next_generation().unwrap());
         }
     }
 
@@ -1711,7 +1809,7 @@ mod tests {
             .unwrap();
         s.next_generation().unwrap();
         assert_eq!(s.runner.agents.len(), 10);
-        assert_eq!(&s.checkpoint_bytes().unwrap()[..8], b"ALTDCKP3");
+        assert_eq!(&s.checkpoint_bytes().unwrap()[..8], b"ALTDCKP4");
         s.advance_generation(60).unwrap();
         s.next_generation().unwrap();
         s.set_evolution_settings(r#"{"algorithm": "ga", "population": 7}"#)
