@@ -330,7 +330,7 @@ fn start_seeds_the_first_generation_from_the_created_network() {
         ),
         (
             json!({"algorithm": "ars", "ars": {"elite_count": 1, "nu": 0.02, "max_weight": 0.0}}),
-            b"ALTDCKP3",
+            b"ALTDCKP4",
         ),
     ] {
         let options = json!({"population": 6, "seed": 3, "settings": settings});
@@ -1065,7 +1065,7 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     }));
     ars.start_with_shape(&[20, 8, 5]).unwrap();
     let ars_bytes = ars.checkpoint_bytes().unwrap();
-    assert_eq!(&ars_bytes[..8], b"ALTDCKP3");
+    assert_eq!(&ars_bytes[..8], b"ALTDCKP4");
     let mut ars_client = Client::connect(address);
     ars_client.create(&json!({
         "population": 16,
@@ -1097,7 +1097,7 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
         let rng_at = match format {
             1 => 28 + 4 * layers,
             2 => 48 + 4 * (layers + word(6) + word(7)),
-            3 => 36 + 4 * layers,
+            3 => 40 + 4 * layers,
             _ => unreachable!(),
         };
         let old_end = (rng_at + rng_len).next_multiple_of(8);
@@ -1122,9 +1122,10 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     let word = |i: usize| u32::from_le_bytes(bytes[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
     assert!(word(5) > 0, "the checkpoint must contain an elite pool");
     let size = ars.runner.agents[0].network.params.len();
-    let floats_at = (36 + 4 * word(3) + word(4)).next_multiple_of(8);
+    let floats_at = (40 + 4 * word(3) + word(4)).next_multiple_of(8);
     let theta_at = floats_at + 16;
-    let elite_at = theta_at + size * 8;
+    // One head: its parameters, then four words of step size state.
+    let elite_at = theta_at + (size + 4) * 8;
     let score_at = elite_at + size * 8;
     let (reply, _) = ars_client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bytes));
     assert!(reply.get("error").is_none(), "{reply}");
