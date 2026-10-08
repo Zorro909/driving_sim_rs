@@ -70,7 +70,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 | `advance` | `ticks`, `stopWhenInactive` | Executed ticks |
 | `advanceGeneration` | `timeLimitTicks` | Executed ticks |
 | `nextGeneration` | None | `{preservedCount, rewards}` |
-| `setEvolutionSettings` | `json` as an evolution-settings JSON string; `algorithm` is `"ga"` or `"ars"` (see design notes) | `null` |
+| `setEvolutionSettings` | `json` as an evolution-settings JSON string; `algorithm` is `"ga"`, `"ars"` or `"shade"` (see design notes) | `null` |
 | `replaceTrack` | `scene` as a scene JSON string | `null` |
 | `generationSummary` | None | `{bestIndex, bestScore, lapped, active, lapIndex, lapTime}`, optional `averageScore` and `worstScore` |
 | `networkJson` | `index` | Network JSON string |
@@ -79,7 +79,7 @@ A successful reply contains the same `id`, its result in `ok` and the current `s
 
 Call `create` once, then start or restore before advancing. `options.backend` accepts `"cpu"`, the default, or `"hip"`. `options.mathProfile` accepts `"proton"`, `"win10-fma3"` or `"win11-fma3"` and defaults to the server's profile; checkpoints restore only into sessions of the profile they were made with. Other SessionOptions fields retain their regular defaults and unknown fields are rejected. A second successful `create` on the same connection is an error. Unknown operations and malformed JSON return errors while leaving the connection usable.
 
-`start` uses the export's `weights` and `biases` as the seed, matching `train-scratch --init-network` and the browser simulator. GA breeds mutations of that seed; ARS samples around it as its initial search point. Without weights, `start` draws a Xavier seed from `shape` (or `summary.shape`). Without either weights or a shape, use `startWithShape`. Malformed weighted exports return an error before starting and leave the connection usable.
+`start` uses the export's `weights` and `biases` as the seed, matching `train-scratch --init-network` and the browser simulator. GA breeds mutations of that seed; ARS and SHADE sample around it as their initial search point. Without weights, `start` draws a Xavier seed from `shape` (or `summary.shape`). Without either weights or a shape, use `startWithShape`. Malformed weighted exports return an error before starting and leave the connection usable.
 
 ### Binary frames
 

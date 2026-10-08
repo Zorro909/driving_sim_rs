@@ -137,12 +137,50 @@ impl Default for ArsSettings {
     }
 }
 
+/// Parameters of the `"shade"` algorithm (see `training::shade`).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShadeSettings {
+    /// Cells of the success history that `F` and `CR` are drawn around.
+    pub memory_h: usize,
+    /// Fraction of the parents, best first, that `current-to-pbest` aims at.
+    pub p: f64,
+    /// Replaced parents kept for the difference vectors; 0 keeps as many as there are parents.
+    pub archive_size: usize,
+    /// Standard deviation of the noise around the seed in the first population, and around the best car on a re-jump.
+    pub initial_sigma: f64,
+    /// A parent must beat the best car by this fraction of its score to replace it.
+    pub promote_margin_rel: f64,
+    /// Generations without a new best car before the worst parents jump back to it; 0 turns it off.
+    pub rejump_gens: usize,
+    /// Fraction of the parents, worst first, that a re-jump replaces.
+    pub rejump_frac: f64,
+    /// Parameters are clamped to `[-max_weight, max_weight]`; 0 turns it off.
+    pub max_weight: f64,
+}
+
+impl Default for ShadeSettings {
+    fn default() -> Self {
+        ShadeSettings {
+            memory_h: 6,
+            p: 0.1,
+            archive_size: 0,
+            initial_sigma: 0.05,
+            promote_margin_rel: 0.0,
+            rejump_gens: 0,
+            rejump_frac: 0.25,
+            max_weight: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EvolutionSettings {
-    /// `"ga"` (selection, crossover and mutation) or `"ars"`.
+    /// `"ga"` (selection, crossover and mutation), `"ars"` or `"shade"`.
     pub algorithm: String,
     pub ars: ArsSettings,
+    pub shade: ShadeSettings,
     pub population: usize,
     pub selection_algorithm: String,
     pub selection_size: usize,
@@ -160,6 +198,7 @@ impl Default for EvolutionSettings {
         EvolutionSettings {
             algorithm: "ga".into(),
             ars: ArsSettings::default(),
+            shade: ShadeSettings::default(),
             population: 300,
             selection_algorithm: "best".into(),
             selection_size: 3,
@@ -205,6 +244,10 @@ impl EvolutionSettings {
         }
         if let Some(v) = data.get("ars") {
             s.ars = serde_json::from_value(v.clone()).map_err(|e| format!("invalid evolution settings: ars: {e}"))?;
+        }
+        if let Some(v) = data.get("shade") {
+            s.shade =
+                serde_json::from_value(v.clone()).map_err(|e| format!("invalid evolution settings: shade: {e}"))?;
         }
         if let Some(v) = int("population")? {
             s.population = v;
@@ -311,8 +354,22 @@ impl EvolutionSettings {
     pub fn to_json(&self) -> Value {
         let mut value = self.base_json();
         if self.algorithm != "ga" {
-            let ars = &self.ars;
             value["algorithm"] = json!(self.algorithm);
+        }
+        if self.algorithm == "shade" {
+            let shade = &self.shade;
+            value["shade"] = json!({
+                "memory_h": shade.memory_h,
+                "p": shade.p,
+                "archive_size": shade.archive_size,
+                "initial_sigma": shade.initial_sigma,
+                "promote_margin_rel": shade.promote_margin_rel,
+                "rejump_gens": shade.rejump_gens,
+                "rejump_frac": shade.rejump_frac,
+                "max_weight": shade.max_weight,
+            });
+        } else if self.algorithm != "ga" {
+            let ars = &self.ars;
             value["ars"] = json!({
                 "nu": ars.nu,
                 "alpha": ars.alpha,
@@ -330,7 +387,8 @@ impl EvolutionSettings {
         match self.algorithm.as_str() {
             "ga" => Ok(()),
             "ars" => crate::training::ars::validate(&self.ars, self.population),
-            other => Err(format!("unknown algorithm {other:?} (ga or ars)")),
+            "shade" => crate::training::shade::validate(&self.shade, self.population),
+            other => Err(format!("unknown algorithm {other:?} (ga, ars or shade)")),
         }
     }
 
@@ -397,6 +455,24 @@ pub fn reward_values(agents: &[AgentResult], specs: &[RewardSpec]) -> Vec<f64> {
         }
     }
     result
+}
+
+/// The weighted sum of the cars' reward metrics themselves, not their ranks:
+/// scores that stay comparable from one generation to the next. A car without
+/// a metric adds 0, as it ranks lowest in `reward_values`.
+pub fn raw_reward_values(agents: &[AgentResult], specs: &[RewardSpec]) -> Vec<f64> {
+    let total_weight: i64 = specs.iter().map(|s| s.weight.abs()).sum();
+    if total_weight == 0 {
+        return vec![0.0; agents.len()];
+    }
+    agents
+        .iter()
+        .map(|agent| {
+            specs.iter().fold(0.0, |sum, spec| {
+                sum + agent.value(spec).unwrap_or(0.0) * (spec.weight as f64 / total_weight as f64)
+            })
+        })
+        .collect()
 }
 
 /// The adaptive mutation scale; its log is the C runtime's (.NET Math.Log).
