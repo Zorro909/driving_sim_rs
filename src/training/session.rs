@@ -13,6 +13,7 @@ use crate::training::evolution::METRIC_NAMES;
 use crate::training::evolution::{Breeding, EvolutionSettings, CROSSOVERS};
 use crate::training::optimizer::Record;
 use crate::training::pyrandom::PyRandom;
+use crate::training::shade::{Best, Sampling as ShadeSampling, Search, ShadeRecord};
 use crate::training::{Lineage, Mode, SensorLayout, TrainingAgent, TrainingRandom, TrainingRunner, CAR_STATE_STRIDE};
 #[cfg(any(test, all(target_arch = "wasm32", feature = "wasm")))]
 use serde_json::json;
@@ -139,6 +140,8 @@ enum Saved {
     Lineage(Lineage),
     /// After an ARS start or reproduction: the search state that sampled the cars. Saved as format 3.
     Ars(ArsRecord),
+    /// After a SHADE start or reproduction: the search state that sampled the cars. Saved as format 4.
+    Shade(ShadeRecord),
 }
 
 /// Per-generation statistics hosts read instead of the full car states.
@@ -168,6 +171,8 @@ const CHECKPOINT_MAGIC: &[u8; 8] = b"ALTDCKP1";
 const PARENTS_MAGIC: &[u8; 8] = b"ALTDCKP2";
 /// Format 3: the ARS search state a generation was sampled from (`ArsRecord`).
 const ARS_MAGIC: &[u8; 8] = b"ALTDCKP3";
+/// Format 4: the SHADE search state a generation was sampled from (`ShadeRecord`).
+const SHADE_MAGIC: &[u8; 8] = b"ALTDCKP4";
 
 fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
     value
@@ -717,8 +722,23 @@ impl Session {
             saved: match record {
                 Record::Lineage(lineage) => Saved::Lineage(lineage),
                 Record::Ars(ars) => Saved::Ars(ars),
+                Record::Shade(shade) => Saved::Shade(shade),
             },
         });
+    }
+
+    fn restore_shade(&mut self, generation: u64, record: ShadeRecord) -> Result<(), String> {
+        record.validate()?;
+        self.check_math(record.math)?;
+        self.check_shape(&record.shape)?;
+        let (networks, rng, shade) = record.rebuild();
+        let runner = self.runner_mut()?;
+        runner.rng = rng;
+        runner.resume_owned(networks, generation);
+        runner.optimizer = Box::new(shade);
+        self.record(Record::Shade(record));
+        self.networks_changed();
+        Ok(())
     }
 
     fn restore_ars(&mut self, generation: u64, record: ArsRecord) -> Result<(), String> {
@@ -767,7 +787,8 @@ impl Session {
         self.boundary.as_ref().map(|b| (b.generation, b.tick))
     }
 
-    /// The boundary of the current generation in binary: format 3 (see
+    /// The boundary of the current generation in binary: format 4 (see
+    /// `shade_bytes`) after a SHADE start or reproduction, format 3 (see
     /// `ars_bytes`) after an ARS start or reproduction, format 2 (see
     /// `parent_bytes`) after a GA start or reproduction, format 1 (see
     /// `population_bytes`) after restoring a full checkpoint.
@@ -779,6 +800,7 @@ impl Session {
             }
             Saved::Lineage(lineage) => parent_bytes(b.generation, b.tick, lineage),
             Saved::Ars(record) => ars_bytes(b.generation, b.tick, record),
+            Saved::Shade(record) => shade_bytes(b.generation, b.tick, record),
         }
     }
 
@@ -797,6 +819,10 @@ impl Session {
             Some(m) if m == ARS_MAGIC => {
                 let (generation, record) = read_ars(bytes)?;
                 self.restore_ars(generation, record)
+            }
+            Some(m) if m == SHADE_MAGIC => {
+                let (generation, record) = read_shade(bytes)?;
+                self.restore_shade(generation, record)
             }
             _ => Err("invalid binary checkpoint".into()),
         }
@@ -1314,6 +1340,152 @@ fn read_ars(bytes: &[u8]) -> Result<(u64, ArsRecord), String> {
     Ok((generation, record))
 }
 
+/// Format 4, `ALTDCKP4`, little-endian: u32 words generation, tick,
+/// population, layer count L, RNG JSON length R, archive size A, history
+/// cells H, next cell, generations the best car has stalled and flags (bit 0:
+/// the best car has a score); the u32 shape; the RNG JSON; zero padding to a
+/// multiple of 8 bytes; f64 p, max weight and best score; the f64 parameters
+/// of the best car, of each of the population - 1 parents and of each
+/// archived car; the parents' f64 scores, NaN for one not scored yet; then
+/// the H f64 locations of `F` and of `CR`.
+/// Words 0 to 4 sit where formats 1 to 3 have them.
+fn shade_bytes(generation: u64, tick: u64, r: &ShadeRecord) -> Result<Vec<u8>, String> {
+    let rng = rng_json(&r.rng, r.math).to_string();
+    let (s, m) = (&r.search, &r.sampling);
+    let best = s.best.as_ref().ok_or("the search has no best car")?;
+    let header = [
+        generation,
+        tick,
+        m.population as u64,
+        r.shape.len() as u64,
+        rng.len() as u64,
+        s.archive.len() as u64,
+        s.f_history.len() as u64,
+        s.next_cell as u64,
+        best.stalled as u64,
+        u64::from(best.score.is_some()),
+    ];
+    let size = best.params.len();
+    let mut out = Vec::with_capacity(
+        8 + 4 * (header.len() + r.shape.len())
+            + rng.len()
+            + 32
+            + (1 + s.parents.len() + s.archive.len()) * size * 8
+            + (s.parents.len() + 2 * s.f_history.len()) * 8,
+    );
+    out.extend_from_slice(SHADE_MAGIC);
+    for n in header.into_iter().chain(r.shape.iter().map(|&n| n as u64)) {
+        out.extend_from_slice(
+            &u32::try_from(n)
+                .map_err(|_| "checkpoint field exceeds u32")?
+                .to_le_bytes(),
+        );
+    }
+    out.extend_from_slice(rng.as_bytes());
+    out.resize(out.len().next_multiple_of(8), 0);
+    let floats = [m.p, m.max_weight, best.score.unwrap_or(0.0)];
+    let scores = s.scores.iter().map(|x| x.unwrap_or(f64::NAN));
+    let cars = std::iter::once(&best.params).chain(&s.parents).chain(&s.archive);
+    for x in floats
+        .into_iter()
+        .chain(cars.flatten().copied())
+        .chain(scores)
+        .chain(s.f_history.iter().copied())
+        .chain(s.cr_history.iter().copied())
+    {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Reads format 4 (see `shade_bytes`) and validates it: `(generation, record)`.
+fn read_shade(bytes: &[u8]) -> Result<(u64, ShadeRecord), String> {
+    let invalid = || "invalid binary checkpoint".to_string();
+    let word = |i: usize| -> Result<usize, String> {
+        let at = i.checked_mul(4).and_then(|n| n.checked_add(8)).ok_or_else(invalid)?;
+        bytes
+            .get(at..at.checked_add(4).ok_or_else(invalid)?)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()) as usize)
+            .ok_or_else(invalid)
+    };
+    let (generation, population, layers, rng_len) = (word(0)? as u64, word(2)?, word(3)?, word(4)?);
+    let (archive_len, cells, next_cell, stalled, flags) = (word(5)?, word(6)?, word(7)?, word(8)?, word(9)?);
+    if flags > 1 {
+        return Err(invalid());
+    }
+    let rng_at = 10usize
+        .checked_add(layers)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_add(8))
+        .ok_or_else(invalid)?;
+    // Bound every count by the bytes present before allocating for it.
+    let rng_end = rng_at
+        .checked_add(rng_len)
+        .filter(|&end| end <= bytes.len())
+        .ok_or_else(invalid)?;
+    let shape: Vec<usize> = (0..layers).map(|i| word(10 + i)).collect::<Result<_, _>>()?;
+    if shape.len() < 2 || shape.contains(&0) {
+        return Err(invalid());
+    }
+    let rng: Value =
+        serde_json::from_slice(&bytes[rng_at..rng_end]).map_err(|e| format!("invalid checkpoint RNG: {e}"))?;
+    if rng.is_null() {
+        return Err("the checkpoint has no random state".into());
+    }
+    let floats_at = rng_end.next_multiple_of(8);
+    let size = checked_parameter_count(&shape).ok_or_else(invalid)?;
+    let parents = population.checked_sub(1).ok_or_else(invalid)?;
+    let data = bytes.get(floats_at..).ok_or_else(invalid)?;
+    // p, max weight and best score, the cars, the parents' scores and the history.
+    let expected = 1usize
+        .checked_add(parents)
+        .and_then(|n| n.checked_add(archive_len))
+        .and_then(|n| n.checked_mul(size))
+        .and_then(|n| n.checked_add(parents))
+        .and_then(|n| n.checked_add(cells.checked_mul(2)?))
+        .and_then(|n| n.checked_add(3))
+        .and_then(|n| n.checked_mul(8));
+    if expected != Some(data.len()) {
+        return Err(format!(
+            "the checkpoint holds {} bytes of search state, a shape of {shape:?} with {parents} parents needs a different amount",
+            data.len()
+        ));
+    }
+    let mut floats = data.as_chunks::<8>().0.iter().map(|p| f64::from_le_bytes(*p));
+    let mut take = |count: usize| -> Vec<f64> { floats.by_ref().take(count).collect() };
+    let (p, max_weight, best_score) = (take(1)[0], take(1)[0], take(1)[0]);
+    let best = take(size);
+    let parent_params: Vec<Vec<f64>> = (0..parents).map(|_| take(size)).collect();
+    let archive = (0..archive_len).map(|_| take(size)).collect();
+    let scores = take(parents).into_iter().map(|x| (!x.is_nan()).then_some(x)).collect();
+    let (f_history, cr_history) = (take(cells), take(cells));
+    let record = ShadeRecord {
+        shape,
+        search: Search {
+            parents: parent_params,
+            scores,
+            archive,
+            f_history,
+            cr_history,
+            next_cell,
+            best: Some(Best {
+                params: best,
+                score: (flags == 1).then_some(best_score),
+                stalled,
+            }),
+        },
+        sampling: ShadeSampling {
+            population,
+            p,
+            max_weight,
+        },
+        rng: TrainingRandom::try_from_json(&rng)?,
+        math: rng_math(&rng)?,
+    };
+    record.validate()?;
+    Ok((generation, record))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,6 +1867,94 @@ mod tests {
         small[8 + 2 * 4..8 + 3 * 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(t.restore_checkpoint_bytes(&small).is_err());
         t.restore_checkpoint_bytes(&good).unwrap();
+    }
+
+    const SHADE_OPTIONS: &str =
+        r#"{"population": 16, "seed": 4, "settings": {"algorithm": "shade", "shade": {"memory_h": 3}}}"#;
+
+    /// A SHADE checkpoint restores every network, the generator and the search
+    /// state: both sessions then produce the same later generations.
+    #[test]
+    fn shade_checkpoints_rebuild_the_generation_exactly() {
+        let mut s = generated_session(SHADE_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        let first = s.checkpoint_bytes().unwrap();
+        assert_eq!(&first[..8], b"ALTDCKP4");
+        let mut t = generated_session(SHADE_OPTIONS);
+        t.restore_checkpoint_bytes(&first).unwrap();
+        assert_eq!(t.checkpoint().unwrap(), s.checkpoint().unwrap(), "generation 0");
+        assert_eq!(t.checkpoint_bytes().unwrap(), first);
+
+        for _ in 0..3 {
+            s.advance_generation(120).unwrap();
+            let (preserved, rewards) = s.next_generation().unwrap();
+            assert_eq!(rewards.len(), 16);
+            assert_eq!(preserved, 1);
+        }
+        let bytes = s.checkpoint_bytes().unwrap();
+        assert_eq!(&bytes[..8], b"ALTDCKP4");
+        let json = s.checkpoint().unwrap();
+        let mut u = generated_session(SHADE_OPTIONS);
+        u.restore_checkpoint_bytes(&bytes).unwrap();
+        assert_eq!(u.runner.generation, 3);
+        assert_eq!(u.checkpoint().unwrap(), json, "every network and the generator");
+        assert_eq!(u.checkpoint_bytes().unwrap(), bytes);
+        for _ in 0..2 {
+            s.advance_generation(120).unwrap();
+            u.advance_generation(120).unwrap();
+            assert_eq!(state_bits(&mut u), state_bits(&mut s));
+            assert_eq!(u.next_generation().unwrap(), s.next_generation().unwrap());
+            assert_eq!(u.checkpoint_bytes().unwrap(), s.checkpoint_bytes().unwrap());
+        }
+    }
+
+    #[test]
+    fn malformed_shade_checkpoints_are_rejected() {
+        let mut s = generated_session(SHADE_OPTIONS);
+        s.start_with_shape(&[20, 8, 5]).unwrap();
+        s.advance_generation(60).unwrap();
+        s.next_generation().unwrap();
+        let good = s.checkpoint_bytes().unwrap();
+        let mut t = generated_session(SHADE_OPTIONS);
+        for len in [0, 8, 20, 48, good.len() / 2, good.len() - 1] {
+            assert!(t.restore_checkpoint_bytes(&good[..len]).is_err(), "{len} bytes");
+        }
+        let mut extended = good.clone();
+        extended.extend_from_slice(&[0; 8]);
+        assert!(t.restore_checkpoint_bytes(&extended).is_err());
+        // A population too small for any parents (word 2 is the population).
+        let mut small = good.clone();
+        small[8 + 2 * 4..8 + 3 * 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(t.restore_checkpoint_bytes(&small).is_err());
+        // A history cell the next success would overwrite that does not exist (word 7).
+        let mut cell = good.clone();
+        cell[8 + 7 * 4..8 + 8 * 4].copy_from_slice(&9u32.to_le_bytes());
+        assert!(t.restore_checkpoint_bytes(&cell).is_err());
+        t.restore_checkpoint_bytes(&good).unwrap();
+    }
+
+    #[test]
+    fn shade_settings_are_validated() {
+        let bad = |options: &str| {
+            Session::new(
+                &generated_scene(),
+                &load("assets/networks/formula.json"),
+                &load("assets/models/formula.json"),
+                SessionOptions::from_json(options).unwrap(),
+            )
+            .err()
+        };
+        assert!(bad(r#"{"population": 4, "settings": {"algorithm": "shade"}}"#)
+            .unwrap()
+            .contains("population"));
+        assert!(bad(r#"{"population": 16, "settings": {"algorithm": "shade", "shade": {"p": 0}}}"#).is_some());
+        assert!(bad(r#"{"population": 16, "settings": {"algorithm": "shade", "shade": {"bogus": 1}}}"#).is_some());
+        let mut s = generated_session(SHADE_OPTIONS);
+        assert!(s
+            .set_evolution_settings(r#"{"algorithm": "shade", "population": 4}"#)
+            .is_err());
+        s.set_evolution_settings(r#"{"algorithm": "shade", "population": 20}"#)
+            .unwrap();
     }
 
     /// The algorithm can change between generations; a new one continues from

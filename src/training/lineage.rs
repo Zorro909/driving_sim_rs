@@ -72,6 +72,20 @@ impl TrainingRandom {
             Self::Game(r) => *out = r.normal_array(count, 1.0, math),
         }
     }
+    /// The next uniform variate in `[0, 1)`.
+    pub(crate) fn unit(&mut self) -> f64 {
+        match self {
+            Self::Python(r) => r.random(),
+            Self::Game(r) => r.random(),
+        }
+    }
+    /// The next uniform integer below `bound`, which must be positive.
+    pub(crate) fn below(&mut self, bound: usize) -> usize {
+        match self {
+            Self::Python(r) => r.randrange(bound),
+            Self::Game(r) => r.randrange(bound),
+        }
+    }
     pub fn xavier(&mut self, shape: &[usize], math: MathProfile) -> Network {
         match self {
             Self::Python(r) => Network::xavier(shape, r),
