@@ -1,6 +1,6 @@
 [package]
 name = "altd_sim"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "CPU game-fidelity simulator and trainer for AI Learns To Drive"
 license = "MIT"
