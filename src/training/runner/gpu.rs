@@ -104,8 +104,10 @@ impl TrainingRunner {
         if self.stats_phase != 0 {
             return Err("GPU advance_generation needs statistics phase 0".into());
         }
-        let bound = (time_limit_ticks / 6).saturating_add(2).saturating_mul(6);
-        Ok((bound.saturating_sub(self.tick), time_limit_ticks as f64 / 60.0))
+        Ok((
+            super::remaining_generation_ticks(time_limit_ticks, self.tick),
+            time_limit_ticks as f64 / 60.0,
+        ))
     }
 
     /// `advance_window` on the GPU: agents and cars are uploaded, advanced in

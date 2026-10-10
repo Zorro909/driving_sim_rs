@@ -100,3 +100,66 @@ Before a HIP session's first driving window after a start or restore, it compare
 HIP cars and agents stay on the device between windows; an `advance` or `advanceGeneration` reply reads back only the active car count. `generationSummary`, `carStates`, turnover, restores and track replacement read the population back into the CPU runner first; checkpoints are saved from the generation boundary and need no readback. Turnover breeds on CPU to retain the parent records in format-2 checkpoints, then uploads the new networks and cars on the next HIP window. HIP libraries without `altd_gpu_sim_active_count` read the population back after every window. Checkpoints can move between native CPU, HIP and WASM sessions. Native and WASM training have known last-bit differences, so continued training may diverge after switching engines.
 
 HIP errors after startup verification return request errors without retrying. The client should stop the run and resume from its last saved checkpoint. A closed connection loses the server's session; reconnect, create a new session and restore a saved checkpoint. Release builds use `panic = "abort"`, so a panic terminates the server and closes every connection.
+
+## Server workload admission (proposed policy)
+
+Server requests are admitted before expensive Session reconstruction. These limits
+apply to `serve`; the native CLI's operator-selected runs retain their current limits.
+
+| Resource | Ceiling |
+| --- | --- |
+| Each embedded JSON document | 16 MiB |
+| Binary checkpoint payload | 32 MiB |
+| Population, selection, preservation and ARS elite counts | 32,768 |
+| Reward terms | 14 (the current metric count) |
+| Network architecture | 2–20 layers, 1–64 nodes/layer, 16,384 parameters/network |
+| Population × parameters | 1,048,576 parameters |
+| Solver iterations / reported contacts / wheels | 64 / 64 / 16 |
+| Input/output/sensor counts | 64 each |
+| Path points / walls / collision shapes / tiles | 16,384 / 2,048 / 512 / 4,096 |
+| Shape vertices / curve controls / BSP segments | 64 / 64 / 2,048 |
+| Sparse tile table | 65,536 cells |
+| Spatial grid cells / estimated grid entries | 262,144 / 16,777,216 |
+| Geometry coordinate magnitude | 1,000,000 |
+| One simulation window | 3,600 ticks and 500 million work units |
+
+Admission charges partial evolution-settings updates using the same population
+default as execution, retaining the live population's high-water reservation.
+Generation limits are absolute thresholds: the budget charges the remaining
+statistics-aligned execution bound, not the configured threshold itself. At tick
+zero a 3,600-tick threshold has a conservative 3,612-tick bound and requires
+shorter advance windows; at tick 12 its remaining bound is 3,600.
+
+Geometry estimates include effective BSP/raycaster presence, 64-unit ray-grid
+cells, and (when HIP is requested or active) padded nearest-path and baked-curve
+candidate grids. The GPU estimate conservatively charges every segment in every
+padded cell; it may reject tracks whose actual sparse lists would fit. Initial
+HIP requests are charged before device preparation even if execution later falls
+back to CPU. All three binary checkpoint formats enforce the separate embedded RNG
+JSON document limit before reconstruction. These remain admission estimates,
+not a measured allocator or RSS guarantee.
+
+A window's work units are `population × ticks × (parameters + 32 × solver_iterations + 1)`.
+Long generations can use repeated `advance` requests with shorter windows. These
+units are a policy proxy, not a prediction of elapsed time.
+
+Each session reserves conservative admission units for population state, parameter
+copies and spatial tables. One session may reserve at most 512 MiB, and all
+connections to the same server share a 1 GiB reservation pool. These are **not hard
+allocator or RSS limits**. Upper bounds are combined: a maximum population and a
+maximum architecture cannot necessarily be used together. Reservations include
+both the old and proposed state during replacement, release on failure/disconnect,
+and retain the largest admitted population until disconnect so pending settings
+cannot undercharge a still-live population. ARS checkpoint admission also charges
+the retained elite pool and search point when they outnumber the sampled cars.
+
+One request executes at a time across the server's sessions. Contending clients get
+`server busy; retry this request later`, rather than accumulating queued compute.
+A rejected request preserves the existing Session. Existing origin/path/host checks
+and per-connection request ordering continue to apply.
+
+**Review gate:** these defaults require maintainer review against representative
+large production tracks and populations. Admission estimates do not provide a
+wall-clock interruption deadline, preempt device kernels, or measure every heap
+allocation. This policy should accompany the separate transport, connection-lifetime,
+and fallible-input patches; it does not replace those controls.

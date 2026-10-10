@@ -1145,3 +1145,271 @@ fn malformed_nested_inputs_return_errors_without_aborting_cli() {
     assert!(stop.0.try_wait().unwrap().is_none());
     assert_eq!(Client::connect(address).hello["protocol"], 1);
 }
+
+#[test]
+fn partial_settings_are_charged_before_mutation() {
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":4, "backend":"cpu"}));
+    client.call("startWithShape", json!({"shape":[20,64,64,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("setEvolutionSettings", json!({"json":"{\"mutation_rate\":0.1}"}))
+        .contains("budget"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    client.call("nextGeneration", Value::Null);
+    assert_eq!(
+        client.call_raw("generationSummary", Value::Null, None).0["state"]["population"],
+        4
+    );
+
+    let mut small = Client::connect(start());
+    small.create(&json!({"population":4, "backend":"cpu"}));
+    small.call("startWithShape", json!({"shape":[20,8,5]}));
+    small.call("setEvolutionSettings", json!({"json":"{\"mutation_rate\":0.1}"}));
+    small.call("nextGeneration", Value::Null);
+    assert_eq!(
+        small.call_raw("generationSummary", Value::Null, None).0["state"]["population"],
+        300
+    );
+    assert!(small
+        .error("advance", json!({"ticks":3600,"stopWhenInactive":false}))
+        .contains("work budget"));
+}
+
+#[test]
+fn generation_admission_uses_remaining_window() {
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":4,"backend":"cpu"}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("advanceGeneration", json!({"timeLimitTicks":3600}))
+        .contains("work budget"));
+    assert!(client
+        .error("advanceGeneration", json!({"timeLimitTicks":u64::MAX}))
+        .contains("work budget"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    client.call("advance", json!({"ticks":12,"stopWhenInactive":false}));
+    client.call("advanceGeneration", json!({"timeLimitTicks":3600}));
+}
+
+#[test]
+fn hip_grid_budget_is_checked_before_backend_preparation() {
+    let mut client = Client::connect(start());
+    let mut scene = generated::scene("formula", 0);
+    let path: Vec<_> = (0..16384).map(|i| json!([i % 2, 0])).collect();
+    scene["track"]["path"] = json!(path);
+    let request = json!({
+        "scene":scene.to_string(),"network":generated::network("formula").to_string(),
+        "model":generated::model("formula").to_string(),"options":{"population":4,"backend":"hip"}
+    });
+    assert!(client.error("create", request).contains("grid-entry"));
+    // No session was installed; a normal CPU request still succeeds.
+    client.create(&json!({"population":4,"backend":"cpu"}));
+}
+
+#[test]
+fn rejected_geometry_and_rng_headers_preserve_checkpoint() {
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":4,"backend":"cpu"}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    let mut scene = generated::scene("formula", 0);
+    scene["track"] = json!({"path":[[0,0],[4000,4000]],
+        "walls":vec![json!([[0,0],[1,1]]);2048],"raycaster_present":null,"polygons":[{"points":[]}]});
+    assert!(client
+        .error("replaceTrack", json!({"scene":scene.to_string()}))
+        .contains("grid-entry"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    for magic in [b"ALTDCKP1", b"ALTDCKP2"] {
+        let mut bytes = before.clone();
+        bytes[..8].copy_from_slice(magic);
+        bytes[24..28].copy_from_slice(&(16 * 1024 * 1024 + 1u32).to_le_bytes());
+        let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bytes));
+        assert!(reply["error"].as_str().unwrap().contains("RNG JSON"));
+        assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    }
+}
+
+#[test]
+fn nonzero_statistics_phase_stays_fallible() {
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":4,"backend":"cpu","statsPhase":1}));
+    client.call("startWithShape", json!({"shape":[20,5]}));
+    assert!(client
+        .error("advanceGeneration", json!({"timeLimitTicks":12}))
+        .contains("statistics phase"));
+    client.call("advance", json!({"ticks":6,"stopWhenInactive":false}));
+}
+
+#[test]
+fn resource_limits_reject_work_without_losing_the_session() {
+    let address = start();
+    let mut client = Client::connect(address);
+    let request = json!({
+        "scene":generated::scene("formula",0).to_string(),
+        "network":generated::network("formula").to_string(),
+        "model":generated::model("formula").to_string(),
+        "options":{"population":u64::MAX},
+    });
+    assert!(client.error("create", request).contains("population"));
+    client.create(&json!({"population":4}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("startWithShape", json!({"shape":[20,u32::MAX,5]}))
+        .contains("server"));
+    assert!(client
+        .error("advance", json!({"ticks":u64::MAX,"stopWhenInactive":false}))
+        .contains("budget"));
+    assert!(client
+        .error("advanceGeneration", json!({"timeLimitTicks":u64::MAX}))
+        .contains("budget"));
+    assert!(client
+        .error(
+            "setEvolutionSettings",
+            json!({"json":json!({"population":u64::MAX}).to_string()})
+        )
+        .contains("population"));
+    let mut bad = generated::scene("formula", 0);
+    bad["track"]["tiles"] = json!([
+        {"coords":[0,0],"surface":"asphalt"},
+        {"coords":[1000000,1000000],"surface":"asphalt"}
+    ]);
+    assert!(client
+        .error("replaceTrack", json!({"scene":bad.to_string()}))
+        .contains("budget"));
+    let mut header = before.clone();
+    header[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&header));
+    assert!(reply["error"].as_str().unwrap().contains("population"));
+    assert!(client
+        .error(
+            "restoreCheckpointJson",
+            json!({"json":json!({"shape":[20,u64::MAX,5]}).to_string()})
+        )
+        .contains("32-bit"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    assert_eq!(client.call("advance", json!({"ticks":1,"stopWhenInactive":false})), 1);
+    assert_eq!(Client::connect(address).hello["protocol"], 1);
+}
+
+#[test]
+fn ars_checkpoint_admission_restores_and_continues_exactly() {
+    let options = json!({"population":16,"seed":4,"settings":{"algorithm":"ars","ars":{"elite_count":2}}});
+    let mut source = direct(&options);
+    source.start_with_shape(&[20, 8, 5]).unwrap();
+    source.advance(12, false).unwrap();
+    source.next_generation().unwrap();
+    let saved = source.checkpoint_bytes().unwrap();
+    assert_eq!(&saved[..8], b"ALTDCKP3");
+    assert_eq!(u32::from_le_bytes(saved[28..32].try_into().unwrap()), 2);
+
+    let mut client = Client::connect(start());
+    client.create(&options);
+    let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&saved));
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_eq!(saved, client.call_raw("checkpointBytes", Value::Null, None).1);
+    for (word, value) in [(2, 32_769u32), (5, 32_769), (6, 32_769), (4, 16 * 1024 * 1024 + 1)] {
+        let mut bad = saved.clone();
+        bad[8 + word * 4..12 + word * 4].copy_from_slice(&value.to_le_bytes());
+        let (reply, _) = client.call_raw("restoreCheckpointBytes", Value::Null, Some(&bad));
+        assert!(reply["error"].as_str().is_some(), "{reply}");
+        assert_eq!(saved, client.call_raw("checkpointBytes", Value::Null, None).1);
+    }
+    source.advance(12, false).unwrap();
+    client.call("advance", json!({"ticks":12,"stopWhenInactive":false}));
+    assert_eq!(
+        f64s(&client.call_raw("carStates", Value::Null, None).1),
+        bits(&source.car_states())
+    );
+    source.next_generation().unwrap();
+    client.call("nextGeneration", Value::Null);
+    assert_eq!(
+        source.checkpoint_bytes().unwrap(),
+        client.call_raw("checkpointBytes", Value::Null, None).1
+    );
+}
+
+#[test]
+fn retained_ars_settings_are_limited_before_session_mutation() {
+    let oversized = json!({"algorithm":"ga","ars":{"elite_count":32_769}});
+    let mut client = Client::connect(start());
+    let request = json!({
+        "scene":generated::scene("formula",0).to_string(),
+        "network":generated::network("formula").to_string(),
+        "model":generated::model("formula").to_string(),
+        "options":{"population":16,"settings":oversized},
+    });
+    assert!(client.error("create", request).contains("elite_count"));
+    client.create(&json!({"population":16}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    assert!(client
+        .error("setEvolutionSettings", json!({"json":oversized.to_string()}))
+        .contains("elite_count"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+    client.call(
+        "setEvolutionSettings",
+        json!({"json":json!({"algorithm":"ars","population":16,"ars":{"elite_count":2}}).to_string()}),
+    );
+    client.call("nextGeneration", Value::Null);
+    assert_eq!(
+        &client.call_raw("checkpointBytes", Value::Null, None).1[..8],
+        b"ALTDCKP3"
+    );
+}
+
+#[test]
+fn population_override_is_applied_before_server_admission() {
+    for underlying in [0, 32_769] {
+        let options = json!({
+            "population":16,
+            "settings":{"algorithm":"ars","population":underlying,"ars":{"elite_count":2}},
+        });
+        let mut client = Client::connect(start());
+        client.create(&options);
+        client.call("startWithShape", json!({"shape":[20,8,5]}));
+        assert_eq!(
+            client.call_raw("generationSummary", Value::Null, None).0["state"]["population"],
+            16
+        );
+    }
+    let mut client = Client::connect(start());
+    for options in [
+        json!({"population":32_769,"settings":{"population":4}}),
+        json!({"population":16,"settings":{"population":0,"selection_size":32_769}}),
+        json!({"population":16,"settings":{"population":0,"ars":{"elite_count":32_769}}}),
+    ] {
+        let request = json!({
+            "scene":generated::scene("formula",0).to_string(),
+            "network":generated::network("formula").to_string(),
+            "model":generated::model("formula").to_string(),
+            "options":options,
+        });
+        assert!(client.error("create", request).contains("limit"));
+    }
+    client.create(&json!({"population":16}));
+}
+
+#[test]
+fn all_known_reward_metrics_fit_server_admission() {
+    let mut rewards: Vec<_> = altd_sim::training::evolution::METRIC_NAMES
+        .iter()
+        .map(|metric| json!({"metric":metric,"weight":1,"type":"default"}))
+        .collect();
+    let mut client = Client::connect(start());
+    client.create(&json!({"population":16,"settings":{"rewards":rewards}}));
+    client.call("startWithShape", json!({"shape":[20,8,5]}));
+    client.call("advance", json!({"ticks":6,"stopWhenInactive":false}));
+    client.call("nextGeneration", Value::Null);
+    let before = client.call_raw("checkpointBytes", Value::Null, None).1;
+    rewards.push(rewards[0].clone());
+    assert!(client
+        .error(
+            "setEvolutionSettings",
+            json!({"json":json!({"population":16,"rewards":rewards}).to_string()})
+        )
+        .contains("too many server reward terms"));
+    assert_eq!(before, client.call_raw("checkpointBytes", Value::Null, None).1);
+}

@@ -428,7 +428,7 @@ pub struct World {
 }
 
 pub const PATH_WINDOW: f64 = 450.0;
-const RAY_CELL: f64 = 64.0;
+pub(crate) const RAY_CELL: f64 = 64.0;
 const RAY_PAD: f64 = 1e-3;
 
 #[derive(Clone, Copy, Debug)]

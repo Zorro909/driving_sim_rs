@@ -121,8 +121,10 @@ impl TrainingRunner {
             self.stats_phase, 0,
             "fresh game generations use reset statistics counters"
         );
-        let bound = (time_limit_ticks / 6 + 2) * 6;
-        (bound.saturating_sub(self.tick), time_limit_ticks as f64 / 60.0)
+        (
+            super::remaining_generation_ticks(time_limit_ticks, self.tick),
+            time_limit_ticks as f64 / 60.0,
+        )
     }
 
     pub(super) fn advance_window(&mut self, ticks: u64, stop_when_inactive: bool, time_limit: Option<f64>) -> u64 {
