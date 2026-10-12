@@ -23,7 +23,7 @@ pub(crate) struct RayNode {
 
 pub(crate) type Vec2 = [f32; 2];
 
-pub(crate) const MAX_WHEELS: usize = 4;
+pub(crate) const MAX_WHEELS: usize = 5;
 pub(crate) const MAX_PAIRS: usize = 16;
 pub(crate) const MAX_CONTACTS: usize = 32;
 pub(crate) const MAX_SHAPE_POINTS: usize = 16;
