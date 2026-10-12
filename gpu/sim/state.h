@@ -6,7 +6,7 @@
 
 namespace altd {
 
-constexpr int MAX_WHEELS = 4;
+constexpr int MAX_WHEELS = 5;
 constexpr int MAX_PAIRS = 16;        // broad-phase pairs per car
 constexpr int MAX_CONTACTS = 32;     // retained pair contacts per car (two per pair)
 constexpr int MAX_SHAPE_POINTS = 16; // points per physics shape
