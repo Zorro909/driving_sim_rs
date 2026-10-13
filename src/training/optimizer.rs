@@ -4,10 +4,11 @@
 //! `Optimizer`, which returns the networks of the next population. The GA
 //! (`Ga`) breeds from the scored cars alone. Others, such as `Ars`, keep a
 //! search state of their own between generations and use the cars only for
-//! their scores.
+//! their scores; `Shade` is another.
 
 use super::ars::{Ars, ArsRecord};
 use super::lineage::reproduce_traced;
+use super::shade::{Shade, ShadeRecord};
 use super::{Lineage, TrainingRandom};
 use crate::math::profile::MathProfile;
 use crate::nn::network::Network;
@@ -22,6 +23,8 @@ pub(crate) enum Record {
     Lineage(Lineage),
     /// The search state ARS sampled from.
     Ars(ArsRecord),
+    /// The search state SHADE sampled from.
+    Shade(ShadeRecord),
 }
 
 impl Record {
@@ -29,7 +32,7 @@ impl Record {
     pub(crate) fn into_lineage(self) -> Option<Lineage> {
         match self {
             Record::Lineage(lineage) => Some(lineage),
-            Record::Ars(_) => None,
+            Record::Ars(_) | Record::Shade(_) => None,
         }
     }
 }
@@ -86,6 +89,7 @@ pub(crate) fn create(algorithm: &str) -> Box<dyn Optimizer> {
     match algorithm {
         "ga" => Box::new(Ga),
         "ars" => Box::<Ars>::default(),
+        "shade" => Box::<Shade>::default(),
         other => panic!("unknown algorithm: {other}"),
     }
 }

@@ -20,6 +20,7 @@ mod lineage;
 mod optimizer;
 mod runner;
 mod sensors;
+mod shade;
 mod stats;
 
 pub use agent::TrainingAgent;
