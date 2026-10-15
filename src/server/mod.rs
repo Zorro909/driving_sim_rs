@@ -2,6 +2,7 @@
 //! Lab uses as a remote simulation (docs/server.md). Each connection gets a
 //! thread and one `Session`; requests run in order.
 
+mod budget;
 pub mod dispatch;
 pub mod protocol;
 
@@ -103,6 +104,7 @@ pub struct Server {
     listener: TcpListener,
     origins: Arc<Vec<String>>,
     math: MathProfile,
+    budget: Arc<budget::Pool>,
 }
 
 /// HIP availability as `hello` reports it.
@@ -162,6 +164,7 @@ impl Server {
             listener,
             origins: Arc::new(origins),
             math: config.math_profile.unwrap_or_else(MathProfile::detect),
+            budget: Arc::new(budget::Pool::default()),
         })
     }
 
@@ -196,11 +199,12 @@ impl Server {
                 continue;
             };
             let (origins, math) = (self.origins.clone(), self.math);
+            let budget = self.budget.clone();
             if let Err(error) = std::thread::Builder::new()
                 .name("altd-sim-connection".into())
                 .spawn(move || {
                     let _permit = permit;
-                    serve_connection(stream, &origins, port, math);
+                    serve_connection(stream, &origins, port, math, budget);
                 })
             {
                 // Dropping the failed spawn's closure releases its permit/socket.
@@ -211,7 +215,7 @@ impl Server {
     }
 }
 
-fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: MathProfile) {
+fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: MathProfile, budget: Arc<budget::Pool>) {
     let peer = stream.peer_addr().map_or_else(|_| "?".into(), |a| a.to_string());
     let _ = stream.set_nodelay(true);
     if stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).is_err()
@@ -251,7 +255,7 @@ fn serve_connection(stream: TcpStream, origins: &[String], port: u16, math: Math
     };
     socket.get_mut().handshake_deadline = None;
     eprintln!("altd-sim serve: connected {peer} (origin {origin})");
-    match converse(&mut socket, math) {
+    match converse(&mut socket, math, budget) {
         Ok(()) => eprintln!("altd-sim serve: {peer} disconnected"),
         Err(e) => eprintln!("altd-sim serve: {peer} closed: {e}"),
     }
@@ -266,8 +270,12 @@ fn send(socket: &mut WebSocket<ConnectionStream>, reply: Reply) -> tungstenite::
 
 /// Greets the client and answers its requests until it closes. The
 /// session drops with the connection.
-fn converse(socket: &mut WebSocket<ConnectionStream>, math: MathProfile) -> Result<(), String> {
-    let mut connection = Connection::new(math);
+fn converse(
+    socket: &mut WebSocket<ConnectionStream>,
+    math: MathProfile,
+    budget: Arc<budget::Pool>,
+) -> Result<(), String> {
+    let mut connection = Connection::with_budget(math, budget);
     socket
         .send(Message::text(hello(math).to_string()))
         .map_err(|e| e.to_string())?;
@@ -335,7 +343,9 @@ mod connection_limit_tests {
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let stream = listener.accept().unwrap().0;
-        let worker = std::thread::spawn(move || serve_connection(stream, &[], 0, MathProfile::Proton));
+        let worker = std::thread::spawn(move || {
+            serve_connection(stream, &[], 0, MathProfile::Proton, Arc::new(budget::Pool::default()))
+        });
         let mut byte = [0];
         assert_eq!(client.read(&mut byte).unwrap(), 0);
         worker.join().unwrap();

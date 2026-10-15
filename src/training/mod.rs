@@ -19,6 +19,8 @@ mod ars;
 mod lineage;
 mod optimizer;
 mod runner;
+#[cfg(all(feature = "server", not(target_arch = "wasm32")))]
+pub(crate) use runner::remaining_generation_ticks;
 mod sensors;
 mod stats;
 

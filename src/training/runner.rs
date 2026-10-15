@@ -18,6 +18,15 @@ mod schedule;
 
 pub use gpu::export_state_into;
 
+/// Conservative statistics-aligned remaining window, shared by scheduling
+/// and server admission. Saturation keeps untrusted limits overflow-safe.
+pub(crate) fn remaining_generation_ticks(limit: u64, current_tick: u64) -> u64 {
+    (limit / 6)
+        .saturating_add(2)
+        .saturating_mul(6)
+        .saturating_sub(current_tick)
+}
+
 /// Which output slot of `Controls` each network output feeds.
 #[derive(Clone, Copy, Debug)]
 enum ControlSlot {
